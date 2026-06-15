@@ -37,6 +37,11 @@ from store.db import (
     initialise_db,
 )
 from store.writer import write_review_action
+from engine.verdict_rules import (
+    get_active_flag_codes,
+    get_db_confidence_for_verdict,
+    get_db_verdict_for_flags,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -72,6 +77,78 @@ app.add_middleware(
 )
 
 _VALID_ACTIONS = {"CONFIRM", "FALSE_POSITIVE", "NEEDS_FINAL_REVIEW", "CLEAR"}
+
+
+def _is_final_approver(reviewer_id: str | None) -> bool:
+    if not reviewer_id:
+        return False
+    parts = reviewer_id.strip().lower().replace(".", " ").replace("_", " ").split()
+    return "amogh" in parts
+
+
+def _flag_severity_for_code(category_code: str) -> str:
+    verdict = get_db_verdict_for_flags([category_code])
+    return {
+        "SEVERE": "HIGH",
+        "FLAGGED": "MEDIUM",
+        "CLEAN": "LOW",
+    }.get(verdict, "MEDIUM")
+
+
+def _review_status_for_verdict(verdict: str) -> str:
+    return "REVIEWED" if verdict == "CLEAN" else "NEEDS_FINAL_REVIEW"
+
+
+def _recompute_session_verdict(
+    conn,
+    session_id: str,
+    *,
+    reviewer_id: str | None = None,
+    note: str = "",
+) -> tuple[str, str]:
+    """
+    Recompute the stored verdict from active LLM/REGEX/MANUAL/AMENDED flags.
+    DISMISSED marker rows suppress their matching original category_code.
+    """
+    rows = [
+        dict(row)
+        for row in conn.execute(
+            "SELECT category_code, detection_layer FROM flags WHERE session_id = ?",
+            (session_id,),
+        ).fetchall()
+    ]
+    active_codes = get_active_flag_codes(rows)
+    verdict = get_db_verdict_for_flags(active_codes)
+    review_status = _review_status_for_verdict(verdict)
+
+    if reviewer_id:
+        conn.execute(
+            """UPDATE sessions
+               SET overall_verdict = ?,
+                   confidence_score = ?,
+                   review_status = ?,
+                   reviewer_id = ?,
+                   reviewer_note = ?,
+                   reviewed_at = datetime('now')
+               WHERE session_id = ?""",
+            (
+                verdict,
+                get_db_confidence_for_verdict(verdict),
+                review_status,
+                reviewer_id,
+                note,
+                session_id,
+            ),
+        )
+    else:
+        conn.execute(
+            """UPDATE sessions
+               SET overall_verdict = ?,
+                   confidence_score = ?
+               WHERE session_id = ?""",
+            (verdict, get_db_confidence_for_verdict(verdict), session_id),
+        )
+    return verdict, review_status
 
 
 # ---------------------------------------------------------------------------
@@ -117,6 +194,11 @@ class LockRequest(BaseModel):
 class SubmitRequest(BaseModel):
     reviewer_id: str
     note: str = ""
+
+
+class BulkFinalApproveRequest(BaseModel):
+    reviewer_id: str
+    session_ids: list[str]
 
 
 # ---------------------------------------------------------------------------
@@ -238,11 +320,13 @@ def sessions(
     verdict:  Optional[str] = None,
     status:   Optional[str] = None,
     language: Optional[str] = None,
+    reviewer: Optional[str] = None,
 ):
     rows = fetch_sessions(
         verdict_filter=verdict,
         status_filter=status,
         language_filter=language,
+        reviewer_filter=reviewer,
     )
 
     # Enrich each row with flag counts (total, LLM/REGEX, manual) — excludes DISMISSED
@@ -366,10 +450,23 @@ def submit_review(session_id: str, body: ReviewRequest):
         write_review_action(
             session_id, body.flag_id, body.action, body.reviewer_id, body.note
         )
+        with get_connection() as conn:
+            row = conn.execute(
+                """SELECT overall_verdict, review_status, reviewer_id
+                   FROM sessions
+                   WHERE session_id = ?""",
+                (session_id,),
+            ).fetchone()
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 
-    return {"success": True, "session_id": session_id}
+    return {
+        "success": True,
+        "session_id": session_id,
+        "overall_verdict": row["overall_verdict"] if row else None,
+        "review_status": row["review_status"] if row else None,
+        "reviewer_id": row["reviewer_id"] if row else body.reviewer_id,
+    }
 
 
 @app.post("/sessions/{session_id}/manual-flag")
@@ -377,18 +474,20 @@ def manual_flag(session_id: str, body: ManualFlagRequest):
     """Insert a reviewer-created flag and record it in the review log."""
     conn = get_connection()
     try:
+        flag_severity = _flag_severity_for_code(body.category_code)
         with conn:
             cur = conn.execute(
                 """
                 INSERT INTO flags
                     (session_id, turn_id, category_code, detection_layer, severity,
                      confidence_score, reasoning, false_positive_risk, pattern_matched)
-                VALUES (?, ?, ?, 'MANUAL', 'MEDIUM', 1.0, ?, 'LOW', ?)
+                VALUES (?, ?, ?, 'MANUAL', ?, 1.0, ?, 'LOW', ?)
                 """,
                 (
                     session_id,
                     body.turn_id,
                     body.category_code,
+                    flag_severity,
                     body.note,
                     body.message_text[:200],
                 ),
@@ -401,7 +500,19 @@ def manual_flag(session_id: str, body: ManualFlagRequest):
                 """,
                 (session_id, flag_id, body.reviewer_id, body.note),
             )
-        return {"success": True, "flag_id": flag_id}
+            new_verdict, review_status = _recompute_session_verdict(
+                conn,
+                session_id,
+                reviewer_id=body.reviewer_id,
+                note=body.note or "Manual flag added",
+            )
+        return {
+            "success": True,
+            "flag_id": flag_id,
+            "overall_verdict": new_verdict,
+            "review_status": review_status,
+            "reviewer_id": body.reviewer_id,
+        }
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
     finally:
@@ -418,6 +529,98 @@ def lock_session_endpoint(session_id: str, body: LockRequest):
     try:
         lock_session(session_id, body.reviewer_id)
         return {"success": True, "locked_by": body.reviewer_id}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/sessions/{session_id}/final-approve")
+def final_approve_session(session_id: str, body: LockRequest):
+    if not _is_final_approver(body.reviewer_id):
+        raise HTTPException(
+            status_code=403,
+            detail="Only Amogh can final approve sessions.",
+        )
+    try:
+        lock_session(session_id, body.reviewer_id)
+        with get_connection() as conn:
+            conn.execute(
+                """INSERT INTO review_log
+                   (session_id, flag_id, action, reviewer_id, note)
+                   VALUES (?, NULL, 'FINAL_APPROVE', ?, ?)""",
+                (session_id, body.reviewer_id, "Final approved and locked"),
+            )
+        with get_connection() as conn:
+            row = conn.execute(
+                """SELECT session_id, overall_verdict, review_status,
+                          reviewer_id, locked_by, locked_at
+                   FROM sessions
+                   WHERE session_id = ?""",
+                (session_id,),
+            ).fetchone()
+        return {
+            "success": True,
+            "session": dict(row) if row else None,
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/sessions/final-approve-bulk")
+def final_approve_bulk(body: BulkFinalApproveRequest):
+    if not _is_final_approver(body.reviewer_id):
+        raise HTTPException(
+            status_code=403,
+            detail="Only Amogh can final approve sessions.",
+        )
+
+    session_ids = [str(s).strip() for s in body.session_ids if str(s).strip()]
+    if not session_ids:
+        return {"success": True, "approved_count": 0, "session_ids": []}
+
+    eligible_statuses = {
+        "REVIEWED", "CONFIRMED", "OVERRIDDEN", "NEEDS_FINAL_REVIEW",
+    }
+    placeholders = ", ".join("?" for _ in session_ids)
+
+    try:
+        with get_connection() as conn:
+            rows = conn.execute(
+                f"""SELECT session_id, review_status
+                    FROM sessions
+                    WHERE session_id IN ({placeholders})""",
+                session_ids,
+            ).fetchall()
+            approved_ids = [
+                row["session_id"]
+                for row in rows
+                if row["review_status"] in eligible_statuses
+            ]
+
+            if approved_ids:
+                approved_placeholders = ", ".join("?" for _ in approved_ids)
+                conn.execute(
+                    f"""UPDATE sessions
+                        SET review_status = 'LOCKED',
+                            locked_by = ?,
+                            locked_at = datetime('now')
+                        WHERE session_id IN ({approved_placeholders})""",
+                    [body.reviewer_id, *approved_ids],
+                )
+                conn.executemany(
+                    """INSERT INTO review_log
+                       (session_id, flag_id, action, reviewer_id, note)
+                       VALUES (?, NULL, 'FINAL_APPROVE', ?, ?)""",
+                    [
+                        (sid, body.reviewer_id, "Bulk final approved and locked")
+                        for sid in approved_ids
+                    ],
+                )
+
+        return {
+            "success": True,
+            "approved_count": len(approved_ids),
+            "session_ids": approved_ids,
+        }
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 
@@ -489,7 +692,19 @@ def amend_flag(flag_id: int, body: AmendFlagRequest):
                     original["pattern_matched"] if original["pattern_matched"] else f"Amended by {body.reviewer_id}",
                 ),
             )
-        return {"success": True, "new_flag_id": cur.lastrowid}
+            new_verdict, review_status = _recompute_session_verdict(
+                conn,
+                original["session_id"],
+                reviewer_id=body.reviewer_id,
+                note=body.reasoning or "Flag amended",
+            )
+        return {
+            "success": True,
+            "new_flag_id": cur.lastrowid,
+            "overall_verdict": new_verdict,
+            "review_status": review_status,
+            "reviewer_id": body.reviewer_id,
+        }
     except HTTPException:
         raise
     except Exception as exc:
@@ -553,7 +768,18 @@ def dismiss_flag(flag_id: int, body: DismissFlagRequest):
                 """,
                 (original["session_id"], flag_id, body.reviewer_id, body.note),
             )
-        return {"success": True}
+            new_verdict, review_status = _recompute_session_verdict(
+                conn,
+                original["session_id"],
+                reviewer_id=body.reviewer_id,
+                note=body.note or "Flag dismissed",
+            )
+        return {
+            "success": True,
+            "overall_verdict": new_verdict,
+            "review_status": review_status,
+            "reviewer_id": body.reviewer_id,
+        }
     except HTTPException:
         raise
     except Exception as exc:

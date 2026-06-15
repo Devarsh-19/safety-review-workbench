@@ -194,14 +194,14 @@ class DataLoader:
         for session_id, group in df.groupby("session_id", sort=False):
             session_id = str(session_id).strip()
 
-            # Skip sessions that have nothing to classify
-            n_classifiable = (
-                group["is_automated_message"]
-                .apply(self._normalise_automated)
-                .eq(0)
-                .sum()
-            )
-            if n_classifiable == 0:
+            # Filter out automated messages (is_automated_message = 1)
+            # Only proceed with real messages (is_automated_message = 0)
+            group = group.copy()
+            group["_is_auto"] = group["is_automated_message"].apply(self._normalise_automated)
+            group = group[group["_is_auto"] == 0].drop(columns=["_is_auto"])
+
+            # Skip sessions that have no real messages after filtering
+            if group.empty:
                 continue
 
             # Dedup exact-duplicate rows (export artefacts)

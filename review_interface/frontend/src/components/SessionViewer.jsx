@@ -315,6 +315,22 @@ export default function SessionViewer({ sessionId, sessionList, reviewerName, re
   const noteValid = !noteRequired || note.trim().length >= 10;
   const submitDisabled = !selectedAction || !noteValid || submitting;
 
+  const applySessionMeta = useCallback((res) => {
+    if (!res?.overall_verdict && !res?.review_status) return;
+    setData((prev) => {
+      if (!prev?.session) return prev;
+      return {
+        ...prev,
+        session: {
+          ...prev.session,
+          ...(res.overall_verdict ? { overall_verdict: res.overall_verdict } : {}),
+          ...(res.review_status ? { review_status: res.review_status } : {}),
+          ...(res.reviewer_id || reviewerName ? { reviewer_id: res.reviewer_id || reviewerName } : {}),
+        },
+      };
+    });
+  }, [reviewerName]);
+
   // ── Review submit ─────────────────────────────────────────────────────────
   const handleSubmit = useCallback(async () => {
     if (submitting || !selectedAction) return;
@@ -324,27 +340,29 @@ export default function SessionViewer({ sessionId, sessionList, reviewerName, re
     }
     setSubmitting(true);
     try {
-      await submitReview(sessionId, selectedAction, reviewerName, note, null);
+      const res = await submitReview(sessionId, selectedAction, reviewerName, note, null);
+      applySessionMeta(res);
       setToast('Review saved');
       setTimeout(() => { setToast(null); onBack(); }, 2500);
     } catch (err) {
       setToast(`Error: ${err.message}`);
       setSubmitting(false);
     }
-  }, [submitting, selectedAction, noteValid, sessionId, reviewerName, note, onBack]);
+  }, [submitting, selectedAction, noteValid, sessionId, reviewerName, note, onBack, applySessionMeta]);
 
   // ── Manual flag submit ────────────────────────────────────────────────────
   const handleManualFlag = async (turn, turnIdx) => {
     if (flaggingProgress) return;
     setFlaggingProgress(true);
     try {
-      await manualFlag(sessionId, {
+      const res = await manualFlag(sessionId, {
         turn_id:       null,
         category_code: popoverCategory,
         note:          popoverNote,
         reviewer_id:   reviewerName,
         message_text:  (turn.message_text || '').slice(0, 200),
       });
+      applySessionMeta(res);
       const updated = await getSessionFlags(sessionId);
       setFlags(updated);
       setOpenFlagPopover(null);
@@ -392,6 +410,8 @@ export default function SessionViewer({ sessionId, sessionList, reviewerName, re
         body: JSON.stringify({ ...editForm, reviewer_id: reviewerName }),
       });
       if (!res.ok) throw new Error('amend failed');
+      const payload = await res.json();
+      applySessionMeta(payload);
       const updated = await getSessionFlags(sessionId);
       setFlags(updated);
       setEditingFlagId(null);
@@ -414,6 +434,8 @@ export default function SessionViewer({ sessionId, sessionList, reviewerName, re
         body: JSON.stringify({ reviewer_id: reviewerName, note: dismissNote }),
       });
       if (!res.ok) throw new Error('dismiss failed');
+      const payload = await res.json();
+      applySessionMeta(payload);
       const updated = await getSessionFlags(sessionId);
       setFlags(updated);
       setDismissingFlagId(null);

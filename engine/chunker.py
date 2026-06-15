@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import re
 import sys
+import importlib.util
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -366,7 +367,6 @@ class SessionChunker:
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    import importlib.util
 
     def load_mod(name, path):
         spec = importlib.util.spec_from_file_location(name, path)

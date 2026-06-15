@@ -56,6 +56,7 @@ def fetch_sessions(
     verdict_filter: str = None,
     status_filter: str = None,
     language_filter: str = None,
+    reviewer_filter: str = None,
 ) -> list[dict]:
     query = "SELECT * FROM sessions WHERE 1=1"
     params: list = []
@@ -69,6 +70,9 @@ def fetch_sessions(
     if language_filter:
         query += " AND language_detected = ?"
         params.append(language_filter)
+    if reviewer_filter:
+        query += " AND reviewer_id = ?"
+        params.append(reviewer_filter)
 
     with get_connection() as conn:
         rows = conn.execute(query, params).fetchall()
@@ -128,14 +132,26 @@ def update_review_status(
             f"Invalid action '{action}'. Valid actions: {valid_actions}"
         )
     new_status = _ACTION_STATUS_MAP[action]
-    query = """
-        UPDATE sessions
-        SET review_status = ?,
-            reviewer_id   = ?,
-            reviewer_note = ?,
-            reviewed_at   = datetime('now')
-        WHERE session_id = ?
-    """
+    if action == "CLEAR":
+        query = """
+            UPDATE sessions
+            SET review_status = ?,
+                overall_verdict = 'CLEAN',
+                confidence_score = 0.0,
+                reviewer_id   = ?,
+                reviewer_note = ?,
+                reviewed_at   = datetime('now')
+            WHERE session_id = ?
+        """
+    else:
+        query = """
+            UPDATE sessions
+            SET review_status = ?,
+                reviewer_id   = ?,
+                reviewer_note = ?,
+                reviewed_at   = datetime('now')
+            WHERE session_id = ?
+        """
     with get_connection() as conn:
         conn.execute(query, (new_status, reviewer_id, note, session_id))
 

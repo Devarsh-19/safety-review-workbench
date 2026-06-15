@@ -5,7 +5,10 @@ import Footer from './Footer';
 import VerdictBadge from './VerdictBadge';
 import StatusBadge from './StatusBadge';
 import LoadingSpinner from './LoadingSpinner';
-import { getSessions, getStats, submitReview, getReviewerStats, exportCsv, getViolationStats } from '../api';
+import {
+  getSessions, getStats, submitReview, getReviewerStats, exportCsv,
+  getViolationStats, finalApproveSession, finalApproveSessions,
+} from '../api';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -67,6 +70,7 @@ export default function SessionQueue({ reviewerName, reviewerRole, onSelectSessi
   const [loading,       setLoading]       = useState(true);
   const [verdictFilter, setVerdictFilter] = useState('');
   const [statusFilter,  setStatusFilter]  = useState('');
+  const [reviewerFilter,setReviewerFilter]= useState('');
   const [hoveredRow,    setHoveredRow]    = useState(null);
 
   // ── Client-side filter state ───────────────────────────────────────────
@@ -76,6 +80,8 @@ export default function SessionQueue({ reviewerName, reviewerRole, onSelectSessi
 
   // ── Action state ───────────────────────────────────────────────────────
   const [clearingSession, setClearingSession] = useState(null); // Feature 4
+  const [approvingSession,setApprovingSession]= useState(null);
+  const [approvingAll,    setApprovingAll]    = useState(false);
   const [exporting,       setExporting]       = useState(false);// Feature 5
 
   // ── Team progress state ────────────────────────────────────────────────
@@ -104,15 +110,21 @@ export default function SessionQueue({ reviewerName, reviewerRole, onSelectSessi
 
   // ── Data fetching ──────────────────────────────────────────────────────
 
+  const isFinalApprover = reviewerName.trim().toLowerCase().split(/\s+/).includes('amogh');
+
   const fetchAll = useCallback(() => {
     return Promise.all([
-      getSessions({ verdict: verdictFilter || undefined, status: statusFilter || undefined }),
+      getSessions({
+        verdict: verdictFilter || undefined,
+        status: statusFilter || undefined,
+        reviewer: reviewerFilter || undefined,
+      }),
       getStats(),
     ]).then(([sess, st]) => {
       setSessions(sess);
       setStats(st);
     }).catch(() => {});
-  }, [verdictFilter, statusFilter]);
+  }, [verdictFilter, statusFilter, reviewerFilter]);
 
   useEffect(() => {
     setLoading(true);
@@ -124,10 +136,20 @@ export default function SessionQueue({ reviewerName, reviewerRole, onSelectSessi
     return () => clearInterval(id);
   }, [fetchAll]);
 
+  useEffect(() => {
+    getReviewerStats()
+      .then((data) => setReviewerStats(data))
+      .catch(() => {});
+  }, []);
+
   // ── Derived values ─────────────────────────────────────────────────────
 
-  const clearFilters = () => { setVerdictFilter(''); setStatusFilter(''); };
-  const hasFilters   = verdictFilter || statusFilter;
+  const clearFilters = () => {
+    setVerdictFilter('');
+    setStatusFilter('');
+    setReviewerFilter('');
+  };
+  const hasFilters   = verdictFilter || statusFilter || reviewerFilter;
 
   const severe           = stats?.count_severe              ?? 0;
   const flagged          = stats?.count_flagged             ?? 0;
@@ -180,6 +202,11 @@ export default function SessionQueue({ reviewerName, reviewerRole, onSelectSessi
     });
   }
 
+  const eligibleFinalApprovalStatuses = ['REVIEWED', 'CONFIRMED', 'OVERRIDDEN', 'NEEDS_FINAL_REVIEW'];
+  const finalApprovalSessionIds = displayedSessions
+    .filter((s) => eligibleFinalApprovalStatuses.includes(s.review_status))
+    .map((s) => s.session_id);
+
   const noResults     = displayedSessions.length === 0;
   const emptyMessage  = sessions.length === 0
     ? 'No sessions match the selected filters.'
@@ -201,16 +228,33 @@ export default function SessionQueue({ reviewerName, reviewerRole, onSelectSessi
     }
   };
 
-  const handleLockSession = async (sid) => {
-    if (!window.confirm('Lock this session? This will freeze all flags and the review decision.')) return;
+  const handleFinalApprove = async (sid) => {
+    if (!isFinalApprover || approvingSession) return;
+    if (!window.confirm('Final approve this session? This will lock it.')) return;
+    setApprovingSession(sid);
     try {
-      await fetch(`/sessions/${sid}/lock`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ reviewer_id: reviewerName }),
-      });
+      await finalApproveSession(sid, reviewerName);
       await fetchAll();
     } catch (_) {}
+    finally {
+      setApprovingSession(null);
+    }
+  };
+
+  const handleFinalApproveAll = async () => {
+    if (!isFinalApprover || approvingAll || finalApprovalSessionIds.length === 0) return;
+    const ok = window.confirm(
+      `Final approve and lock ${finalApprovalSessionIds.length} visible session(s)?`
+    );
+    if (!ok) return;
+    setApprovingAll(true);
+    try {
+      await finalApproveSessions(finalApprovalSessionIds, reviewerName);
+      await fetchAll();
+    } catch (_) {}
+    finally {
+      setApprovingAll(false);
+    }
   };
 
   // ── Feature 5 — Export CSV ─────────────────────────────────────────────
@@ -345,6 +389,15 @@ export default function SessionQueue({ reviewerName, reviewerRole, onSelectSessi
           </select>
 
           {/* Feature 8 — Confidence slider */}
+          {isFinalApprover && (
+            <select style={selectSt} value={reviewerFilter} onChange={(e) => setReviewerFilter(e.target.value)}>
+              <option value="">All Team Members</option>
+              {reviewerStats.map((r) => (
+                <option key={r.reviewer_id} value={r.reviewer_id}>{r.reviewer_id}</option>
+              ))}
+            </select>
+          )}
+
           <span style={{ fontSize: 11, fontFamily: MONO, color: C.textSecondary, whiteSpace: 'nowrap' }}>
             Min confidence:
           </span>
@@ -378,6 +431,25 @@ export default function SessionQueue({ reviewerName, reviewerRole, onSelectSessi
           >
             Team Progress {showProgress ? '▴' : '▾'}
           </button>
+
+          {isFinalApprover && (
+            <button
+              disabled={approvingAll || finalApprovalSessionIds.length === 0}
+              onClick={handleFinalApproveAll}
+              style={{
+                fontSize: 12,
+                padding: '5px 12px',
+                background: finalApprovalSessionIds.length === 0 ? C.bgStatsrow : C.accent,
+                border: finalApprovalSessionIds.length === 0 ? `1px solid ${C.border}` : 'none',
+                borderRadius: 4,
+                color: finalApprovalSessionIds.length === 0 ? C.textMuted : '#FFFFFF',
+                cursor: approvingAll || finalApprovalSessionIds.length === 0 ? 'not-allowed' : 'pointer',
+                opacity: approvingAll ? 0.7 : 1,
+              }}
+            >
+              {approvingAll ? 'Approving...' : `Approve All (${finalApprovalSessionIds.length})`}
+            </button>
+          )}
 
           <button
             onClick={handleExport}
@@ -737,11 +809,15 @@ export default function SessionQueue({ reviewerName, reviewerRole, onSelectSessi
                         <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                           {reviewerRole === 'L2' && ['SUBMITTED_FOR_REVIEW', 'NEEDS_FINAL_REVIEW', 'REVIEWED', 'CONFIRMED', 'OVERRIDDEN'].includes(s.review_status) && (
                             <button
-                              onClick={() => handleLockSession(s.session_id)}
+                              disabled={approvingSession === s.session_id}
+                              onClick={() => handleFinalApprove(s.session_id)}
                               style={{
                                 padding: '5px 10px', fontSize: 11, background: '#FFFFFF',
                                 border: `1px solid ${C.accent}`, borderRadius: 4,
-                                color: C.accent, cursor: 'pointer', whiteSpace: 'nowrap',
+                                color: C.accent,
+                                cursor: approvingSession === s.session_id ? 'not-allowed' : 'pointer',
+                                whiteSpace: 'nowrap',
+                                opacity: approvingSession === s.session_id ? 0.65 : 1,
                               }}
                             >
                               Lock 🔒
@@ -776,6 +852,7 @@ export default function SessionQueue({ reviewerName, reviewerRole, onSelectSessi
                           setMinConfidence(0);
                           setVerdictFilter('');
                           setStatusFilter('');
+                          setReviewerFilter('');
                           setColFilterId('');
                           setColFilterLang('');
                           setColFilterType('');

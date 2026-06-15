@@ -13,6 +13,8 @@ Pipeline per session:
 """
 
 from __future__ import annotations
+from google import genai
+from google.genai import types
 
 import json
 import logging
@@ -444,13 +446,16 @@ class LLMClassifier:
 
     def _call_gemini_api(self, prompt: str) -> str:
         """Send prompt to Google Gemini API and return response text."""
-        import google.generativeai as genai
 
-        genai.configure(api_key=os.environ.get("GOOGLE_API_KEY"))
-        model = genai.GenerativeModel(GEMINI_MODEL)
-        response = model.generate_content(
-            prompt,
-            generation_config={"temperature": 0.1, "max_output_tokens": 1024},
+        client = genai.Client(api_key=os.environ.get("GOOGLE_API_KEY"))
+
+        response = client.models.generate_content(
+        model="gemini-3.5-flash", # Use your preferred model
+        contents=prompt,
+        config=types.GenerateContentConfig(
+            temperature=0.1,
+            max_output_tokens=1024
+        )
         )
         return response.text
 

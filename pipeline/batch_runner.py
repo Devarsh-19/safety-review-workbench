@@ -12,6 +12,10 @@ from engine.language_detector    import LanguageDetector   # noqa: F401 — used
 from engine.classifier           import LLMClassifier
 from engine.aggregator           import SessionAggregator
 from engine.consultant_analyser  import ConsultantAnalyser
+from engine.verdict_rules        import (
+    get_db_confidence_for_verdict,
+    get_db_verdict_for_flags,
+)
 
 from store.db     import initialise_db, DB_PATH
 from store.writer import write_session_complete
@@ -106,6 +110,19 @@ def _build_session_data(session: dict, result, classification) -> dict:
         "astrotalk_flag_category": None,
         "astrotalk_severity":      None,
     }
+
+
+def _apply_flag_verdict(session_data: dict, flags: list[dict]) -> dict:
+    """
+    Apply canonical flag-combination verdict rules to a session row.
+    This is shared policy logic for automated LLM/REGEX outputs.
+    """
+    verdict = get_db_verdict_for_flags(
+        f.get("category_code") for f in flags
+    )
+    session_data["overall_verdict"] = verdict
+    session_data["confidence_score"] = get_db_confidence_for_verdict(verdict)
+    return session_data
 
 
 def _build_turns(messages: list[dict]) -> list[dict]:
@@ -208,11 +225,15 @@ def process_session(
         # Verdict aggregation
         result = aggregator.aggregate(classification, profile, human_label=None)
 
+        flags = _build_flags(classification, profile)
+        session_data = _build_session_data(session, result, classification)
+        session_data = _apply_flag_verdict(session_data, flags)
+
         return {
             "session_id":   session_id,
-            "session_data": _build_session_data(session, result, classification),
+            "session_data": session_data,
             "turns":        _build_turns(session.get("messages", [])),
-            "flags":        _build_flags(classification, profile),
+            "flags":        flags,
         }
 
     except Exception as exc:
@@ -406,14 +427,21 @@ def ingest_only(data_path: str) -> None:
                 from store.writer import write_flags
                 write_flags(session_id, all_auto_flags)
                 from store.db import get_connection
+                verdict = get_db_verdict_for_flags(
+                    f.get("category_code") for f in all_auto_flags
+                )
                 with get_connection() as conn:
                     conn.execute(
                         """UPDATE sessions
-                           SET overall_verdict = 'FLAGGED',
-                               confidence_score = 0.92
+                           SET overall_verdict = ?,
+                               confidence_score = ?
                            WHERE session_id = ?
                            AND overall_verdict = 'UNPROCESSED'""",
-                        (session_id,),
+                        (
+                            verdict,
+                            get_db_confidence_for_verdict(verdict),
+                            session_id,
+                        ),
                     )
 
             processed_ids.add(session_id)
