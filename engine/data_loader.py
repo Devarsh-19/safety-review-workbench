@@ -137,6 +137,182 @@ class DataLoader:
         self._print_summary()
         return self._sessions
 
+    def stream_sessions(
+        self,
+        chunk_size: int = 50_000,
+    ):
+        """
+        Memory-efficient alternative to load_sessions() for large files.
+
+        Reads the CSV in chunks of `chunk_size` rows. Rows belonging to
+        the same session_id are buffered across chunks and yielded as a
+        complete session dict once no more rows for that session appear
+        in the current chunk.
+
+        Yields session dicts one at a time — the caller never holds the
+        full dataset in memory.
+
+        NOTE: sessions whose rows are spread non-contiguously across the
+        file (i.e. rows for session A appear in chunk 1, other sessions
+        in chunk 2, then session A again in chunk 3) will be split into
+        two separate session objects. This is rare in practice for
+        time-ordered exports but callers should be aware.
+        """
+        csv_files: list[Path] = (
+            sorted(self.path.glob("*.csv")) if self.path.is_dir() else [self.path]
+        )
+
+        n_sessions = 0
+        n_messages = 0
+        n_dupes    = 0
+
+        for csv_file in csv_files:
+            print(f"[DataLoader] Streaming: {csv_file.name}")
+            # Buffer: session_id -> list of row dicts
+            buffer: dict[str, list[dict]] = {}
+
+            reader = pd.read_csv(
+                csv_file,
+                dtype=str,
+                keep_default_na=False,
+                chunksize=chunk_size,
+            )
+
+            for chunk in reader:
+                # Track which session_ids appear in this chunk
+                chunk_ids: set[str] = set()
+
+                for _, row in chunk.iterrows():
+                    sid = str(row.get("session_id", "")).strip()
+                    if not sid:
+                        continue
+                    chunk_ids.add(sid)
+                    buffer.setdefault(sid, []).append(row.to_dict())
+
+                # Yield sessions that did NOT appear in this chunk —
+                # they are complete (no more rows expected).
+                completed = [sid for sid in list(buffer) if sid not in chunk_ids]
+                for sid in completed:
+                    rows = buffer.pop(sid)
+                    session = self._build_session_from_rows(sid, rows)
+                    if session is not None:
+                        n_sessions += 1
+                        n_messages += len(session["messages"])
+                        yield session
+
+            # Yield whatever remains after the last chunk
+            for sid, rows in buffer.items():
+                session = self._build_session_from_rows(sid, rows)
+                if session is not None:
+                    n_sessions += 1
+                    n_messages += len(session["messages"])
+                    yield session
+            buffer.clear()
+
+        print(
+            f"\n[DataLoader] Streamed {n_sessions} sessions, "
+            f"{n_messages} messages ({n_dupes} dupes removed)"
+        )
+
+    def _build_session_from_rows(
+        self,
+        session_id: str,
+        rows: list[dict],
+    ) -> dict[str, Any] | None:
+        """
+        Build a single session dict from a list of raw row dicts for one
+        session_id. Mirrors _build_sessions() logic for a single group.
+        """
+        import pandas as pd  # already imported at module level, but explicit here
+
+        group = pd.DataFrame(rows)
+
+        # Normalise is_automated and filter out automated messages
+        group["_is_auto"] = group["is_automated_message"].apply(self._normalise_automated)
+        group = group[group["_is_auto"] == 0].drop(columns=["_is_auto"])
+        if group.empty:
+            return None
+
+        group, removed = self._dedup_messages(group)
+        self._duplicates_removed += removed
+
+        timestamps   = group["sent_at_ist"].apply(self._parse_timestamp)
+        valid_ts     = [t for t in timestamps if t is not None]
+        session_start = min(valid_ts) if valid_ts else None
+        session_end   = max(valid_ts) if valid_ts else None
+        session_date  = session_start[:10] if session_start else None
+        duration      = self._calc_duration(session_start, session_end)
+
+        astrotalk_flagged = (
+            1 if (group["flagged"].str.strip().str.lower() == "yes").any() else 0
+        )
+
+        def first_val(col: str) -> str | None:
+            if col not in group.columns:
+                return None
+            nonempty = group[col].str.strip()
+            nonempty = nonempty[nonempty != ""]
+            return nonempty.iloc[0] if not nonempty.empty else None
+
+        month_val = first_val("month")
+        try:
+            month_name = MONTH_MAP.get(int(month_val), str(month_val))
+        except Exception:
+            month_name = str(month_val) if month_val else None
+
+        language_code, language_detected = self._parse_language(first_val("language"))
+
+        raw_lang        = first_val("language")
+        lang_str        = str(raw_lang).strip() if raw_lang else ''
+        lang_codes      = [c.strip() for c in lang_str.split(',') if c.strip()]
+        is_multilingual = len(lang_codes) > 1
+
+        messages: list[dict[str, Any]] = []
+        for _, row in group.iterrows():
+            turn_id = self._parse_turn_id(
+                row.get("message_seq", ""), len(messages) + 1
+            )
+            if is_multilingual:
+                try:
+                    result        = self.language_detector.detect(str(row.get("message_text", "")))
+                    turn_language = result.primary_language if result else language_detected
+                except Exception:
+                    turn_language = language_detected
+            else:
+                turn_language = language_detected
+
+            messages.append({
+                "turn_id":           turn_id,
+                "speaker":           self._normalise_speaker(row.get("sender", "")),
+                "message_text":      str(row.get("message_text", "")).strip(),
+                "is_automated":      self._normalise_automated(row.get("is_automated_message", 0)),
+                "timestamp":         self._parse_timestamp(
+                                         row.get("sent_at_ist")
+                                         or row.get("sent_at")
+                                         or row.get("timestamp")
+                                     ),
+                "language_detected": turn_language,
+                "has_link":          int(row.get("has_link", 0) or 0),
+            })
+
+        return {
+            "session_id":              session_id,
+            "astrologer_id":           first_val("astrologer_id") if "astrologer_id" in group.columns else None,
+            "user_id":                 None,
+            "session_date":            session_date,
+            "month":                   month_name,
+            "language_code":           language_code,
+            "language_detected":       language_detected,
+            "session_type":            "chat",
+            "astrotalk_flagged":       astrotalk_flagged,
+            "astrotalk_flag_category": None,
+            "astrotalk_severity":      None,
+            "session_start":           session_start,
+            "session_end":             session_end,
+            "duration_minutes":        duration,
+            "messages":                messages,
+        }
+
     # ------------------------------------------------------------------
     # Private — I/O
     # ------------------------------------------------------------------

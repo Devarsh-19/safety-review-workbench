@@ -373,19 +373,13 @@ def ingest_only(data_path: str) -> None:
 
     initialise_db()
 
-    loader   = DataLoader(data_path)
-    sessions = loader.load_sessions()
-
+    loader        = DataLoader(data_path)
     processed_ids = load_checkpoint()
-    pending = [s for s in sessions if str(s["session_id"]) not in processed_ids]
-    print(
-        f"Sessions: total={len(sessions)}  "
-        f"already_ingested={len(processed_ids)}  "
-        f"to_ingest={len(pending)}"
-    )
+    print(f"[ingest] Already ingested: {len(processed_ids)} sessions — resuming from checkpoint.")
 
     analyser  = ConsultantAnalyser()
     n_written = 0
+    n_skipped = 0
 
     BATCH_SIZE = 500
 
@@ -464,8 +458,12 @@ def ingest_only(data_path: str) -> None:
     batch: list[dict] = []
     conn = get_connection()
     try:
-        for session in pending:
+        for session in loader.stream_sessions():
             session_id = str(session["session_id"])
+
+            if session_id in processed_ids:
+                n_skipped += 1
+                continue
 
             session_data = {
                 "session_id":              session_id,
@@ -549,7 +547,10 @@ def ingest_only(data_path: str) -> None:
 
     print()
     print("=" * 60)
-    print(f"  Ingestion complete. {n_written} sessions written to {DB_PATH}")
+    print(f"  Ingestion complete.")
+    print(f"  Written  : {n_written} sessions")
+    print(f"  Skipped  : {n_skipped} (already in checkpoint)")
+    print(f"  Database : {DB_PATH}")
     print("=" * 60)
 
 
