@@ -13,6 +13,9 @@ _SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 def get_connection() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA synchronous = NORMAL")
+    conn.execute("PRAGMA cache_size = -32000")  # 32 MB page cache
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
 

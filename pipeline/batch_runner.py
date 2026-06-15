@@ -17,7 +17,9 @@ from engine.verdict_rules        import (
     get_db_verdict_for_flags,
 )
 
-from store.db     import initialise_db, DB_PATH
+import sqlite3
+
+from store.db     import initialise_db, DB_PATH, get_connection
 from store.writer import write_session_complete
 
 from pipeline.logger     import get_logger, log_session_result, log_batch_summary, log_error
@@ -344,6 +346,82 @@ def ingest_only(data_path: str) -> None:
     analyser  = ConsultantAnalyser()
     n_written = 0
 
+    BATCH_SIZE = 500
+
+    def _flush_batch(batch: list[dict], conn: sqlite3.Connection) -> None:
+        """Write a batch of prepared session dicts in a single transaction."""
+        s_keys = list(batch[0]["session_data"].keys())
+        s_cols = ", ".join(s_keys)
+        s_ph   = ", ".join("?" * len(s_keys))
+
+        with conn:
+            conn.executemany(
+                f"INSERT OR REPLACE INTO sessions ({s_cols}) VALUES ({s_ph})",
+                [list(item["session_data"].values()) for item in batch],
+            )
+            conn.executemany(
+                """INSERT OR REPLACE INTO turns
+                       (session_id, turn_id, speaker, message_text, timestamp,
+                        language_detected, is_automated)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                [
+                    (
+                        item["session_id"],
+                        t["turn_id"],
+                        t["speaker"],
+                        t["message_text"],
+                        t.get("timestamp"),
+                        t.get("language_detected"),
+                        t.get("is_automated", 0),
+                    )
+                    for item in batch
+                    for t in item["turns"]
+                ],
+            )
+            flag_rows = [
+                (
+                    item["session_id"],
+                    f.get("turn_id"),
+                    f.get("category_code"),
+                    f.get("detection_layer"),
+                    f.get("severity"),
+                    f.get("confidence_score"),
+                    f.get("reasoning"),
+                    f.get("false_positive_risk"),
+                    f.get("pattern_matched"),
+                )
+                for item in batch
+                for f in item["flags"]
+            ]
+            if flag_rows:
+                conn.executemany(
+                    """INSERT OR IGNORE INTO flags
+                           (session_id, turn_id, category_code, detection_layer, severity,
+                            confidence_score, reasoning, false_positive_risk, pattern_matched)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    flag_rows,
+                )
+            verdict_updates = [
+                (
+                    get_db_verdict_for_flags(f.get("category_code") for f in item["flags"]),
+                    get_db_confidence_for_verdict(
+                        get_db_verdict_for_flags(f.get("category_code") for f in item["flags"])
+                    ),
+                    item["session_id"],
+                )
+                for item in batch
+                if item["flags"]
+            ]
+            if verdict_updates:
+                conn.executemany(
+                    """UPDATE sessions
+                       SET overall_verdict = ?, confidence_score = ?
+                       WHERE session_id = ? AND overall_verdict = 'UNPROCESSED'""",
+                    verdict_updates,
+                )
+
+    batch: list[dict] = []
+    conn = get_connection()
     try:
         for session in pending:
             session_id = str(session["session_id"])
@@ -380,8 +458,6 @@ def ingest_only(data_path: str) -> None:
                 for msg in session.get("messages", [])
             ]
 
-            write_session_complete(session_id, session_data, turns, [])
-
             re_engage_flags = analyser.detect_post_session_messages(
                 session.get('messages', [])
             )
@@ -400,39 +476,34 @@ def ingest_only(data_path: str) -> None:
                 if turn.get('has_link') == 1
             ]
 
-            all_auto_flags = re_engage_flags + link_flags
-            if all_auto_flags:
-                from store.writer import write_flags
-                write_flags(session_id, all_auto_flags)
-                from store.db import get_connection
-                verdict = get_db_verdict_for_flags(
-                    f.get("category_code") for f in all_auto_flags
-                )
-                with get_connection() as conn:
-                    conn.execute(
-                        """UPDATE sessions
-                           SET overall_verdict = ?,
-                               confidence_score = ?
-                           WHERE session_id = ?
-                           AND overall_verdict = 'UNPROCESSED'""",
-                        (
-                            verdict,
-                            get_db_confidence_for_verdict(verdict),
-                            session_id,
-                        ),
-                    )
-
+            batch.append({
+                "session_id":   session_id,
+                "session_data": session_data,
+                "turns":        turns,
+                "flags":        re_engage_flags + link_flags,
+            })
             processed_ids.add(session_id)
             n_written += 1
 
-            if n_written % 100 == 0:
+            if len(batch) >= BATCH_SIZE:
+                _flush_batch(batch, conn)
+                batch.clear()
                 save_checkpoint(processed_ids)
+                print(f"  {n_written} sessions ingested...")
+
+        if batch:
+            _flush_batch(batch, conn)
+            batch.clear()
 
     except KeyboardInterrupt:
+        if batch:
+            _flush_batch(batch, conn)
         save_checkpoint(processed_ids)
         print(f"\nIngestion interrupted — {n_written} sessions written before interrupt.")
+        conn.close()
         return
 
+    conn.close()
     save_checkpoint(processed_ids)
 
     print()
