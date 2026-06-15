@@ -61,6 +61,17 @@ _FP_RISK: dict[str, str] = {
     "Low":    "HIGH",
 }
 
+# Retired intent IDs → replacement category codes
+# Applied during flag normalisation so old cached/DB data is remapped forward.
+RETIRED_INTENT_MAP: dict[str, str] = {
+    "INT-01": "NSFW_EXPLICIT",
+    "INT-02": "CSAM_RISK",
+    "INT-07": "NSFW_EXPLICIT",
+    "INT-08": "NSFW_EXPLICIT",
+    "INT-10": "NSFW_GROOMING",
+    "INT-12": "NSFW_GROOMING",
+}
+
 
 # ---------------------------------------------------------------------------
 # Internal helpers — build store-compatible dicts from engine outputs
@@ -146,14 +157,15 @@ def _build_flags(classification, profile) -> list[dict]:
     # Layer 2 — LLM intent matches, one row per (chunk, intent) occurrence
     for cr in classification.chunk_results:
         for im in cr.intents_triggered:
+            is_csam = im.intent_id == 'CSAM_RISK'
             flags.append({
                 "turn_id":             None,
                 "category_code":       im.intent_id,
                 "detection_layer":     "LLM",
-                "severity":            _FLAG_SEV.get(im.severity, "MEDIUM"),
-                "confidence_score":    _CONF_SCORE.get(im.confidence, 0.3),
+                "severity":            "HIGH" if is_csam else _FLAG_SEV.get(im.severity, "MEDIUM"),
+                "confidence_score":    max(0.95, _CONF_SCORE.get(im.confidence, 0.3)) if is_csam else _CONF_SCORE.get(im.confidence, 0.3),
                 "reasoning":           im.reason,
-                "false_positive_risk": _FP_RISK.get(im.confidence, "MEDIUM"),
+                "false_positive_risk": "LOW" if is_csam else _FP_RISK.get(im.confidence, "MEDIUM"),
                 "pattern_matched":     None,
             })
 
@@ -169,6 +181,13 @@ def _build_flags(classification, profile) -> list[dict]:
             "false_positive_risk": _FP_RISK.get(flag.severity, "MEDIUM"),
             "pattern_matched":     flag.flag_type,
         })
+
+    # Normalise retired INT-XX codes → replacement category codes
+    for flag in flags:
+        replacement = RETIRED_INTENT_MAP.get(flag["category_code"])
+        if replacement:
+            flag["category_code"] = replacement
+            flag["reasoning"]     = f"[Remapped from retired intent] {flag['reasoning']}"
 
     return flags
 

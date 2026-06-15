@@ -1,6 +1,6 @@
 """
 intent_library.py
-Defines the full taxonomy of 12 NSFW intents for AstroTalk's detection
+Defines the full taxonomy of 13 intents for AstroTalk's detection
 engine, and provides formatting helpers that inject intent definitions
 into LLM classification prompts.
 """
@@ -23,14 +23,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 class Intent:
     """A single NSFW intent category."""
 
-    intent_id:          str
-    name:               str
-    description:        str
-    severity:           str            # "Red" | "Amber"
-    examples:           list[str]      # phrases that SHOULD trigger
-    counter_examples:   list[str]      # phrases that should NOT trigger
-    annexure_category:  str
-    detection_notes:    str            # special instructions for the LLM
+    intent_id:            str
+    name:                 str
+    description:          str
+    severity:             str            # "Red" | "Amber"
+    examples:             list[str]      # phrases that SHOULD trigger
+    counter_examples:     list[str]      # phrases that should NOT trigger
+    annexure_category:    str
+    detection_notes:      str            # special instructions for the LLM
+    override_verdict:     str | None = None   # if set, forces this verdict when triggered
+    confidence_threshold: float | None = None # minimum confidence to trigger override
 
 
 # ---------------------------------------------------------------------------
@@ -39,7 +41,7 @@ class Intent:
 
 class IntentLibrary:
     """
-    Registry of all 12 AstroTalk NSFW detection intents.
+    Registry of all 13 AstroTalk NSFW detection intents.
 
     Usage
     -----
@@ -54,303 +56,403 @@ class IntentLibrary:
 
     _INTENTS: list[Intent] = [
 
-            Intent(
-                intent_id="INT-01",
-                name="Explicit Sexual Description Directed at Consultant",
-                description=(
-                    "User or consultant describes sexual acts, body parts, or intimate "
-                    "physical actions directed personally at the other party in the "
-                    "conversation — not about a third party."
-                ),
-                severity="Red",
-                examples=[
-                    "mujhe aapke saath sona hai",
-                    "I want to kiss you all over",
-                    "aapki body kaisi hai, touch karna chahta hoon",
-                    "can we have sex, I am very attracted to you",
-                    "tumhare lips ko kiss karna hai mujhe",
-                    "raat ko mere saath intimate baat karogi?",
-                    "I want to feel your body close to mine",
-                    "aapke saath physical hona chahta hoon",
-                    "tum mujhe satisfy karogi kya",
-                    "let me make you feel good tonight",
-                    "tumhare saath bed share karna hai",
-                    "aap mujhe hug karke kiss karogi?",
-                    "main tumhe pura feel karna chahta hoon",
-                    "will you sleep with me tonight",
-                    "tum mujhe apne paas bulalo, control nahi ho raha"
-                ],
-                counter_examples=[
-                    "mere husband ki physical needs ke baare mein batao",
-                    "kya mera physical relationship improve hoga",
-                    "Priyanka ke saath meri physical compatibility kaisi hai",
-                    "aapke 7th house mein physical union ka yoga hai"
-                ],
-                annexure_category="Category A — Explicit Sexual Content",
-                detection_notes="Detects direct sexual propositions or descriptions aimed at the consultant.",
+        Intent(
+            intent_id="INT-03",
+            name="Physical Appearance Probing of Consultant",
+            description=(
+                "User asking consultant about their body, appearance, physical "
+                "features, or requesting photos for non-astrological purposes."
             ),
-            Intent(
-                intent_id="INT-02",
-                name="Minor-Related Sexual Content",
-                description="Content involving sexual discussion or acts with minors/underage individuals.",
-                severity="Red",
-                examples=[
-                    "bacchi ke saath galat kaam hua hai",
-                    "underage ladki ke saath relation",
-                    "he is only 15 but wants physical relation",
-                    "minor ke saath physical hona",
-                    "school ki ladki ke saath sex ki baat",
-                    "chhoti umar ki ladki pasand hai",
-                    "ladka 14 ka hai par sexual baatein karta hai",
-                    "teen girl ke saath relation banana hai"
-                ],
-                counter_examples=[
-                    "mera beta 16 saal ka hai, uski career guidance chahiye",
-                    "meri beti ki shaadi kab hogi"
-                ],
-                annexure_category="Category A — Explicit Sexual Content",
-                detection_notes="Any mention of sexual content involving minors triggers highest severity.",
+            severity="Amber",
+            examples=[
+                "aap kitni tall hain",
+                "aapka figure kaisa hai",
+                "apni photo bhejo na",
+                "are you fair or dark, I am attracted to you",
+                "show me your pic, I want to see you",
+            ],
+            counter_examples=[
+                "astrological chart ki photo bhejo",
+                "kundali ki image share karo",
+                "astrologer asking for user's photo for palm reading",
+            ],
+            annexure_category="Category B — Inappropriate Personal Probing",
+            detection_notes=(
+                "Context matters. Photo requests for astrological purposes (kundali, "
+                "palm, face reading) are legitimate. Personal photo requests with "
+                "romantic context are violations."
             ),
-            Intent(
-                intent_id="INT-03",
-                name="Physical Appearance Probing of Consultant",
-                description="User asks personal physical/appearance-related questions about the consultant.",
-                severity="Amber",
-                examples=[
-                    "aap kitni tall hain",
-                    "aapka figure kaisa hai",
-                    "apni photo bhejo na",
-                    "are you fair or dark",
-                    "tum slim ho ya curvy",
-                    "what do you look like exactly",
-                    "aapka weight kitna hai",
-                    "send full pic please",
-                    "aap gym jaate ho kya body ke liye",
-                    "tumhari eyes ka colour kya hai",
-                    "show me your real pic not dp"
-                ],
-                counter_examples=[
-                    "kundali ki image share karo",
-                    "palm ki photo bhejo"
-                ],
-                annexure_category="Category B",
-                detection_notes="Same",
+        ),
+
+        Intent(
+            intent_id="INT-04",
+            name="Explicit Image Solicitation",
+            description=(
+                "Requesting or sending nude, semi-nude, or sexually explicit "
+                "images or videos."
             ),
-            Intent(
-                intent_id="INT-04",
-                name="Explicit Image Solicitation",
-                description="User requests nude, semi-nude, or sexually explicit images/videos from the consultant.",
-                severity="Red",
-                examples=[
-                    "apni nude photo bhejo",
-                    "video call pe kapde utaro",
-                    "send me your hot pic",
-                    "lingerie mein pic bhejo",
-                    "topless pic bhejo",
-                    "private parts dikhao",
-                    "turn on video, I want to see your body",
-                    "hot video call karein",
-                    "sexy pics bhejo na please",
-                    "onlyfans type pics bhejo"
-                ],
-                counter_examples=[
-                    "kundali ki image share ki",
-                    "palm ki photo bhejo"
-                ],
-                annexure_category="Category A",
-                detection_notes="Same",
+            severity="Red",
+            examples=[
+                "apni nude photo bhejo",
+                "video call pe kapde utaro",
+                "send me your hot pic",
+                "[IMAGE] token followed by sexual context in surrounding messages",
+            ],
+            counter_examples=[
+                "kundali ki image share ki",
+                "palm ki photo bhejo for reading",
+            ],
+            annexure_category="Category A — Explicit Sexual Content",
+            detection_notes=(
+                "The [IMAGE] token in messages should be assessed in context. "
+                "If preceding or following messages are sexual, flag as INT-04."
             ),
-            Intent(
-                intent_id="INT-05",
-                name="Inappropriate Attire Reference",
-                description="User requests or comments on revealing/sexualized clothing for the consultant.",
-                severity="Amber",
-                examples=[
-                    "video pe kam kapde pahno",
-                    "bra mein aa jao video pe",
-                    "tumhara dress bahut revealing tha",
-                    "shorts mein aao video pe",
-                    "deep neck pehno na",
-                    "thoda bold kapde pehno",
-                    "why are you fully covered, show more",
-                    "change into something sexy",
-                    "sleeveless pehno please",
-                    "aaj kuch hot pehno"
-                ],
-                counter_examples=[
-                    "formal kapde pahno",
-                    "saree mein sundar lag rahi hain"
-                ],
-                annexure_category="Category B",
-                detection_notes="Same",
+        ),
+
+        Intent(
+            intent_id="INT-05",
+            name="Inappropriate Attire Reference",
+            description=(
+                "References to consultant or user wearing revealing, inappropriate, "
+                "or sexualised clothing during video or live calls."
             ),
-            Intent(
-                intent_id="INT-06",
-                name="Off-Platform Solicitation",
-                description="Attempts to move conversation to personal/off-platform channels or share contact info.",
-                severity="Red",
-                examples=[
-                    "mera number hai 98XXXXXXXX",
-                    "WhatsApp pe aao",
-                    "Instagram pe DM karo",
-                    "telegram pe connect karo",
-                    "Snapchat pe add karo",
-                    "call me directly",
-                    "Zoom pe milte hain",
-                    "ghar aa jao milne",
-                    "email karo mujhe personal baat karte hain",
-                    "Paytm pe directly pay karo"
-                ],
-                counter_examples=[
-                    "AstroTalk support number use karo",
-                    "pin code 110001"
-                ],
-                annexure_category="Category C",
-                detection_notes="Same",
+            severity="Amber",
+            examples=[
+                "video pe kam kapde pahno",
+                "bra mein aa jao video pe",
+                "tumhara dress bahut revealing tha aaj",
+            ],
+            counter_examples=[
+                "formal kapde pahno please (professional dress request)",
+                "saree mein bahut sundar lag rahi hain (compliment, not directive)",
+            ],
+            annexure_category="Category B — Inappropriate Personal Probing",
+            detection_notes=(
+                "Only flag if there is a directive or explicit sexualisation of attire. "
+                "A compliment alone is not a violation."
             ),
-            Intent(
-                intent_id="INT-07",
-                name="Vulgar Sexual Language",
-                description="Use of explicit vulgar slang or highly crude sexual language directed at consultant.",
-                severity="Red",
-                examples=[
-                    "lund, chut, gaand in sexual context",
-                    "fuck me harder",
-                    "suck my dick",
-                    "teri body ka maza lena hai",
-                    "chut ka taste kaisa hota hai",
-                    "gaand maar dunga (sexual tone)",
-                    "sex ke liye pagal ho raha hoon",
-                    "bhosdike in sexual targeting",
-                    "teri body use karna hai",
-                    "let me fuck you"
-                ],
-                counter_examples=[
-                    "bhenchod as frustration",
-                    "yaar fuck ho gaya kaam"
-                ],
-                annexure_category="Category A",
-                detection_notes="Same",
+        ),
+
+        Intent(
+            intent_id="INT-06",
+            name="Off-Platform Solicitation",
+            description=(
+                "Attempts to move communication outside AstroTalk — sharing phone "
+                "numbers, WhatsApp, email, social media, or requesting in-person meetings."
             ),
-            Intent(
-                intent_id="INT-08",
-                name="Personal Sexual Information Request",
-                description="Asking about the consultant's personal sexual history, preferences, or experiences.",
-                severity="Red",
-                examples=[
-                    "kitne log the aapki life mein physically",
-                    "tum virgin ho kya",
-                    "last time kab sex kiya",
-                    "aapko kya pasand hai bed mein",
-                    "do you enjoy sex often",
-                    "masturbation kitni baar karte ho",
-                    "tumhe kis type ka partner pasand hai sexually",
-                    "aapka favourite position kya hai",
-                    "kitna experience hai aapko",
-                    "turn ons kya hain aapke"
-                ],
-                counter_examples=[
-                    "married life compatibility",
-                    "7th house reading"
-                ],
-                annexure_category="Category B",
-                detection_notes="Same",
+            severity="Red",
+            examples=[
+                "mera number hai 98XXXXXXXX, WhatsApp karo",
+                "Instagram pe follow karo @xxxxx",
+                "ghar aa jao milne ke liye",
+                "email karo mujhe, main bahar baat karta hoon",
+                "Paytm pe directly pay karo mujhe",
+            ],
+            counter_examples=[
+                "AstroTalk ka support number use karo",
+                "app ke through hi baat karo",
+                "birth place ka STD code 022 hai (phone code in birth details, not contact sharing)",
+                "my pin code is 110001 (address detail in reading context)",
+            ],
+            annexure_category="Category C — Platform Policy Violation",
+            detection_notes=(
+                "Phone number patterns in birth detail messages at the START of a "
+                "session are NOT violations — these are profile details. Only flag if "
+                "a number or contact detail is shared mid-conversation with clear "
+                "intent to communicate outside the platform."
             ),
-            Intent(
-                intent_id="INT-09",
-                name="Unsolicited Sexual Content",
-                description="Unprompted sexual comments, fantasies, or suggestive messages directed at consultant.",
-                severity="Amber",
-                examples=[
-                    "I had a dream of us having sex",
-                    "kal raat tumhare bare mein socha in bed",
-                    "sending kisses and hot hugs",
-                    "imagine you and me together naked",
-                    "consultant sending flirty sexual jokes",
-                    "random sexual fantasies without context",
-                    "😘🔥💋 with suggestive text",
-                    "I want to do things to you (unsolicited)"
-                ],
-                counter_examples=[
-                    "sexual compatibility question",
-                    "astrological explanation"
-                ],
-                annexure_category="Category A",
-                detection_notes="Same",
+        ),
+
+        Intent(
+            intent_id="INT-09",
+            name="Unsolicited Sexual Content",
+            description=(
+                "Sending sexual messages, suggestions, or media that the other party "
+                "did not ask for and has not engaged with."
             ),
-            Intent(
-                intent_id="INT-10",
-                name="Romantic Relationship Attempt",
-                description="User expresses romantic love, attachment, or seeks a relationship with the consultant.",
-                severity="Amber",
-                examples=[
-                    "main aapse pyaar karta hoon",
-                    "I love you, be mine",
-                    "will you marry me",
-                    "tum meri girlfriend ban jao",
-                    "I feel emotionally attached to you",
-                    "mujhe sirf aapse hi baat karni hai",
-                    "aap mere ho na",
-                    "I miss you when you're offline",
-                    "tumhare bina achha nahi lagta",
-                    "I want a relationship with you"
-                ],
-                counter_examples=[
-                    "I love your readings",
-                    "dear aap bahut helpful ho"
-                ],
-                annexure_category="Category B",
-                detection_notes="Same",
+            severity="Amber",
+            examples=[
+                "consultant sending sexual jokes unprompted",
+                "user sending graphic descriptions of their fantasies without any invitation",
+                "sexual emojis combined with suggestive text sent to consultant",
+            ],
+            counter_examples=[
+                "user asking about their own sexual compatibility with partner (invited topic)",
+                "consultant explaining planetary influences on intimacy (reading context)",
+            ],
+            annexure_category="Category A — Explicit Sexual Content",
+            detection_notes=(
+                "Assess whether the recipient engaged or invited the content. "
+                "If consultant deflected and user continues — escalate severity "
+                "with each repetition. Repeated unsolicited content becomes Red."
             ),
-            Intent(
-                intent_id="INT-11",
-                name="Sexual Roleplay or Fictional Framing",
-                description="Attempting to engage in sexual fantasy, roleplay, or hypothetical sexual scenarios with the consultant.",
-                severity="Red",
-                examples=[
-                    "agar hum dono akele hote toh kya hota",
-                    "imagine karo tum mere bed pe ho",
-                    "let's pretend you are my girlfriend",
-                    "roleplay karte hain husband wife ka",
-                    "tum meri secret lover ho",
-                    "fantasy mein tum mere saath ho",
-                    "what would you do to me if we were alone",
-                    "let's act like we're dating tonight",
-                    "imagine a romantic night together",
-                    "story banaate hain jisme tum meri ho"
-                ],
-                counter_examples=[
-                    "future imagination reading",
-                    "life prediction"
-                ],
-                annexure_category="Category A",
-                detection_notes="Same",
+        ),
+
+        Intent(
+            intent_id="INT-11",
+            name="Sexual Roleplay or Fictional Framing",
+            description=(
+                "Using fictional scenarios, roleplay framing, or hypothetical contexts "
+                "to initiate or normalise sexual conversation."
             ),
-            Intent(
-                intent_id="INT-12",
-                name="Persistent Flirtation After Disengagement",
-                description="Continued romantic/sexual pursuit after the consultant has tried to disengage or redirect.",
-                severity="Amber",
-                examples=[
-                    "aap bahut hot ho (repeated 5+ times)",
-                    "please reply jaan (after ignore)",
-                    "I love you reply please",
-                    "miss you again and again",
-                    "why are you ignoring me baby",
-                    "please talk romantically na",
-                    "you didn’t reply to my love message",
-                    "continuously sending hearts after no response",
-                    "flirting continues after redirection",
-                    "forcing emotional/romantic engagement repeatedly"
-                ],
-                counter_examples=[
-                    "single compliment",
-                    "normal polite message"
-                ],
-                annexure_category="Category B",
-                detection_notes="Same",
+            severity="Red",
+            examples=[
+                "agar hum dono akele hote toh kya hota",
+                "imagine karo tum mere ghar pe ho, phir kya karoge",
+                "let's play a game — you are my girlfriend",
+                "as a character in a story, what would you do to me",
+            ],
+            counter_examples=[
+                "agar meri shaadi ho jaati toh meri life kaisi hoti (hypothetical reading, not roleplay)",
+                "imagine karo mere future mein kya hai (reading framing, not sexual)",
+            ],
+            annexure_category="Category A — Explicit Sexual Content",
+            detection_notes=(
+                "The fictional or hypothetical frame does not reduce severity. "
+                "If the underlying content would be a violation without the fictional "
+                "wrapper, flag it."
             ),
-        ]
+        ),
+
+        Intent(
+            intent_id="EXTERNAL_MEDIA_CONTENT",
+            name="External Link or Media Content",
+            description=(
+                "Message contains a URL or link to external media — images, audio, "
+                "documents, or websites. May be legitimate (kundli charts, horoscope "
+                "images) or may indicate off-platform redirection. Requires manual "
+                "verification to determine intent."
+            ),
+            severity="Amber",
+            examples=[
+                "Any message where has_link == 1 (detected by the data pipeline)",
+                "Message containing a URL or hyperlink to any external resource",
+                "Image or document link shared during the session",
+            ],
+            counter_examples=[
+                "References to AstroTalk's own in-app features or support pages",
+                "Messages that mention prices or offers without an external link",
+            ],
+            annexure_category="Category C — Platform Policy Violation",
+            detection_notes=(
+                "This intent is detected exclusively by the REGEX layer via the "
+                "has_link column set during data ingestion — do NOT attempt LLM "
+                "classification for this category. Severity is MEDIUM; false positive "
+                "risk is MEDIUM because legitimate chart/image sharing is common."
+            ),
+        ),
+
+        Intent(
+            intent_id="RE_ENGAGEMENT_SOLICITATION",
+            name="Post-Session Re-Engagement Solicitation",
+            description=(
+                "Astrologer sends unsolicited messages after the session has formally "
+                "ended — indicated by an automated system message about session end, "
+                "low balance, or chat termination. These follow-up messages are designed "
+                "to re-engage the user and encourage wallet recharge or continued paid "
+                "interaction."
+            ),
+            severity="Red",
+            examples=[
+                "Any ASTROLOGER message sent after an automated message containing: "
+                "'chat ended', 'low balance', 'recharge', 'automated message', "
+                "'session ended', 'contact customer support'",
+                "Soch rahi thi tumhare baare mein (unsolicited emotional appeal after session end)",
+                "Tumhara dard mehsoos ho raha hai (empathy bait after session close)",
+                "Aapke baare mein kuch important dikh raha hai (urgency hook after termination)",
+            ],
+            counter_examples=[
+                "System automated messages themselves",
+                "Astrologer messages sent before the session-end automated message",
+                "User-initiated messages after recharge",
+            ],
+            annexure_category="Category C — Platform Policy Violation",
+            detection_notes=(
+                "This intent is detected exclusively by the REGEX layer "
+                "(ConsultantAnalyser.detect_post_session_messages) — do NOT attempt "
+                "LLM classification for this category. Detection is deterministic: "
+                "any non-automated ASTROLOGER message after the last session-end "
+                "automated message is a violation, regardless of message content."
+            ),
+        ),
+
+        # ------------------------------------------------------------------
+        # NSFW sub-category split — catch-all + four specific intents
+        # ------------------------------------------------------------------
+
+        Intent(
+            intent_id="NSFW",
+            name="Sexually Inappropriate Content (General)",
+            description=(
+                "Sexually inappropriate content that does not fit more specific NSFW "
+                "sub-categories. Includes sharing nude or sexually explicit images, wearing "
+                "inappropriate attire on video or live calls, sending unsolicited sexually "
+                "suggestive media, or any sexual content not covered by NSFW_EXPLICIT, "
+                "NSFW_GROOMING, NSFW_APPEARANCE, or CSAM_RISK."
+            ),
+            severity="Red",
+            examples=[
+                "Sharing or requesting nude or explicit images",
+                "Wearing revealing attire on video calls",
+                "Sending unsolicited sexually suggestive media",
+                "Use of explicit or vulgar language in a sexual context that does not fit NSFW_EXPLICIT",
+            ],
+            counter_examples=[
+                "Relationship advice in astrological context",
+                "Asking about marriage or compatibility",
+                "Cultural terms of endearment (darling, dear, ji)",
+                "Discussing emotional intimacy in relationship readings",
+            ],
+            annexure_category="Category A — Explicit Sexual Content",
+            detection_notes=(
+                "Use as catch-all only when content is clearly sexually inappropriate but "
+                "does not match NSFW_EXPLICIT, NSFW_GROOMING, NSFW_APPEARANCE, or CSAM_RISK. "
+                "Prefer the more specific sub-category when in doubt."
+            ),
+        ),
+
+        Intent(
+            intent_id="NSFW_EXPLICIT",
+            name="Explicit Sexual Content in Consultation",
+            description=(
+                "Consultant or user is descriptive about sexual or physical acts during a "
+                "consultation. Includes explicit sexual language, descriptions of physical "
+                "intimacy, or requesting or sharing personal sexual information under the "
+                "guise of astrological consultation. This is distinct from discussing "
+                "relationships or compatibility in an astrological context."
+            ),
+            severity="Red",
+            examples=[
+                "Consultant or user describing sexual acts in detail",
+                "Asking about or describing specific sexual experiences or preferences",
+                "\"Tell me about your physical relationship with your partner\" in explicit terms",
+                "Requesting sexual information under cover of \"astrological compatibility\" reading",
+                "Use of explicit anatomical or sexual terminology in inappropriate context",
+            ],
+            counter_examples=[
+                "\"Are you compatible with your partner romantically?\" (legitimate reading)",
+                "\"Your 7th house indicates a passionate relationship\" (astrological language)",
+                "\"Tell me your date of birth, time, and place for a relationship reading\" (data collection)",
+                "General discussion of love life or marriage prospects in astrological terms",
+            ],
+            annexure_category="Category A — Explicit Sexual Content",
+            detection_notes=(
+                "Distinguish from general astrological compatibility discussion. The key test is "
+                "whether the content would be explicit in any non-astrological context. Do not flag "
+                "relationship readings unless they tip into explicit personal or physical territory. "
+                "Note: This replaces the retired INT-01 (Explicit Sexual Description), INT-07 "
+                "(Vulgar Sexual Language), and INT-08 (Personal Sexual Information Request)."
+            ),
+        ),
+
+        Intent(
+            intent_id="NSFW_GROOMING",
+            name="Grooming, Romantic Solicitation or Roleplay",
+            description=(
+                "Consultant attempting to establish a romantic or sexual relationship with a "
+                "user under the pretense of consultation. Includes persistent flirtatious "
+                "behaviour after the other party has disengaged, roleplay or fictional framing "
+                "used to initiate or normalise sexual conversation, and suggestive comments about "
+                "relationship status or personal life designed to build inappropriate intimacy. "
+                "This is a cross-turn pattern — look for escalating personal interest beyond the "
+                "scope of astrology across multiple messages."
+            ),
+            severity="Red",
+            examples=[
+                "\"I feel a special connection with you beyond astrology\" or similar personal declarations",
+                "Continuing to flirt or make romantic comments after the user has changed subject or disengaged",
+                "\"Let's do a roleplay where you are my client and I am your guide...\" leading into sexual territory",
+                "Repeatedly asking about the user's relationship status, availability, or personal life unrelated to the reading",
+                "\"I have been thinking about you since our last session\" — personal attachment language",
+                "Making the user feel special or chosen in a romantic context rather than professional",
+            ],
+            counter_examples=[
+                "\"Your reading shows strong romantic energy this month\" (astrological prediction)",
+                "\"I care about your wellbeing\" in pastoral context during a difficult reading",
+                "\"You seem like a kind person\" as a one-off observation during a reading",
+                "Discussing relationship compatibility as part of the reading scope",
+            ],
+            annexure_category="Category A — Explicit Sexual Content",
+            detection_notes=(
+                "This intent requires a PATTERN across multiple messages — not a single flirtatious "
+                "comment. Look for escalating personal interest or continued advances after "
+                "disengagement. Minimum 2-3 instances or a clear declaration of romantic intent "
+                "before flagging. "
+                "Note: This replaces the retired INT-10 (Romantic Relationship Attempt) and "
+                "INT-12 (Persistent Flirtation After Disengagement). Severity is Red — grooming "
+                "behaviour is treated as a serious violation per AstroTalk policy."
+            ),
+        ),
+
+        Intent(
+            intent_id="NSFW_APPEARANCE",
+            name="Inappropriate Questions About Appearance or Body",
+            description=(
+                "Asking users about their physical appearance, body, or sexual preferences in any "
+                "context during a consultation. These questions are not relevant to astrological "
+                "consultation and constitute inappropriate personal intrusion regardless of how "
+                "they are framed."
+            ),
+            severity="Amber",
+            examples=[
+                "\"Can you describe yourself physically?\" or \"What do you look like?\"",
+                "\"Are you attractive?\" or comments on the user's presumed physical appearance",
+                "\"What are you wearing right now?\"",
+                "\"What is your body type?\" outside any legitimate health context",
+                "\"What are your sexual preferences?\" in any context",
+                "Asking for photos of the user under any pretext unrelated to astrology",
+            ],
+            counter_examples=[
+                "\"What is your height or weight?\" in a health astrology context where this is relevant (borderline — confirm if in doubt)",
+                "Discussing physical health issues the user has raised themselves",
+                "\"You have a strong physical presence in your chart\" (astrological observation)",
+            ],
+            annexure_category="Category B — Inappropriate Personal Probing",
+            detection_notes=(
+                "Any question about the user's physical appearance or body is a violation regardless "
+                "of framing. Photo requests for astrological purposes (kundali, palm reading) are "
+                "NOT violations. Personal appearance or body questions always are."
+            ),
+        ),
+
+        Intent(
+            intent_id="CSAM_RISK",
+            name="Content Involving Minors — Sexual or Intimate",
+            description=(
+                "Any content involving sexual or intimate acts with or about minors (persons under "
+                "18). This includes references to incest involving minors, sexual grooming of "
+                "minors, explicit or implicit sexual content involving minors, and any normalisation "
+                "of sexual relationships with minors. This category always results in a SEVERE "
+                "verdict regardless of confidence level or other session content."
+            ),
+            severity="Red",
+            examples=[
+                "Any sexual or intimate reference involving a person described as or implied to be under 18",
+                "Incest references where a minor is involved",
+                "Grooming language directed at a user who has identified themselves as a minor",
+                "Requesting images or physical descriptions of minors",
+                "Normalising sexual relationships between adults and minors",
+            ],
+            counter_examples=[
+                "Discussing a minor child's horoscope or future (legitimate astrological service)",
+                "\"My daughter is 15, what does her chart say about her education?\" (legitimate)",
+                "Discussing a user's childhood or past in non-sexual context",
+            ],
+            annexure_category="Category A — Explicit Sexual Content",
+            detection_notes=(
+                "Extremely high sensitivity — flag on any reasonable suspicion. Do not require "
+                "explicit confirmation of minor status; flag on implied or stated youth in a sexual "
+                "context. This intent triggers an immediate SEVERE override in the aggregator at "
+                "any confidence >= 0.3. "
+                "Note: This replaces the retired INT-02 (Minor-Related Sexual Content). "
+                "CSAM_RISK carries an automatic SEVERE override at confidence >= 0.3."
+            ),
+            override_verdict="SEVERE",
+            confidence_threshold=0.3,
+        ),
+
+    ]
+
     # Build the lookup index once at class definition time
     _INDEX: dict[str, Intent] = {i.intent_id: i for i in _INTENTS}
 
@@ -362,11 +464,11 @@ class IntentLibrary:
         self, third_party_names: list[str] | None = None
     ) -> str:
         """
-        Return all 12 intents serialised as a plain-text block ready for
+        Return all 13 intents serialised as a plain-text block ready for
         injection into an LLM classification prompt.
 
         If third_party_names is provided, prepends a context note so the
-        model does not flag third-party references as INT-01 or INT-10.
+        model does not flag third-party references as NSFW_EXPLICIT or NSFW_GROOMING.
         """
         lines: list[str] = []
 
@@ -380,7 +482,7 @@ class IntentLibrary:
                     f"KNOWN THIRD PARTIES IN THIS SESSION: {names_str}. "
                     "Any sexual or romantic content referencing these names is about "
                     "the user's personal life subject — NOT directed at the consultant. "
-                    "Do not flag as INT-01 or INT-10."
+                    "Do not flag as NSFW_EXPLICIT or NSFW_GROOMING."
                 ),
                 "",
             ]
@@ -456,9 +558,9 @@ class IntentLibrary:
 if __name__ == "__main__":
     lib = IntentLibrary()
 
-    # ---- print all 12 intents ----
+    # ---- print all 13 intents ----
     print("=" * 72)
-    print("ALL 12 INTENTS")
+    print("ALL 13 INTENTS")
     print("=" * 72)
     for intent in lib._INTENTS:
         sev_marker = "[RED  ]" if intent.severity == "Red" else "[AMBER]"
@@ -495,10 +597,11 @@ if __name__ == "__main__":
     print(f"Approx token budget (chars / 4)          : ~{len(prompt_plain) // 4:,} tokens")
 
     # ---- spot-check get_intent ----
-    i01 = lib.get_intent("INT-01")
-    assert i01.severity == "Red"
-    assert i01.intent_id == "INT-01"
-    i10 = lib.get_intent("INT-10")
-    assert i10.severity == "Amber"
+    i_explicit = lib.get_intent("NSFW_EXPLICIT")
+    assert i_explicit.severity == "Red"
+    assert i_explicit.intent_id == "NSFW_EXPLICIT"
+    i_csam = lib.get_intent("CSAM_RISK")
+    assert i_csam.severity == "Red"
+    assert i_csam.override_verdict == "SEVERE"
     print()
     print("All assertions passed.")

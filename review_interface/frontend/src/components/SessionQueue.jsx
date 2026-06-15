@@ -270,6 +270,10 @@ export default function SessionQueue({ reviewerName, reviewerRole, onSelectSessi
   const CATEGORY_COLORS = {
     OFF_PLATFORM_SOLICITATION:   '#0F6E56',
     NSFW:                        '#A32D2D',
+    NSFW_EXPLICIT:               '#A32D2D',
+    NSFW_GROOMING:               '#A32D2D',
+    NSFW_APPEARANCE:             '#854F0B',
+    CSAM_RISK:                   '#6B0000',
     FEAR_MANIPULATION:           '#854F0B',
     FINANCIAL_SOLICITATION:      '#854F0B',
     PERSONAL_DATA_COLLECTION:    '#185FA5',
@@ -279,6 +283,8 @@ export default function SessionQueue({ reviewerName, reviewerRole, onSelectSessi
     FAKE_REMEDIES:               '#854F0B',
     UNAUTHORIZED_MEDICAL_ADVICE: '#3B6D11',
     COMPETITOR_PROMOTION:        '#6B6860',
+    RE_ENGAGEMENT_SOLICITATION:  '#0F6E56',
+    EXTERNAL_MEDIA_CONTENT:      '#185FA5',
     OTHER:                       '#6B6860',
   };
 
