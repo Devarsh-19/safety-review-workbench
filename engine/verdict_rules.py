@@ -12,27 +12,41 @@ from typing import Iterable, Mapping, Any
 
 
 SEVERE_FLAGS = {
-    "abusive_language",
-    "financial_solicitation",
-    "hate_speech",
-    "identity_fraud",
+    # Sexual content
     "nsfw",
+    "nsfw_explicit",              # explicit sexual content
+    "nsfw_grooming",              # grooming behaviour
+    "nsfw_appearance",            # sexual comments about appearance
+    # Child safety
+    "csam_risk",                  # most critical — child safety
+    # Financial & fraud
+    "financial_solicitation",
+    "identity_fraud",
+    # Harmful content
+    "abusive_language",
+    "hate_speech",
     "fake_remedies",
     "unauthorized_medical_advice",
 }
 
 FLAGGED_FLAGS = {
     "off_platform_solicitation",
+    "re_engagement_solicitation",  # direct re-engagement attempt
     "personal_data_collection",
     "fear_manipulation",
     "competitor_promotion",
+    "external_media_content",      # links/media requiring manual check
     "other",
 }
 
 SEVERE_COMBINATIONS = [
+    # Two FLAGGED flags together escalate to SEVERE
     {"off_platform_solicitation", "personal_data_collection"},
     {"off_platform_solicitation", "fear_manipulation"},
-    {"personal_data_collection", "fear_manipulation"},
+    {"personal_data_collection",  "fear_manipulation"},
+    {"re_engagement_solicitation", "personal_data_collection"},
+    {"re_engagement_solicitation", "fear_manipulation"},
+    {"external_media_content",     "personal_data_collection"},
 ]
 
 DB_VERDICT_MAP = {
@@ -49,29 +63,37 @@ DB_CONFIDENCE_MAP = {
 
 
 # Engine output category_code -> canonical policy flag.
+# Canonical flags must match entries in SEVERE_FLAGS or FLAGGED_FLAGS (lowercase).
+# Frontend sends UPPERCASE_SNAKE codes — normalize_flag() lowercases them so
+# they hit SEVERE_FLAGS/FLAGGED_FLAGS directly without needing a map entry.
 FLAG_CODE_MAP = {
-    # LLM intent taxonomy.
+    # ── LLM intent taxonomy (int_XX codes from classifier) ──────────────
     "int_01": "nsfw",
-    "int_02": "nsfw",
+    "int_02": "nsfw_explicit",
     "int_03": "personal_data_collection",
-    "int_04": "nsfw",
-    "int_05": "nsfw",
+    "int_04": "nsfw_grooming",
+    "int_05": "nsfw_appearance",
     "int_06": "off_platform_solicitation",
     "int_07": "abusive_language",
-    "int_08": "nsfw",
+    "int_08": "hate_speech",
     "int_09": "nsfw",
     "int_10": "other",
     "int_11": "nsfw",
     "int_12": "other",
 
-    # ConsultantAnalyser / ingestion flags.
-    "vulgar_language": "abusive_language",
-    "erotic_reading": "nsfw",
-    "reciprocated_flirt": "nsfw",
-    "personal_info_shared": "personal_data_collection",
+    # ── ConsultantAnalyser / ingestion flags ─────────────────────────────
+    "vulgar_language":           "abusive_language",
+    "erotic_reading":            "nsfw_explicit",
+    "reciprocated_flirt":        "nsfw",
+    "personal_info_shared":      "personal_data_collection",
     "continued_after_violation": "other",
-    "re_engagement_solicitation": "off_platform_solicitation",
-    "external_media_content": "other",
+
+    # ── Legacy aliases (old names that may exist in existing DB rows) ────
+    "re_engagement":             "re_engagement_solicitation",
+    "external_media":            "external_media_content",
+    "csam":                      "csam_risk",
+    "financial":                 "financial_solicitation",
+    "medical_advice":            "unauthorized_medical_advice",
 }
 
 
