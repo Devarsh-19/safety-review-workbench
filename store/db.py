@@ -31,7 +31,12 @@ def initialise_db() -> None:
         "ALTER TABLE turns ADD COLUMN has_link INTEGER DEFAULT 0",
         "ALTER TABLE sessions ADD COLUMN locked_by TEXT",
         "ALTER TABLE sessions ADD COLUMN locked_at TEXT",
-        # Flag source/status refactor
+        # Session submission and assignment columns (from dev_new workflow)
+        "ALTER TABLE sessions ADD COLUMN submitted_by TEXT",
+        "ALTER TABLE sessions ADD COLUMN submitted_at TEXT",
+        "ALTER TABLE sessions ADD COLUMN needs_final_review INTEGER DEFAULT 0",
+        "ALTER TABLE sessions ADD COLUMN assigned_to TEXT",
+        # Flag source/status refactor — replaces AMENDED/DISMISSED detection_layer
         "ALTER TABLE flags ADD COLUMN source TEXT",
         "ALTER TABLE flags ADD COLUMN status TEXT DEFAULT 'ACTIVE'",
         "ALTER TABLE flags ADD COLUMN parent_flag_id INTEGER",
@@ -153,10 +158,12 @@ def fetch_pending_review_sessions(limit: int = 50) -> list[dict]:
 
 
 _ACTION_STATUS_MAP = {
-    "CONFIRM":             "CONFIRMED",
-    "FALSE_POSITIVE":      "OVERRIDDEN",
-    "NEEDS_FINAL_REVIEW":  "NEEDS_FINAL_REVIEW",
-    "CLEAR":               "REVIEWED",
+    "CONFIRM":            "CONFIRMED",
+    "FALSE_POSITIVE":     "OVERRIDDEN",
+    "NEEDS_FINAL_REVIEW": "NEEDS_FINAL_REVIEW",
+    "CLEAR":              "REVIEWED",
+    "SUBMIT":             "SUBMITTED_FOR_REVIEW",
+    "LOCK":               "LOCKED",
 }
 
 
@@ -166,6 +173,11 @@ def update_review_status(
     reviewer_id: str,
     note: str,
 ) -> None:
+    valid_actions = set(_ACTION_STATUS_MAP.keys())
+    if action not in valid_actions:
+        raise ValueError(
+            f"Invalid action '{action}'. Valid actions: {valid_actions}"
+        )
     new_status = _ACTION_STATUS_MAP[action]
     query = """
         UPDATE sessions
@@ -177,6 +189,83 @@ def update_review_status(
     """
     with get_connection() as conn:
         conn.execute(query, (new_status, reviewer_id, note, session_id))
+
+
+def confirm_flag(flag_id: int, reviewer_id: str) -> None:
+    with get_connection() as conn:
+        conn.execute(
+            """UPDATE flags
+               SET is_confirmed = 1,
+                   confirmed_by = ?,
+                   confirmed_at = datetime('now')
+               WHERE flag_id = ?""",
+            (reviewer_id, flag_id),
+        )
+
+
+def submit_session_for_review(
+    session_id: str,
+    reviewer_id: str,
+    note: str = None,
+) -> None:
+    with get_connection() as conn:
+        conn.execute(
+            """UPDATE sessions
+               SET review_status = 'SUBMITTED_FOR_REVIEW',
+                   submitted_by  = ?,
+                   submitted_at  = datetime('now'),
+                   reviewer_id   = ?,
+                   reviewer_note = ?
+               WHERE session_id = ?""",
+            (reviewer_id, reviewer_id, note, session_id),
+        )
+
+
+def mark_needs_final_review(
+    session_id: str,
+    reviewer_id: str,
+) -> None:
+    with get_connection() as conn:
+        conn.execute(
+            """UPDATE sessions
+               SET review_status      = 'NEEDS_FINAL_REVIEW',
+                   needs_final_review = 1,
+                   reviewer_id        = ?
+               WHERE session_id = ?""",
+            (reviewer_id, session_id),
+        )
+
+
+def get_session_flag_summary(session_id: str) -> dict:
+    """
+    Returns flag counts using the new source/status/parent_flag_id model.
+    Active flags = amendment rows + original rows that have no amendment.
+    Actioned flags = active flags with status = CONFIRMED.
+    """
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT flag_id, status, parent_flag_id FROM flags WHERE session_id = ?",
+            (session_id,),
+        ).fetchall()
+
+    # Determine which flags are active (same logic as get_active_flag_codes)
+    amended_parent_ids = {r["parent_flag_id"] for r in rows if r["parent_flag_id"] is not None}
+    active_rows = [
+        r for r in rows
+        if r["parent_flag_id"] is not None  # amendment = active
+        or r["flag_id"] not in amended_parent_ids  # original with no amendment = active
+    ]
+
+    total_flags    = len(active_rows)
+    actioned_flags = sum(1 for r in active_rows if r["status"] == "CONFIRMED")
+    unactioned     = total_flags - actioned_flags
+
+    return {
+        "total_flags":      total_flags,
+        "actioned_flags":   actioned_flags,
+        "unactioned_flags": unactioned,
+        "can_submit":       unactioned == 0,
+    }
 
 
 def lock_session(session_id: str, reviewer_id: str) -> None:

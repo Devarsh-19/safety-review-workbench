@@ -24,7 +24,6 @@ from typing import Any
 # Allow running this file directly
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-
 # ---------------------------------------------------------------------------
 # Load IntentLibrary via importlib to avoid __init__ chain dependency
 # ---------------------------------------------------------------------------

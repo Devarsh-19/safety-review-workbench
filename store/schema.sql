@@ -17,13 +17,17 @@ CREATE TABLE IF NOT EXISTS sessions (
     astrotalk_flagged   INTEGER,                            -- 0 or 1
     astrotalk_flag_category TEXT,
     astrotalk_severity  TEXT,
-    review_status       TEXT    DEFAULT 'PENDING',          -- 'PENDING', 'REVIEWED', 'CONFIRMED', 'OVERRIDDEN', 'NEEDS_FINAL_REVIEW', 'LOCKED'
+    review_status       TEXT    DEFAULT 'PENDING',          -- 'PENDING', 'SUBMITTED_FOR_REVIEW', 'NEEDS_FINAL_REVIEW', 'LOCKED', 'REVIEWED', 'CONFIRMED', 'OVERRIDDEN'
     reviewer_id         TEXT,
     reviewer_note       TEXT,
     reviewed_at         TEXT,
     session_note        TEXT,
     locked_by           TEXT,
     locked_at           TEXT,
+    submitted_by        TEXT,                               -- L1 reviewer who submitted for final review
+    submitted_at        TEXT,                               -- timestamp of submission
+    needs_final_review  INTEGER DEFAULT 0,                  -- 1 if marked by L2 for final review
+    assigned_to         TEXT    DEFAULT NULL,               -- L1 reviewer assigned to this session
     created_at          TEXT    DEFAULT (datetime('now'))
 );
 
@@ -62,7 +66,7 @@ CREATE TABLE IF NOT EXISTS review_log (
     log_id              INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id          TEXT,
     flag_id             INTEGER,
-    action              TEXT,                               -- 'CONFIRM', 'FALSE_POSITIVE', 'ESCALATE', 'CLEAR', 'MANUAL_FLAG'
+    action              TEXT,                               -- 'CONFIRM', 'FALSE_POSITIVE', 'CLEAR', 'SUBMIT', 'MANUAL_FLAG', 'AMENDED', 'CONFIRM_FLAG'
     reviewer_id         TEXT,
     note                TEXT,
     actioned_at         TEXT    DEFAULT (datetime('now')),
@@ -73,5 +77,6 @@ CREATE TABLE IF NOT EXISTS review_log (
 CREATE INDEX IF NOT EXISTS idx_sessions_verdict        ON sessions(overall_verdict);
 CREATE INDEX IF NOT EXISTS idx_sessions_review_status  ON sessions(review_status);
 CREATE INDEX IF NOT EXISTS idx_sessions_language       ON sessions(language_detected);
+CREATE INDEX IF NOT EXISTS idx_sessions_assigned_to    ON sessions(assigned_to);
 CREATE INDEX IF NOT EXISTS idx_flags_session_id        ON flags(session_id);
 CREATE INDEX IF NOT EXISTS idx_flags_category_code     ON flags(category_code);

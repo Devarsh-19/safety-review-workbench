@@ -112,6 +112,49 @@ class SessionAggregator:
         """
         chunk_results = classification.chunk_results
 
+        # ── CSAM_RISK override — immediately SEVERE ──────────────────────
+        # Must run before any other aggregation logic.
+        for cr in chunk_results:
+            for im in cr.intents_triggered:
+                if im.intent_id == 'CSAM_RISK':
+                    return SessionResult(
+                        session_id=                  classification.session_id,
+                        final_severity=              'Red',
+                        intents_triggered=[
+                            IntentSummary(
+                                intent_id=         'CSAM_RISK',
+                                intent_name=       im.intent_name,
+                                severity=          'Red',
+                                occurrence_count=  1,
+                                max_confidence=    'High',
+                                speakers_involved= [im.speaker] if im.speaker else [],
+                                sample_trigger=    im.trigger_message,
+                            )
+                        ],
+                        consultant_response_pattern= consultant_profile.response_pattern,
+                        severity_modifier_applied=   False,
+                        original_severity=           'Red',
+                        primary_language=            classification.primary_language,
+                        total_messages=              0,
+                        total_chunks=                classification.total_chunks,
+                        successful_chunks=           classification.successful_chunks,
+                        flagged_messages=[{
+                            'intent_id':           im.intent_id,
+                            'trigger_message':     im.trigger_message,
+                            'speaker':             im.speaker,
+                            'english_translation': im.english_translation,
+                            'chunk_index':         cr.chunk_index,
+                            'confidence':          'High',
+                        }],
+                        confidence_level=            'High',
+                        summary=(
+                            'CSAM_RISK detected — verdict overridden to SEVERE '
+                            'regardless of other session content.'
+                        ),
+                        recommended_action=          'Immediate Review',
+                        mismatch_flag=               False,
+                    )
+
         # ── STEP 1 — Collect intents across all chunks ──────────────────
         intent_map: dict[str, IntentSummary] = {}
 

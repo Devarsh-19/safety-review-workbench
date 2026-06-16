@@ -43,9 +43,6 @@ function formatDuration(minutes) {
 // Feature 7 — Reviewer progress table columns
 const PROGRESS_COLS = ['Reviewer', 'Reviewed', 'Confirmed', 'False Pos.', 'Escalated', 'Cleared'];
 
-// Session table columns
-const COLS = ['Session ID', 'Verdict', 'Flags', 'LLM Flags', 'Manual Flags', 'Language', 'Type', 'Duration', 'Turns', 'Status', 'Reviewer', 'Action'];
-
 // Column keys used for client-side sorting
 const SORT_KEYS = {
   'Session ID':   'session_id',
@@ -102,17 +99,31 @@ export default function SessionQueue({ reviewerName, reviewerRole, onSelectSessi
   const [sortCol,         setSortCol]         = useState(null);
   const [sortDir,         setSortDir]         = useState(null);
 
+  // ── Assignee filter (L2 only) ──────────────────────────────────────────
+  const [assigneeFilter,  setAssigneeFilter]  = useState('');
+
+  // ── Dynamic column list — L2 gets an 'Assigned To' column after Session ID
+  const COLS = reviewerRole === 'L2'
+    ? ['Session ID', 'Assigned To', 'Verdict', 'Flags', 'LLM Flags', 'Manual Flags', 'Language', 'Type', 'Duration', 'Turns', 'Status', 'Reviewer', 'Action']
+    : ['Session ID', 'Verdict', 'Flags', 'LLM Flags', 'Manual Flags', 'Language', 'Type', 'Duration', 'Turns', 'Status', 'Reviewer', 'Action'];
+
   // ── Data fetching ──────────────────────────────────────────────────────
 
   const fetchAll = useCallback(() => {
     return Promise.all([
-      getSessions({ verdict: verdictFilter || undefined, status: statusFilter || undefined }),
-      getStats(),
+      getSessions({
+        verdict:       verdictFilter   || undefined,
+        status:        statusFilter    || undefined,
+        reviewer_name: reviewerName    || undefined,
+        reviewer_role: reviewerRole    || undefined,
+        assigned_to:   assigneeFilter  || undefined,
+      }),
+      getStats({ reviewer_name: reviewerName || undefined, reviewer_role: reviewerRole || undefined }),
     ]).then(([sess, st]) => {
       setSessions(sess);
       setStats(st);
     }).catch(() => {});
-  }, [verdictFilter, statusFilter]);
+  }, [verdictFilter, statusFilter, reviewerName, reviewerRole, assigneeFilter]);
 
   useEffect(() => {
     setLoading(true);
@@ -126,26 +137,30 @@ export default function SessionQueue({ reviewerName, reviewerRole, onSelectSessi
 
   // ── Derived values ─────────────────────────────────────────────────────
 
-  const clearFilters = () => { setVerdictFilter(''); setStatusFilter(''); };
-  const hasFilters   = verdictFilter || statusFilter;
+  const clearFilters = () => { setVerdictFilter(''); setStatusFilter(''); setAssigneeFilter(''); };
+  const hasFilters   = verdictFilter || statusFilter || assigneeFilter;
 
-  const severe       = stats?.count_severe       ?? 0;
-  const flagged      = stats?.count_flagged      ?? 0;
-  const clean        = stats?.count_clean        ?? 0;
-  const unprocessed  = stats?.count_unprocessed  ?? 0;
-  const locked       = stats?.count_locked       ?? 0;
-  const total        = stats?.total_sessions     ?? 0;
-  const pending      = stats?.total_pending      ?? 0;
-  const reviewed     = total - pending;
+  const severe           = stats?.count_severe              ?? 0;
+  const flagged          = stats?.count_flagged             ?? 0;
+  const clean            = stats?.count_clean               ?? 0;
+  const unprocessed      = stats?.count_unprocessed         ?? 0;
+  const locked           = stats?.count_locked              ?? 0;
+  const submitted        = stats?.count_submitted           ?? 0;
+  const needsFinalReview = stats?.count_needs_final_review  ?? 0;
+  const total            = stats?.total_sessions            ?? 0;
+  const pending          = stats?.total_pending             ?? 0;
+  const reviewed         = total - pending;
 
   const statCells = [
-    { label: 'Severe',         value: severe,       color: C.severeText  },
-    { label: 'Flagged',        value: flagged,       color: C.flaggedText },
-    { label: 'Clean',          value: clean,         color: C.cleanText   },
-    { label: 'Unprocessed',    value: unprocessed,   color: '#444441'     },
-    { label: 'Locked',         value: locked,        color: '#444441'     },
-    { label: 'Total sessions', value: total,         color: C.textPrimary },
-    { label: 'Pending review', value: pending,       color: C.accent      },
+    { label: 'Severe',         value: severe,           color: C.severeText  },
+    { label: 'Flagged',        value: flagged,           color: C.flaggedText },
+    { label: 'Clean',          value: clean,             color: C.cleanText   },
+    { label: 'Unprocessed',    value: unprocessed,       color: '#444441'     },
+    { label: 'Locked',         value: locked,            color: '#444441'     },
+    { label: 'Submitted',      value: submitted,         color: '#185FA5'     },
+    { label: 'Needs Review',   value: needsFinalReview,  color: '#854F0B'     },
+    { label: 'Total sessions', value: total,             color: C.textPrimary },
+    { label: 'Pending review', value: pending,           color: C.accent      },
   ];
 
   const handleSortClick = (colLabel) => {
@@ -222,6 +237,10 @@ export default function SessionQueue({ reviewerName, reviewerRole, onSelectSessi
   const CATEGORY_COLORS = {
     OFF_PLATFORM_SOLICITATION:   '#0F6E56',
     NSFW:                        '#A32D2D',
+    NSFW_EXPLICIT:               '#A32D2D',
+    NSFW_GROOMING:               '#A32D2D',
+    NSFW_APPEARANCE:             '#854F0B',
+    CSAM_RISK:                   '#6B0000',
     FEAR_MANIPULATION:           '#854F0B',
     FINANCIAL_SOLICITATION:      '#854F0B',
     PERSONAL_DATA_COLLECTION:    '#185FA5',
@@ -231,6 +250,8 @@ export default function SessionQueue({ reviewerName, reviewerRole, onSelectSessi
     FAKE_REMEDIES:               '#854F0B',
     UNAUTHORIZED_MEDICAL_ADVICE: '#3B6D11',
     COMPETITOR_PROMOTION:        '#6B6860',
+    RE_ENGAGEMENT_SOLICITATION:  '#0F6E56',
+    EXTERNAL_MEDIA_CONTENT:      '#185FA5',
     OTHER:                       '#6B6860',
   };
 
@@ -332,12 +353,23 @@ export default function SessionQueue({ reviewerName, reviewerRole, onSelectSessi
           <select style={selectSt} value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
             <option value="">All Statuses</option>
             <option value="PENDING">PENDING</option>
+            <option value="SUBMITTED_FOR_REVIEW">SUBMITTED FOR REVIEW</option>
+            <option value="NEEDS_FINAL_REVIEW">NEEDS FINAL REVIEW</option>
             <option value="REVIEWED">REVIEWED</option>
             <option value="CONFIRMED">CONFIRMED</option>
             <option value="OVERRIDDEN">OVERRIDDEN</option>
-            <option value="NEEDS_FINAL_REVIEW">NEEDS FINAL REVIEW</option>
             <option value="LOCKED">LOCKED</option>
           </select>
+
+          {/* L2 — Assignee filter */}
+          {reviewerRole === 'L2' && (
+            <select style={selectSt} value={assigneeFilter} onChange={(e) => setAssigneeFilter(e.target.value)}>
+              <option value="">All Reviewers</option>
+              <option value="Nikhil">Nikhil</option>
+              <option value="Vineet">Vineet</option>
+              <option value="Divyansh">Divyansh</option>
+            </select>
+          )}
 
           {/* Feature 8 — Confidence slider */}
           <span style={{ fontSize: 11, fontFamily: MONO, color: C.textSecondary, whiteSpace: 'nowrap' }}>
@@ -418,6 +450,78 @@ export default function SessionQueue({ reviewerName, reviewerRole, onSelectSessi
           </span>
         </div>
       </div>
+
+      {/* L1 assignment banner */}
+      {reviewerRole === 'L1' && reviewerName && (
+        <div style={{
+          flexShrink: 0, padding: '7px 20px', background: '#EFF6FF',
+          borderBottom: '1px solid #B5D4F4', display: 'flex', alignItems: 'center', gap: 8,
+        }}>
+          <span style={{ fontSize: 12, color: '#0C447C' }}>
+            Showing sessions assigned to <strong>{reviewerName}</strong>
+          </span>
+        </div>
+      )}
+
+      {/* L2 reviewer progress — assignment-based breakdown per reviewer */}
+      {reviewerRole === 'L2' && stats?.reviewer_stats?.length > 0 && (
+        <div style={{ flexShrink: 0, padding: '10px 20px', background: C.bgSurface, borderBottom: `1px solid ${C.border}` }}>
+          <div style={{
+            fontSize: 10, fontFamily: MONO, fontWeight: 600, textTransform: 'uppercase',
+            letterSpacing: '0.06em', color: C.textSecondary, marginBottom: 8,
+          }}>
+            Reviewer Progress
+          </div>
+          <div style={{ border: `1px solid ${C.border}`, borderRadius: 6, overflow: 'hidden' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', background: C.bgSurface }}>
+              <thead>
+                <tr style={{ background: C.bgStatsrow }}>
+                  {['Reviewer', 'Assigned', 'Pending', 'Submitted', 'Locked', 'Progress'].map((h) => (
+                    <th key={h} style={{
+                      padding: '6px 12px', textAlign: 'left', fontSize: 10, fontFamily: MONO,
+                      fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em',
+                      color: C.textSecondary, borderBottom: `1px solid ${C.border}`, whiteSpace: 'nowrap',
+                    }}>
+                      {h}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {stats.reviewer_stats.map((r, i) => {
+                  const isLast = i === stats.reviewer_stats.length - 1;
+                  const border = isLast ? 'none' : `1px solid ${C.borderLight}`;
+                  const pct = r.total > 0 ? Math.round(((r.submitted + r.locked) / r.total) * 100) : 0;
+                  const cellSt = { padding: '6px 12px', fontSize: 12, fontFamily: MONO, borderBottom: border };
+                  return (
+                    <tr key={r.reviewer} style={{ background: C.bgSurface }}>
+                      <td style={{ ...cellSt, color: C.textPrimary, fontWeight: 500 }}>{r.reviewer || '—'}</td>
+                      <td style={{ ...cellSt, color: C.textPrimary }}>{r.total}</td>
+                      <td style={{ ...cellSt, color: r.pending > 0 ? C.accent : C.textSecondary }}>{r.pending}</td>
+                      <td style={{ ...cellSt, color: '#185FA5' }}>{r.submitted}</td>
+                      <td style={{ ...cellSt, color: '#444441' }}>{r.locked}</td>
+                      <td style={{ ...cellSt, minWidth: 140 }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                          <div style={{ flex: 1, height: 6, background: '#E2DED8', borderRadius: 3 }}>
+                            <div style={{
+                              height: '100%', borderRadius: 3,
+                              background: pct === 100 ? C.accent : '#185FA5',
+                              width: `${pct}%`, transition: 'width 300ms',
+                            }} />
+                          </div>
+                          <span style={{ fontSize: 11, color: C.textSecondary, minWidth: 30, textAlign: 'right' }}>
+                            {pct}%
+                          </span>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
 
       {/* Violation heatmap — collapsible */}
       {showHeatmap && (
@@ -560,6 +664,7 @@ export default function SessionQueue({ reviewerName, reviewerRole, onSelectSessi
                       onFocus={() => setFocusedFilter('id')} onBlur={() => setFocusedFilter(null)}
                       style={filterInputSt('id')} />
                   </th>
+                  {reviewerRole === 'L2' && <th style={{ padding: '4px 8px' }} />}
                   <th style={{ padding: '4px 8px' }} />
                   <th style={{ padding: '4px 8px' }} />
                   <th style={{ padding: '4px 8px' }} />
@@ -612,18 +717,29 @@ export default function SessionQueue({ reviewerName, reviewerRole, onSelectSessi
                   const isLast     = idx === displayedSessions.length - 1;
                   const isHovered  = hoveredRow === s.session_id;
                   const isClearing = clearingSession === s.session_id;
+                  const isNFR      = s.review_status === 'NEEDS_FINAL_REVIEW';
                   return (
                     <tr
                       key={s.session_id}
                       className="session-row"
                       onMouseEnter={() => setHoveredRow(s.session_id)}
                       onMouseLeave={() => setHoveredRow(null)}
-                      style={{ background: isHovered ? C.bgMuted : C.bgSurface, transition: 'background 150ms' }}
+                      style={{
+                        background: isHovered ? C.bgMuted : C.bgSurface,
+                        transition: 'background 150ms',
+                        ...(reviewerRole === 'L2' && isNFR ? { borderLeft: '3px solid #FAC775' } : {}),
+                      }}
                     >
                       <td style={tdMono(isLast)}>
                         {s.review_status === 'LOCKED' && <span style={{ marginRight: 4 }}>🔒</span>}
                         {s.session_id}
                       </td>
+
+                      {reviewerRole === 'L2' && (
+                        <td style={tdMono(isLast)}>
+                          {s.assigned_to || <span style={{ color: C.textMuted }}>—</span>}
+                        </td>
+                      )}
 
                       <td style={td(isLast)}><VerdictBadge verdict={s.overall_verdict} /></td>
 
@@ -707,14 +823,25 @@ export default function SessionQueue({ reviewerName, reviewerRole, onSelectSessi
                       <td style={td(isLast)}><StatusBadge status={s.review_status} /></td>
 
                       <td style={td(isLast)}>
-                        {s.reviewer_id && s.review_status !== 'PENDING'
-                          ? <span style={{ fontSize: 12, color: '#1C1C1A' }}>{truncate(s.reviewer_id, 15)}</span>
-                          : <span style={{ color: '#9B9890' }}>—</span>}
+                        {['SUBMITTED_FOR_REVIEW', 'NEEDS_FINAL_REVIEW', 'LOCKED'].includes(s.review_status) && s.submitted_by ? (
+                          <div>
+                            <span style={{ fontSize: 12, color: '#1C1C1A' }}>{truncate(s.submitted_by, 15)}</span>
+                            {s.review_status === 'LOCKED' && s.locked_by && (
+                              <div style={{ fontSize: 10, fontFamily: MONO, color: '#9B9890', marginTop: 2 }}>
+                                Locked by {s.locked_by}
+                              </div>
+                            )}
+                          </div>
+                        ) : s.reviewer_id && s.review_status !== 'PENDING' ? (
+                          <span style={{ fontSize: 12, color: '#1C1C1A' }}>{truncate(s.reviewer_id, 15)}</span>
+                        ) : (
+                          <span style={{ color: '#9B9890' }}>—</span>
+                        )}
                       </td>
 
                       <td style={td(isLast)}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                          {['REVIEWED', 'CONFIRMED', 'OVERRIDDEN', 'NEEDS_FINAL_REVIEW'].includes(s.review_status) && (
+                          {reviewerRole === 'L2' && ['SUBMITTED_FOR_REVIEW', 'NEEDS_FINAL_REVIEW', 'REVIEWED', 'CONFIRMED', 'OVERRIDDEN'].includes(s.review_status) && (
                             <button
                               onClick={() => handleLockSession(s.session_id)}
                               style={{
@@ -723,7 +850,7 @@ export default function SessionQueue({ reviewerName, reviewerRole, onSelectSessi
                                 color: C.accent, cursor: 'pointer', whiteSpace: 'nowrap',
                               }}
                             >
-                              Lock
+                              Lock 🔒
                             </button>
                           )}
                           <button
@@ -737,7 +864,7 @@ export default function SessionQueue({ reviewerName, reviewerRole, onSelectSessi
                               borderRadius: 4, transition: 'background 150ms', whiteSpace: 'nowrap',
                             }}
                           >
-                            {s.review_status === 'LOCKED' ? 'View' : 'Review →'}
+                            {s.review_status === 'LOCKED' ? 'View 🔒' : 'Review →'}
                           </button>
                         </div>
                       </td>
@@ -755,6 +882,7 @@ export default function SessionQueue({ reviewerName, reviewerRole, onSelectSessi
                           setMinConfidence(0);
                           setVerdictFilter('');
                           setStatusFilter('');
+                          setAssigneeFilter('');
                           setColFilterId('');
                           setColFilterLang('');
                           setColFilterType('');

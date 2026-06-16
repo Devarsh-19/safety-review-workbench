@@ -3,7 +3,8 @@ import { C, MONO } from '../tokens';
 import VerdictBadge from './VerdictBadge';
 import {
   getSessionDetail, getSessionFlags, submitReview,
-  manualFlag, saveSessionNote, confirmFlag,
+  manualFlag, saveSessionNote,
+  confirmFlag, submitSession, markNeedsFinalReview,
 } from '../api';
 
 // ---------------------------------------------------------------------------
@@ -26,11 +27,24 @@ const STATUS_LABEL = {
 };
 
 const INTENT_CATEGORIES = [
-  'OFF_PLATFORM_SOLICITATION', 'NSFW', 'FEAR_MANIPULATION',
-  'FINANCIAL_SOLICITATION', 'PERSONAL_DATA_COLLECTION',
-  'ABUSIVE_LANGUAGE', 'HATE_SPEECH', 'IDENTITY_FRAUD',
-  'FAKE_REMEDIES', 'UNAUTHORIZED_MEDICAL_ADVICE',
-  'COMPETITOR_PROMOTION', 'OTHER',
+  'OFF_PLATFORM_SOLICITATION',
+  'NSFW',
+  'NSFW_EXPLICIT',
+  'NSFW_GROOMING',
+  'NSFW_APPEARANCE',
+  'CSAM_RISK',
+  'FEAR_MANIPULATION',
+  'FINANCIAL_SOLICITATION',
+  'PERSONAL_DATA_COLLECTION',
+  'ABUSIVE_LANGUAGE',
+  'HATE_SPEECH',
+  'IDENTITY_FRAUD',
+  'FAKE_REMEDIES',
+  'UNAUTHORIZED_MEDICAL_ADVICE',
+  'COMPETITOR_PROMOTION',
+  'RE_ENGAGEMENT_SOLICITATION',
+  'EXTERNAL_MEDIA_CONTENT',
+  'OTHER',
 ];
 
 // ---------------------------------------------------------------------------
@@ -200,7 +214,7 @@ function DetectionBadge({ layer }) {
 // Main component
 // ---------------------------------------------------------------------------
 
-export default function SessionViewer({ sessionId, sessionList, reviewerName, onBack, onNavigate }) {
+export default function SessionViewer({ sessionId, sessionList, reviewerName, reviewerRole, onBack, onNavigate }) {
   // ── Core state ────────────────────────────────────────────────────────────
   const [data,           setData]           = useState(null);
   const [flags,          setFlags]          = useState([]);   // refreshable separately
@@ -241,6 +255,13 @@ export default function SessionViewer({ sessionId, sessionList, reviewerName, on
   const [confirmingFlagId,   setConfirmingFlagId]   = useState(null);
   const [flagCardHoverId,    setFlagCardHoverId]    = useState(null);
 
+  // Workflow state
+  const [l2Note,             setL2Note]             = useState('');
+  const [l2NoteFocused,      setL2NoteFocused]      = useState(false);
+  const [submitSuccess,      setSubmitSuccess]      = useState(false);
+  const [confirmingFlagId,   setConfirmingFlagId]   = useState(null);
+  const [lockBtnHover,       setLockBtnHover]       = useState(false);
+
   // Refs
   const firstFlaggedRef  = useRef(null);
   const popoverRef       = useRef(null);
@@ -269,6 +290,11 @@ export default function SessionViewer({ sessionId, sessionList, reviewerName, on
     setDismissSaving(false);
     setConfirmingFlagId(null);
     setFlagCardHoverId(null);
+    setL2Note('');
+    setL2NoteFocused(false);
+    setSubmitSuccess(false);
+    setConfirmingFlagId(null);
+    setLockBtnHover(false);
 
     getSessionDetail(sessionId)
       .then((d) => {
@@ -419,16 +445,12 @@ export default function SessionViewer({ sessionId, sessionList, reviewerName, on
     }
   };
 
+  // ── Flag confirm handler ──────────────────────────────────────────────────
   const handleConfirmFlag = async (flag) => {
-    if (confirmingFlagId) return;
+    if (confirmingFlagId === flag.flag_id) return;
     setConfirmingFlagId(flag.flag_id);
     try {
-      const res = await fetch(`/flags/${flag.flag_id}/confirm`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ reviewer_id: reviewerName }),
-      });
-      if (!res.ok) throw new Error('confirm failed');
+      await confirmFlag(flag.flag_id, reviewerName);
       const updated = await getSessionFlags(sessionId);
       setFlags(updated);
       setToast('Flag confirmed');
@@ -439,6 +461,52 @@ export default function SessionViewer({ sessionId, sessionList, reviewerName, on
     }
   };
 
+  // ── Session workflow handlers ──────────────────────────────────────────────
+  const handleSessionSubmit = async () => {
+    if (submitting) return;
+    setSubmitting(true);
+    try {
+      await submitSession(sessionId, reviewerName, null);
+      setToast('Submitted for review');
+      setTimeout(() => { setToast(null); onBack(); }, 2000);
+    } catch (err) {
+      setToast(`Error: ${err.message}`);
+      setSubmitting(false);
+    }
+  };
+
+  const handleMarkNeedsFinalReview = async () => {
+    setSubmitting(true);
+    try {
+      await markNeedsFinalReview(sessionId, reviewerName);
+      const updated = await getSessionDetail(sessionId);
+      setData(updated);
+      setFlags(updated.flags || []);
+    } catch (err) {
+      setToast(`Error: ${err.message}`);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const handleLockSession = async () => {
+    if (!window.confirm(`Lock session ${sessionId}? This is final and cannot be undone.`)) return;
+    setSubmitting(true);
+    try {
+      await fetch(`/sessions/${encodeURIComponent(sessionId)}/lock`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reviewer_id: reviewerName }),
+      });
+      const updated = await getSessionDetail(sessionId);
+      setData(updated);
+      setFlags(updated.flags || []);
+    } catch (err) {
+      setToast(`Error: ${err.message}`);
+    } finally {
+      setSubmitting(false);
+    }
+  };
   // ── Error state ───────────────────────────────────────────────────────────
   if (error) {
     return (
@@ -457,8 +525,18 @@ export default function SessionViewer({ sessionId, sessionList, reviewerName, on
   const { session = {}, turns = [] } = data || {};
   const flagsByTurnIdx  = data ? buildFlagsByTurnIdx(turns, flags) : {};
   const firstFlaggedIdx = turns.findIndex((_, i) => flagsByTurnIdx[i]?.length > 0);
-  const isLocked        = session?.review_status === 'LOCKED';
-  const isReviewed      = session?.review_status && session.review_status !== 'PENDING' && session.reviewer_id;
+  const status             = session?.review_status;
+  const isLocked           = status === 'LOCKED';
+  const isSubmitted        = status === 'SUBMITTED_FOR_REVIEW';
+  const isNeedsFinalReview = status === 'NEEDS_FINAL_REVIEW';
+  const isReviewed         = status && status !== 'PENDING' && session.reviewer_id;
+
+  // Flag summary derived client-side — drives L1 submit eligibility
+  const nonDismissedFlags   = flags.filter((f) => f.detection_layer !== 'DISMISSED');
+  const totalFlagCount      = nonDismissedFlags.length;
+  const actionedFlagCount   = nonDismissedFlags.filter((f) => f.is_confirmed === 1 || f.detection_layer === 'AMENDED').length;
+  const unactionedFlagCount = totalFlagCount - actionedFlagCount;
+  const canSubmit           = unactionedFlagCount === 0;
 
   // ── Active flag resolution ───────────────────────────────────────────────
   // Show only the active version of each flag: amendment if it exists, else original.
@@ -528,6 +606,26 @@ export default function SessionViewer({ sessionId, sessionList, reviewerName, on
           padding: '10px 20px', fontSize: 12, fontFamily: MONO, color: '#444441',
         }}>
           🔒 Locked by {session.locked_by} on {session.locked_at ? String(session.locked_at).slice(0, 10) : '—'} — this session is finalised and read-only
+        </div>
+      )}
+
+      {/* ── Submitted banner ─────────────────────────────────────────────── */}
+      {!loading && isSubmitted && (
+        <div style={{
+          flexShrink: 0, background: '#EFF6FF', borderBottom: '2px solid #B5D4F4',
+          padding: '10px 20px', fontSize: 12, fontFamily: MONO, color: '#0C447C',
+        }}>
+          ✓ Submitted for L2 review by {session.submitted_by || '—'} on {session.submitted_at ? String(session.submitted_at).slice(0, 10) : '—'} — awaiting Amogh's sign-off
+        </div>
+      )}
+
+      {/* ── Needs Final Review banner (L2 view only) ─────────────────────── */}
+      {!loading && isNeedsFinalReview && reviewerRole === 'L2' && (
+        <div style={{
+          flexShrink: 0, background: '#FFFBEB', borderBottom: '2px solid #FAC775',
+          padding: '10px 20px', fontSize: 12, fontFamily: MONO, color: '#854F0B',
+        }}>
+          ⚑ Needs Final Review — marked by Amogh for team discussion before locking
         </div>
       )}
 
@@ -848,6 +946,16 @@ export default function SessionViewer({ sessionId, sessionList, reviewerName, on
                 const isConfirmedStatus = flag.status === 'CONFIRMED';
                 const scrollMsg     = flagScrollMsg[flag.flag_id];
 
+                // Show confirm area when: flag is actionable, not locked,
+                // and role/status permits (L1: PENDING only; L2: any non-locked status)
+                const showConfirmArea =
+                  !isLocked &&
+                  flag.detection_layer !== 'DISMISSED' &&
+                  flag.detection_layer !== 'AMENDED' &&
+                  itemType === 'parent' &&
+                  parentChildStatus === null &&
+                  (reviewerRole === 'L2' || status === 'PENDING');
+
                 return (
                   <div
                     key={flag.flag_id ?? fi}
@@ -943,8 +1051,10 @@ export default function SessionViewer({ sessionId, sessionList, reviewerName, on
                             )}
                           </span>
                           <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
+                            {/* Confirm button — uses status field (new model) */}
                             {!isLocked && !isConfirmedStatus && (
-                              <FlagActionButton label="Confirm"
+                              <FlagActionButton
+                                label={confirmingFlagId === flag.flag_id ? '…' : 'Confirm'}
                                 onClick={(e) => { e.stopPropagation(); handleConfirmFlag(flag); }}
                                 hoverColor="#085041" hoverBorder="#9FE1CB" />
                             )}
@@ -1052,101 +1162,266 @@ export default function SessionViewer({ sessionId, sessionList, reviewerName, on
             )}
           </div>
 
-          {/* ── Review panel — hidden entirely when session is locked ──────── */}
+          {/* ── Decision panel — hidden when locked ──────────────────────── */}
           {!isLocked && (
           <div style={{ flexShrink: 0, borderTop: `2px solid ${C.border}`, background: C.bgSurface, padding: 20 }}>
-            {isReviewed && !showUpdateForm ? (
-              <div>
-                <div style={{ fontSize: 12, color: C.textSecondary, marginBottom: 6 }}>
-                  Reviewed by <b>{session.reviewer_id}</b>
-                  {' · '}{STATUS_LABEL[session.review_status] || session.review_status}
-                </div>
-                {session.reviewer_note && (
-                  <div style={{ fontSize: 12, color: C.textSecondary, fontStyle: 'italic', marginBottom: 8 }}>
-                    "{session.reviewer_note}"
-                  </div>
-                )}
-                <button className="btn-link-accent" onClick={() => setShowUpdateForm(true)}
-                  style={{ fontSize: 12, color: C.accent, background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}>
-                  Update decision
-                </button>
-              </div>
-            ) : (
+
+            {/* ── L1: PENDING — submit form ────────────────────────────────── */}
+            {reviewerRole === 'L1' && status === 'PENDING' && (
               <>
                 <div style={{ fontSize: 10, fontFamily: MONO, textTransform: 'uppercase',
                   letterSpacing: '0.06em', color: C.textMuted, marginBottom: 12 }}>
                   Your Decision
                 </div>
 
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 12 }}>
-                  {ACTIONS.map((a) => {
-                    const isSelected   = selectedAction === a.key;
-                    const clearBlocked = a.key === 'CLEAR' && activeFlagCount > 0;
-                    const s = isSelected ? a.active : { bg: C.bgStatsrow, color: C.textSecondary, border: C.border };
-                    return (
-                      <button
-                        key={a.key}
-                        disabled={clearBlocked}
-                        title={clearBlocked ? 'Clear is only available for sessions with no flags' : undefined}
-                        onClick={() => { if (!clearBlocked) { setSelectedAction(a.key); setNoteValidation(false); } }}
-                        style={{
-                          padding: '9px 0', fontSize: 13, fontWeight: isSelected ? 600 : 500,
-                          borderRadius: 5, border: `1px solid ${clearBlocked ? C.border : s.border}`,
-                          background: clearBlocked ? C.bgStatsrow : s.bg,
-                          color: clearBlocked ? '#C4C0B8' : s.color,
-                          cursor: clearBlocked ? 'not-allowed' : 'pointer',
-                          outline: isSelected ? `2px solid ${s.border}` : 'none',
-                          outlineOffset: 1, transition: 'all 120ms',
-                          opacity: clearBlocked ? 0.6 : 1,
-                        }}
-                      >
-                        {a.label}
-                      </button>
-                    );
-                  })}
-                </div>
-
-                <div style={{
-                  fontSize: 11, fontFamily: MONO, color: noteRequired ? '#A32D2D' : C.textMuted,
-                  marginBottom: 6,
-                }}>
-                  {noteRequired ? 'Add a note (required for this decision)' : 'Add a note (optional)...'}
-                </div>
-                <textarea rows={3} value={note}
-                  onChange={(e) => { setNote(e.target.value); if (e.target.value.trim().length >= 10) setNoteValidation(false); }}
-                  onFocus={() => setNoteFocused(true)} onBlur={() => setNoteFocused(false)}
-                  style={{
-                    width: '100%', padding: '10px 12px', fontSize: 13,
-                    border: `1px solid ${noteFocused ? C.accent : C.border}`,
-                    borderRadius: 5, background: noteFocused ? C.bgSurface : C.bgMuted,
-                    color: C.textPrimary, resize: 'vertical',
-                    transition: 'border-color 150ms, background 150ms', marginBottom: 0,
-                  }}
-                />
-                {noteValidation && noteRequired && note.trim().length < 10 && (
-                  <div style={{ fontSize: 11, fontFamily: MONO, color: '#A32D2D', marginTop: 6 }}>
-                    Please explain your reasoning (min 10 characters)
+                {/* Flag progress */}
+                {totalFlagCount === 0 ? (
+                  <div style={{ fontSize: 12, fontFamily: MONO, color: '#0F6E56', marginBottom: 12 }}>
+                    No flags — ready to submit
+                  </div>
+                ) : (
+                  <div style={{ marginBottom: 12 }}>
+                    <div style={{ fontSize: 11, fontFamily: MONO, color: C.textSecondary, marginBottom: 6 }}>
+                      {actionedFlagCount} of {totalFlagCount} flags reviewed
+                    </div>
+                    <div style={{ height: 4, background: '#E2DED8', borderRadius: 2 }}>
+                      <div style={{
+                        height: '100%', borderRadius: 2, background: '#0F6E56',
+                        width: `${Math.round((actionedFlagCount / totalFlagCount) * 100)}%`,
+                        transition: 'width 300ms ease',
+                      }} />
+                    </div>
                   </div>
                 )}
 
-                <div
-                  onMouseDown={() => { if (noteRequired && note.trim().length < 10) setNoteValidation(true); }}
-                  style={{ marginTop: 10, cursor: submitDisabled ? 'not-allowed' : 'pointer' }}
-                >
-                  <button onClick={handleSubmit} disabled={submitDisabled} style={{
-                    width: '100%', padding: 11, fontSize: 14, fontWeight: 500,
-                    borderRadius: 5, border: 'none',
-                    background: submitDisabled ? '#D4D0C9' : C.accent,
-                    color: submitDisabled ? C.textMuted : '#FFFFFF',
-                    cursor: submitDisabled ? 'not-allowed' : 'pointer',
-                    pointerEvents: submitDisabled ? 'none' : 'auto',
-                    animation: submitting ? 'pulse 1s ease-in-out infinite' : 'none',
-                    transition: 'background 150ms',
+                {/* Note for L2 */}
+                <div style={{ fontSize: 10, fontFamily: MONO, textTransform: 'uppercase',
+                  letterSpacing: '0.05em', color: '#9B9890', marginBottom: 6 }}>
+                  Note for L2 reviewer (optional)
+                </div>
+                <textarea
+                  rows={2}
+                  value={l2Note}
+                  onChange={(e) => setL2Note(e.target.value)}
+                  onFocus={() => setL2NoteFocused(true)}
+                  onBlur={() => setL2NoteFocused(false)}
+                  placeholder="Add any context for Amogh..."
+                  style={{
+                    width: '100%', padding: '10px 12px', fontSize: 13,
+                    border: `1px solid ${l2NoteFocused ? C.accent : C.border}`,
+                    borderRadius: 5, background: l2NoteFocused ? C.bgSurface : C.bgMuted,
+                    color: C.textPrimary, resize: 'none',
+                    transition: 'border-color 150ms, background 150ms', marginBottom: 10,
+                  }}
+                />
+
+                {/* Submit button / success */}
+                {submitSuccess ? (
+                  <div style={{
+                    background: '#E1F5EE', borderRadius: 5, padding: '12px 16px',
+                    fontSize: 13, color: '#085041', textAlign: 'center',
                   }}>
-                    {submitting ? 'Saving…' : 'Submit Review'}
+                    Submitted for L2 review ✓
+                  </div>
+                ) : (
+                  <div title={!canSubmit
+                    ? `Action all flags before submitting — ${unactionedFlagCount} flag(s) remaining`
+                    : undefined}>
+                    <button
+                      disabled={!canSubmit || submitting}
+                      onClick={handleSessionSubmit}
+                      style={{
+                        width: '100%', padding: 11, fontSize: 14, fontWeight: 500,
+                        borderRadius: 5, border: 'none',
+                        background: (!canSubmit || submitting) ? '#D4D0C9' : '#0F6E56',
+                        color: (!canSubmit || submitting) ? C.textMuted : '#FFFFFF',
+                        cursor: (!canSubmit || submitting) ? 'not-allowed' : 'pointer',
+                        transition: 'background 150ms',
+                      }}
+                    >
+                      {submitting ? 'Submitting…' : 'Submit for L2 Review →'}
+                    </button>
+                  </div>
+                )}
+              </>
+            )}
+
+            {/* ── L1: SUBMITTED or NFR — read-only status banner ───────────── */}
+            {reviewerRole === 'L1' && (isSubmitted || isNeedsFinalReview) && (
+              <div style={{
+                background: '#EFF6FF', border: '1px solid #B5D4F4',
+                borderRadius: 5, padding: '14px 16px',
+              }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+                  <span style={{ color: '#185FA5', fontSize: 15 }}>✓</span>
+                  <span style={{ fontSize: 14, fontWeight: 500, color: '#185FA5' }}>
+                    Submitted for L2 Review
+                  </span>
+                </div>
+                <div style={{ fontSize: 11, fontFamily: MONO, color: '#6B6860' }}>
+                  Submitted by {session.submitted_by || '—'}
+                  {session.submitted_at ? ` · ${String(session.submitted_at).slice(0, 10)}` : ''}
+                </div>
+                {isNeedsFinalReview && (
+                  <div style={{ fontSize: 11, fontFamily: MONO, color: '#854F0B', marginTop: 8 }}>
+                    ⚑ Marked for final review by Amogh
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* ── L2: SUBMITTED or NFR — action panel ──────────────────────── */}
+            {reviewerRole === 'L2' && (isSubmitted || isNeedsFinalReview) && (
+              <>
+                {/* Submission info */}
+                <div style={{ fontSize: 11, fontFamily: MONO, color: '#6B6860', marginBottom: 16 }}>
+                  Submitted by {session.submitted_by || '—'}
+                  {session.submitted_at ? ` on ${String(session.submitted_at).slice(0, 10)}` : ''}
+                </div>
+
+                {/* NFR amber alert */}
+                {isNeedsFinalReview && (
+                  <div style={{
+                    background: '#FFFBEB', border: '1px solid #FAC775', color: '#854F0B',
+                    borderRadius: 5, padding: '10px 14px', marginBottom: 12,
+                    fontSize: 11, fontFamily: MONO,
+                  }}>
+                    ⚑ Needs Final Review — discuss with team before locking
+                  </div>
+                )}
+
+                {/* Mark NFR — only on SUBMITTED_FOR_REVIEW */}
+                {isSubmitted && (
+                  <button
+                    disabled={submitting}
+                    onClick={handleMarkNeedsFinalReview}
+                    style={{
+                      width: '100%', padding: 10, fontSize: 13, fontWeight: 500,
+                      background: '#FAEEDA', color: '#633806', border: '1px solid #FAC775',
+                      borderRadius: 5, cursor: submitting ? 'not-allowed' : 'pointer',
+                      marginBottom: 8, transition: 'opacity 150ms',
+                    }}
+                  >
+                    Mark: Needs Final Review
+                  </button>
+                )}
+
+                {/* Lock */}
+                <button
+                  disabled={submitting}
+                  onMouseEnter={() => setLockBtnHover(true)}
+                  onMouseLeave={() => setLockBtnHover(false)}
+                  onClick={handleLockSession}
+                  style={{
+                    width: '100%', padding: 10, fontSize: 13, fontWeight: 500,
+                    background: submitting ? '#555' : lockBtnHover ? '#333330' : '#1C1C1A',
+                    color: '#FFFFFF', border: 'none',
+                    borderRadius: 5, cursor: submitting ? 'not-allowed' : 'pointer',
+                    transition: 'background 150ms',
+                  }}
+                >
+                  Lock Session 🔒
+                </button>
+              </>
+            )}
+
+            {/* ── L2: PENDING — waiting for L1 ─────────────────────────────── */}
+            {reviewerRole === 'L2' && status === 'PENDING' && (
+              <div style={{ fontSize: 12, color: C.textSecondary }}>
+                Awaiting L1 review
+              </div>
+            )}
+
+            {/* ── Legacy: CONFIRMED / OVERRIDDEN / REVIEWED (old workflow) ──── */}
+            {status && !['PENDING', 'SUBMITTED_FOR_REVIEW', 'NEEDS_FINAL_REVIEW'].includes(status) && (
+              isReviewed && !showUpdateForm ? (
+                <div>
+                  <div style={{ fontSize: 12, color: C.textSecondary, marginBottom: 6 }}>
+                    Reviewed by <b>{session.reviewer_id}</b>
+                    {' · '}{STATUS_LABEL[session.review_status] || session.review_status}
+                  </div>
+                  {session.reviewer_note && (
+                    <div style={{ fontSize: 12, color: C.textSecondary, fontStyle: 'italic', marginBottom: 8 }}>
+                      "{session.reviewer_note}"
+                    </div>
+                  )}
+                  <button className="btn-link-accent" onClick={() => setShowUpdateForm(true)}
+                    style={{ fontSize: 12, color: C.accent, background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}>
+                    Update decision
                   </button>
                 </div>
-              </>
+              ) : (
+                <>
+                  <div style={{ fontSize: 10, fontFamily: MONO, textTransform: 'uppercase',
+                    letterSpacing: '0.06em', color: C.textMuted, marginBottom: 12 }}>
+                    Your Decision
+                  </div>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 12 }}>
+                    {ACTIONS.map((a) => {
+                      const isSelected   = selectedAction === a.key;
+                      const clearBlocked = a.key === 'CLEAR' && activeFlagCount > 0;
+                      const s = isSelected ? a.active : { bg: C.bgStatsrow, color: C.textSecondary, border: C.border };
+                      return (
+                        <button
+                          key={a.key}
+                          disabled={clearBlocked}
+                          title={clearBlocked ? 'Clear is only available for sessions with no flags' : undefined}
+                          onClick={() => { if (!clearBlocked) { setSelectedAction(a.key); setNoteValidation(false); } }}
+                          style={{
+                            padding: '9px 0', fontSize: 13, fontWeight: isSelected ? 600 : 500,
+                            borderRadius: 5, border: `1px solid ${clearBlocked ? C.border : s.border}`,
+                            background: clearBlocked ? C.bgStatsrow : s.bg,
+                            color: clearBlocked ? '#C4C0B8' : s.color,
+                            cursor: clearBlocked ? 'not-allowed' : 'pointer',
+                            outline: isSelected ? `2px solid ${s.border}` : 'none',
+                            outlineOffset: 1, transition: 'all 120ms',
+                            opacity: clearBlocked ? 0.6 : 1,
+                          }}
+                        >
+                          {a.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <div style={{ fontSize: 11, fontFamily: MONO,
+                    color: noteRequired ? '#A32D2D' : C.textMuted, marginBottom: 6 }}>
+                    {noteRequired ? 'Add a note (required for this decision)' : 'Add a note (optional)...'}
+                  </div>
+                  <textarea rows={3} value={note}
+                    onChange={(e) => { setNote(e.target.value); if (e.target.value.trim().length >= 10) setNoteValidation(false); }}
+                    onFocus={() => setNoteFocused(true)} onBlur={() => setNoteFocused(false)}
+                    style={{
+                      width: '100%', padding: '10px 12px', fontSize: 13,
+                      border: `1px solid ${noteFocused ? C.accent : C.border}`,
+                      borderRadius: 5, background: noteFocused ? C.bgSurface : C.bgMuted,
+                      color: C.textPrimary, resize: 'vertical',
+                      transition: 'border-color 150ms, background 150ms', marginBottom: 0,
+                    }}
+                  />
+                  {noteValidation && noteRequired && note.trim().length < 10 && (
+                    <div style={{ fontSize: 11, fontFamily: MONO, color: '#A32D2D', marginTop: 6 }}>
+                      Please explain your reasoning (min 10 characters)
+                    </div>
+                  )}
+                  <div
+                    onMouseDown={() => { if (noteRequired && note.trim().length < 10) setNoteValidation(true); }}
+                    style={{ marginTop: 10, cursor: submitDisabled ? 'not-allowed' : 'pointer' }}
+                  >
+                    <button onClick={handleSubmit} disabled={submitDisabled} style={{
+                      width: '100%', padding: 11, fontSize: 14, fontWeight: 500,
+                      borderRadius: 5, border: 'none',
+                      background: submitDisabled ? '#D4D0C9' : C.accent,
+                      color: submitDisabled ? C.textMuted : '#FFFFFF',
+                      cursor: submitDisabled ? 'not-allowed' : 'pointer',
+                      pointerEvents: submitDisabled ? 'none' : 'auto',
+                      animation: submitting ? 'pulse 1s ease-in-out infinite' : 'none',
+                      transition: 'background 150ms',
+                    }}>
+                      {submitting ? 'Saving…' : 'Submit Review'}
+                    </button>
+                  </div>
+                </>
+              )
             )}
           </div>
           )}
