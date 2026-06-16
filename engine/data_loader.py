@@ -158,25 +158,39 @@ class DataLoader:
         two separate session objects. This is rare in practice for
         time-ordered exports but callers should be aware.
         """
-        csv_files: list[Path] = (
-            sorted(self.path.glob("*.csv")) if self.path.is_dir() else [self.path]
-        )
+        if self.path.is_dir():
+            csv_files = sorted(self.path.glob("*.csv"))
+            if not csv_files:
+                raise FileNotFoundError(
+                    f"[DataLoader] No .csv files found in directory: {self.path}"
+                )
+            print(f"[DataLoader] Found {len(csv_files)} CSV file(s) in {self.path}")
+        elif self.path.exists():
+            csv_files = [self.path]
+            print(f"[DataLoader] Streaming single file: {self.path.name}")
+        else:
+            raise FileNotFoundError(f"[DataLoader] Path not found: {self.path}")
 
         n_sessions = 0
         n_messages = 0
-        n_dupes    = 0
+
+        # Buffer lives outside the per-file loop so sessions whose rows
+        # span multiple files (e.g. same session_id in file 1 and file 2)
+        # are merged correctly rather than split into two session objects.
+        buffer: dict[str, list[dict]] = {}
 
         for csv_file in csv_files:
             print(f"[DataLoader] Streaming: {csv_file.name}")
-            # Buffer: session_id -> list of row dicts
-            buffer: dict[str, list[dict]] = {}
-
-            reader = pd.read_csv(
-                csv_file,
-                dtype=str,
-                keep_default_na=False,
-                chunksize=chunk_size,
-            )
+            try:
+                reader = pd.read_csv(
+                    csv_file,
+                    dtype=str,
+                    keep_default_na=False,
+                    chunksize=chunk_size,
+                )
+            except Exception as exc:
+                print(f"[DataLoader] WARNING — skipping {csv_file.name}: {exc}")
+                continue
 
             for chunk in reader:
                 # Track which session_ids appear in this chunk
@@ -190,28 +204,27 @@ class DataLoader:
                     buffer.setdefault(sid, []).append(row.to_dict())
 
                 # Yield sessions that did NOT appear in this chunk —
-                # they are complete (no more rows expected).
+                # they are complete (no more rows expected for this file).
                 completed = [sid for sid in list(buffer) if sid not in chunk_ids]
                 for sid in completed:
-                    rows = buffer.pop(sid)
-                    session = self._build_session_from_rows(sid, rows)
+                    session = self._build_session_from_rows(sid, buffer.pop(sid))
                     if session is not None:
                         n_sessions += 1
                         n_messages += len(session["messages"])
                         yield session
 
-            # Yield whatever remains after the last chunk
-            for sid, rows in buffer.items():
-                session = self._build_session_from_rows(sid, rows)
-                if session is not None:
-                    n_sessions += 1
-                    n_messages += len(session["messages"])
-                    yield session
-            buffer.clear()
+        # Yield whatever remains in the buffer after all files are processed
+        for sid, rows in list(buffer.items()):
+            session = self._build_session_from_rows(sid, rows)
+            if session is not None:
+                n_sessions += 1
+                n_messages += len(session["messages"])
+                yield session
+        buffer.clear()
 
         print(
             f"\n[DataLoader] Streamed {n_sessions} sessions, "
-            f"{n_messages} messages ({n_dupes} dupes removed)"
+            f"{n_messages} messages ({self._duplicates_removed} dupes removed)"
         )
 
     def _build_session_from_rows(
@@ -221,56 +234,89 @@ class DataLoader:
     ) -> dict[str, Any] | None:
         """
         Build a single session dict from a list of raw row dicts for one
-        session_id. Mirrors _build_sessions() logic for a single group.
+        session_id. Robust against column name variations in the CSV.
         """
-        import pandas as pd  # already imported at module level, but explicit here
-
         group = pd.DataFrame(rows)
 
-        # Normalise is_automated and filter out automated messages
-        group["_is_auto"] = group["is_automated_message"].apply(self._normalise_automated)
-        group = group[group["_is_auto"] == 0].drop(columns=["_is_auto"])
+        # ── Automated message filter ───────────────────────────────────
+        # Support both is_automated_message and is_automated column names
+        auto_col = "is_automated_message" if "is_automated_message" in group.columns \
+                   else "is_automated" if "is_automated" in group.columns else None
+        if auto_col:
+            group["_is_auto"] = group[auto_col].apply(self._normalise_automated)
+            group = group[group["_is_auto"] == 0].drop(columns=["_is_auto"])
         if group.empty:
             return None
 
         group, removed = self._dedup_messages(group)
         self._duplicates_removed += removed
 
-        timestamps   = group["sent_at_ist"].apply(self._parse_timestamp)
-        valid_ts     = [t for t in timestamps if t is not None]
+        # ── Timestamps ────────────────────────────────────────────────
+        # Support sent_at_ist, sent_at, timestamp column names
+        ts_col = next(
+            (c for c in ["sent_at_ist", "sent_at", "timestamp"] if c in group.columns),
+            None,
+        )
+        if ts_col:
+            timestamps = group[ts_col].apply(self._parse_timestamp)
+        else:
+            timestamps = pd.Series([None] * len(group))
+        valid_ts      = [t for t in timestamps if t is not None]
         session_start = min(valid_ts) if valid_ts else None
         session_end   = max(valid_ts) if valid_ts else None
         session_date  = session_start[:10] if session_start else None
         duration      = self._calc_duration(session_start, session_end)
 
-        astrotalk_flagged = (
-            1 if (group["flagged"].str.strip().str.lower() == "yes").any() else 0
-        )
+        # ── AstroTalk flag ─────────────────────────────────────────────
+        # Support yes/no strings and 0/1 integers
+        if "flagged" in group.columns:
+            flag_vals = group["flagged"].astype(str).str.strip().str.lower()
+            astrotalk_flagged = 1 if (
+                (flag_vals == "yes").any() or (flag_vals == "1").any()
+            ) else 0
+        else:
+            astrotalk_flagged = 0
 
+        # ── Helper: first non-empty value in a column ──────────────────
         def first_val(col: str) -> str | None:
             if col not in group.columns:
                 return None
-            nonempty = group[col].str.strip()
-            nonempty = nonempty[nonempty != ""]
+            nonempty = group[col].astype(str).str.strip()
+            nonempty = nonempty[nonempty.isin(["", "nan", "None"]) == False]  # noqa: E712
             return nonempty.iloc[0] if not nonempty.empty else None
 
+        # ── Month ──────────────────────────────────────────────────────
         month_val = first_val("month")
         try:
             month_name = MONTH_MAP.get(int(month_val), str(month_val))
         except Exception:
             month_name = str(month_val) if month_val else None
 
-        language_code, language_detected = self._parse_language(first_val("language"))
+        # ── Language ──────────────────────────────────────────────────
+        # Support both language (numeric codes) and language_detected (name)
+        lang_raw = first_val("language")
+        if lang_raw:
+            language_code, language_detected = self._parse_language(lang_raw)
+        else:
+            # Fall back to language_detected column if present
+            language_detected = first_val("language_detected")
+            language_code     = None
 
-        raw_lang        = first_val("language")
-        lang_str        = str(raw_lang).strip() if raw_lang else ''
-        lang_codes      = [c.strip() for c in lang_str.split(',') if c.strip()]
+        raw_lang        = lang_raw or ''
+        lang_codes      = [c.strip() for c in raw_lang.split(',') if c.strip()] if lang_raw else []
         is_multilingual = len(lang_codes) > 1
 
+        # ── Turn list ──────────────────────────────────────────────────
+        # Support message_seq, turn_id, seq_no for turn ordering
+        turn_id_col = next(
+            (c for c in ["message_seq", "turn_id", "seq_no"] if c in group.columns),
+            None,
+        )
         messages: list[dict[str, Any]] = []
         for _, row in group.iterrows():
             turn_id = self._parse_turn_id(
-                row.get("message_seq", ""), len(messages) + 1
+                row.get(turn_id_col, "") if turn_id_col else "",
+                len(messages) + 1,
             )
             if is_multilingual:
                 try:
@@ -281,36 +327,44 @@ class DataLoader:
             else:
                 turn_language = language_detected
 
+            # Timestamp for this turn
+            turn_ts = self._parse_timestamp(
+                row.get("sent_at_ist") or row.get("sent_at") or row.get("timestamp")
+            ) if ts_col else None
+
             messages.append({
                 "turn_id":           turn_id,
-                "speaker":           self._normalise_speaker(row.get("sender", "")),
-                "message_text":      str(row.get("message_text", "")).strip(),
-                "is_automated":      self._normalise_automated(row.get("is_automated_message", 0)),
-                "timestamp":         self._parse_timestamp(
-                                         row.get("sent_at_ist")
-                                         or row.get("sent_at")
-                                         or row.get("timestamp")
+                "speaker":           self._normalise_speaker(
+                                         row.get("sender") or row.get("speaker", "")
                                      ),
+                "message_text":      str(row.get("message_text", "")).strip(),
+                "is_automated":      self._normalise_automated(
+                                         row.get(auto_col, 0) if auto_col else 0
+                                     ),
+                "timestamp":         turn_ts,
                 "language_detected": turn_language,
                 "has_link":          int(row.get("has_link", 0) or 0),
             })
 
+        if not messages:
+            return None
+
         return {
             "session_id":              session_id,
-            "astrologer_id":           first_val("astrologer_id") if "astrologer_id" in group.columns else None,
+            "astrologer_id":           first_val("astrologer_id"),
             "user_id":                 None,
             "session_date":            session_date,
             "month":                   month_name,
             "language_code":           language_code,
             "language_detected":       language_detected,
-            "session_type":            "chat",
+            "session_type":            first_val("session_type") or "chat",
             "astrotalk_flagged":       astrotalk_flagged,
             "astrotalk_flag_category": None,
             "astrotalk_severity":      None,
             "session_start":           session_start,
             "session_end":             session_end,
             "duration_minutes":        duration,
-            "assigned_reviewer":       first_val("reviewer") if "reviewer" in group.columns else None,
+            "assigned_reviewer":       first_val("assigned_to"),
             "messages":                messages,
         }
 
@@ -484,7 +538,7 @@ class DataLoader:
                 "session_start":           session_start,
                 "session_end":             session_end,
                 "duration_minutes":        duration,
-                "assigned_reviewer":       first_val("reviewer") if "reviewer" in group.columns else None,
+                "assigned_reviewer":       first_val("assigned_to") if "assigned_to" in group.columns else None,
                 "messages":                messages,
             })
 
