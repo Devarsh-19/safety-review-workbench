@@ -116,7 +116,7 @@ class LockRequest(BaseModel):
 
 class SubmitRequest(BaseModel):
     reviewer_id: str
-    note: str = ""
+    note: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
