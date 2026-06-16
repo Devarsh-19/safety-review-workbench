@@ -483,6 +483,7 @@ def ingest_only(data_path: str) -> None:
                 "astrotalk_flag_category": None,
                 "astrotalk_severity":      None,
                 "review_status":           "PENDING",
+                "assigned_reviewer":       session.get("assigned_reviewer"),
             }
 
             turns = [

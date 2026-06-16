@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { C, MONO } from '../tokens';
 import TopBar from './TopBar';
 import Footer from './Footer';
-import { getStats } from '../api';
+import { getStats, getSessions } from '../api';
 
 const REVIEWERS = [
   { name: 'Gaurav',   role: 'L1' },
@@ -14,14 +14,29 @@ const REVIEWERS = [
 ];
 
 export default function LoginScreen({ onLogin }) {
-  const [name,     setName]     = useState('');
-  const [focused,  setFocused]  = useState(false);
-  const [stats,    setStats]    = useState(null);
-  const [btnHover, setBtnHover] = useState(false);
+  const [name,          setName]          = useState('');
+  const [focused,       setFocused]       = useState(false);
+  const [stats,         setStats]         = useState(null);
+  const [assignedCount, setAssignedCount] = useState(null);
+  const [btnHover,      setBtnHover]      = useState(false);
 
   useEffect(() => {
     getStats().then(setStats).catch(() => {});
   }, []);
+
+  // Fetch assigned-session count whenever a reviewer is selected
+  useEffect(() => {
+    if (!name) { setAssignedCount(null); return; }
+    const reviewer = REVIEWERS.find((r) => r.name === name);
+    // L2 reviewers see all — no personal count needed
+    if (reviewer?.role === 'L2') { setAssignedCount(null); return; }
+    getSessions({ assigned_reviewer: name })
+      .then((sessions) => {
+        const pending = sessions.filter((s) => s.review_status === 'PENDING').length;
+        setAssignedCount({ total: sessions.length, pending });
+      })
+      .catch(() => setAssignedCount(null));
+  }, [name]);
 
   const disabled = !name;
 
@@ -38,23 +53,45 @@ export default function LoginScreen({ onLogin }) {
   const reviewed = Number(stats?.total_reviewed ?? 0);
   const total    = Number(stats?.total_sessions ?? 0);
 
-  const statsCells = [
-    {
-      label: 'Pending',
-      value: pending,
-      color: pending > 0 ? C.severeText : C.textPrimary,
-    },
-    {
-      label: 'Reviewed',
-      value: reviewed,
-      color: reviewed > 0 ? C.accent : C.textPrimary,
-    },
-    {
-      label: 'Total',
-      value: total,
-      color: C.textPrimary,
-    },
-  ];
+  const selectedReviewer = REVIEWERS.find((r) => r.name === name);
+  const isL1Selected     = selectedReviewer?.role === 'L1';
+
+  // If an L1 reviewer is selected, show their personal queue stats
+  const statsCells = isL1Selected && assignedCount !== null
+    ? [
+        {
+          label: 'My Pending',
+          value: assignedCount.pending,
+          color: assignedCount.pending > 0 ? C.severeText : C.textPrimary,
+        },
+        {
+          label: 'My Assigned',
+          value: assignedCount.total,
+          color: C.accent,
+        },
+        {
+          label: 'Total (all)',
+          value: total,
+          color: C.textPrimary,
+        },
+      ]
+    : [
+        {
+          label: 'Pending',
+          value: pending,
+          color: pending > 0 ? C.severeText : C.textPrimary,
+        },
+        {
+          label: 'Reviewed',
+          value: reviewed,
+          color: reviewed > 0 ? C.accent : C.textPrimary,
+        },
+        {
+          label: 'Total',
+          value: total,
+          color: C.textPrimary,
+        },
+      ];
 
   return (
     <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>

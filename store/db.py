@@ -42,6 +42,9 @@ def initialise_db() -> None:
         "ALTER TABLE sessions ADD COLUMN submitted_by TEXT",
         "ALTER TABLE sessions ADD COLUMN submitted_at TEXT",
         "ALTER TABLE sessions ADD COLUMN needs_final_review INTEGER DEFAULT 0",
+        # Reviewer assignment from input CSV
+        "ALTER TABLE sessions ADD COLUMN assigned_reviewer TEXT",
+        "CREATE INDEX IF NOT EXISTS idx_sessions_assigned_reviewer ON sessions(assigned_reviewer)",
     ]
 
     with get_connection() as conn:
@@ -60,6 +63,7 @@ def fetch_sessions(
     status_filter: str = None,
     language_filter: str = None,
     reviewer_filter: str = None,
+    assigned_reviewer_filter: str = None,
 ) -> list[dict]:
     query = "SELECT * FROM sessions WHERE 1=1"
     params: list = []
@@ -76,6 +80,9 @@ def fetch_sessions(
     if reviewer_filter:
         query += " AND reviewer_id = ?"
         params.append(reviewer_filter)
+    if assigned_reviewer_filter:
+        query += " AND assigned_reviewer = ?"
+        params.append(assigned_reviewer_filter)
 
     with get_connection() as conn:
         rows = conn.execute(query, params).fetchall()

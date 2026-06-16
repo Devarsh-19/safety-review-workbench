@@ -310,6 +310,7 @@ class DataLoader:
             "session_start":           session_start,
             "session_end":             session_end,
             "duration_minutes":        duration,
+            "assigned_reviewer":       first_val("reviewer") if "reviewer" in group.columns else None,
             "messages":                messages,
         }
 
@@ -483,6 +484,7 @@ class DataLoader:
                 "session_start":           session_start,
                 "session_end":             session_end,
                 "duration_minutes":        duration,
+                "assigned_reviewer":       first_val("reviewer") if "reviewer" in group.columns else None,
                 "messages":                messages,
             })
 

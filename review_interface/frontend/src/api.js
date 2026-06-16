@@ -29,10 +29,11 @@ export async function getViolationStats() {
 
 export function getSessions(filters = {}) {
   const params = new URLSearchParams();
-  if (filters.verdict)  params.append('verdict',  filters.verdict);
-  if (filters.status)   params.append('status',   filters.status);
-  if (filters.language) params.append('language', filters.language);
-  if (filters.reviewer) params.append('reviewer', filters.reviewer);
+  if (filters.verdict)           params.append('verdict',           filters.verdict);
+  if (filters.status)            params.append('status',            filters.status);
+  if (filters.language)          params.append('language',          filters.language);
+  if (filters.reviewer)          params.append('reviewer',          filters.reviewer);
+  if (filters.assigned_reviewer) params.append('assigned_reviewer', filters.assigned_reviewer);
   const qs = params.toString() ? `?${params}` : '';
   return request(`/sessions${qs}`);
 }

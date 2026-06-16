@@ -317,16 +317,18 @@ def pending_sessions(limit: int = Query(default=50, ge=1, le=500)):
 
 @app.get("/sessions")
 def sessions(
-    verdict:  Optional[str] = None,
-    status:   Optional[str] = None,
-    language: Optional[str] = None,
-    reviewer: Optional[str] = None,
+    verdict:           Optional[str] = None,
+    status:            Optional[str] = None,
+    language:          Optional[str] = None,
+    reviewer:          Optional[str] = None,
+    assigned_reviewer: Optional[str] = None,
 ):
     rows = fetch_sessions(
         verdict_filter=verdict,
         status_filter=status,
         language_filter=language,
         reviewer_filter=reviewer,
+        assigned_reviewer_filter=assigned_reviewer,
     )
 
     # Enrich each row with flag counts (total, LLM/REGEX, manual) — excludes DISMISSED

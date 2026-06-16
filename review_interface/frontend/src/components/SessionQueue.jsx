@@ -118,13 +118,16 @@ export default function SessionQueue({ reviewerName, reviewerRole, onSelectSessi
         verdict: verdictFilter || undefined,
         status: statusFilter || undefined,
         reviewer: reviewerFilter || undefined,
+        // L1 reviewers only see sessions assigned to them;
+        // L2 (Amogh) can see all sessions unfiltered.
+        assigned_reviewer: reviewerRole === 'L1' ? reviewerName : undefined,
       }),
       getStats(),
     ]).then(([sess, st]) => {
       setSessions(sess);
       setStats(st);
     }).catch(() => {});
-  }, [verdictFilter, statusFilter, reviewerFilter]);
+  }, [verdictFilter, statusFilter, reviewerFilter, reviewerName, reviewerRole]);
 
   useEffect(() => {
     setLoading(true);
