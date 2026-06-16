@@ -58,8 +58,10 @@ CREATE TABLE IF NOT EXISTS flags (
     confirmed_by        TEXT,                               -- reviewer_id who confirmed this flag
     confirmed_at        TEXT,                               -- timestamp of confirmation
     is_confirmed        INTEGER DEFAULT 0,                  -- 1 if confirmed by a reviewer
+    parent_flag_id      INTEGER DEFAULT NULL,               -- flag_id of the original parent for AMENDED/DISMISSED children; NULL for LLM/REGEX/MANUAL parents
     created_at          TEXT    DEFAULT (datetime('now')),
-    FOREIGN KEY (session_id) REFERENCES sessions(session_id)
+    FOREIGN KEY (session_id)    REFERENCES sessions(session_id),
+    FOREIGN KEY (parent_flag_id) REFERENCES flags(flag_id)
 );
 
 CREATE TABLE IF NOT EXISTS review_log (
@@ -79,4 +81,5 @@ CREATE INDEX IF NOT EXISTS idx_sessions_review_status  ON sessions(review_status
 CREATE INDEX IF NOT EXISTS idx_sessions_language       ON sessions(language_detected);
 CREATE INDEX IF NOT EXISTS idx_flags_session_id        ON flags(session_id);
 CREATE INDEX IF NOT EXISTS idx_flags_category_code     ON flags(category_code);
+CREATE INDEX IF NOT EXISTS idx_flags_parent_flag_id    ON flags(parent_flag_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_assigned_to    ON sessions(assigned_to);

@@ -41,6 +41,8 @@ def initialise_db() -> None:
         "ALTER TABLE sessions ADD COLUMN needs_final_review INTEGER DEFAULT 0",
         # Session assignment column
         "ALTER TABLE sessions ADD COLUMN assigned_to TEXT",
+        # Flag parent linkage — explicit FK replaces category_code-based matching
+        "ALTER TABLE flags ADD COLUMN parent_flag_id INTEGER",
     ]
 
     with get_connection() as conn:
@@ -222,6 +224,35 @@ def lock_session(session_id: str, reviewer_id: str) -> None:
                    locked_at     = datetime('now')
                WHERE session_id = ?""",
             (reviewer_id, session_id),
+        )
+
+
+def get_amended_record(flag_id: int) -> dict | None:
+    """Return the AMENDED child row where parent_flag_id = flag_id, or None."""
+    with get_connection() as conn:
+        row = conn.execute(
+            """SELECT * FROM flags
+               WHERE parent_flag_id = ? AND detection_layer = 'AMENDED'""",
+            (flag_id,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def update_amended_record(
+    amended_flag_id: int,
+    category_code: str,
+    severity: str,
+    reasoning: str,
+) -> None:
+    """Update category_code, severity, and reasoning on an existing AMENDED row."""
+    with get_connection() as conn:
+        conn.execute(
+            """UPDATE flags
+               SET category_code = ?,
+                   severity      = ?,
+                   reasoning     = ?
+               WHERE flag_id = ? AND detection_layer = 'AMENDED'""",
+            (category_code, severity, reasoning, amended_flag_id),
         )
 
 

@@ -57,7 +57,8 @@ const INTENT_CATEGORIES = [
 function buildFlagsByTurnIdx(turns, flags) {
   const result = {};
   flags.forEach((flag) => {
-    if (flag.detection_layer === 'DISMISSED') return;
+    // Only parent flags generate transcript badges; children are rendered through getFlagState
+    if (flag.parent_flag_id != null) return;
 
     // Priority 1 — direct turn_id value match
     if (flag.turn_id != null) {
@@ -195,6 +196,20 @@ function DetectionBadge({ layer }) {
 }
 
 // ---------------------------------------------------------------------------
+// Canonical flag state — single source of truth for rendering and counting
+// ---------------------------------------------------------------------------
+function getFlagState(parentFlag, allFlags) {
+  // Match children by explicit FK — correct even when an amendment changes the category_code
+  const children = allFlags.filter((f) => f.parent_flag_id === parentFlag.flag_id);
+  const dismissedChild = children.find((f) => f.detection_layer === 'DISMISSED');
+  if (dismissedChild) return { state: 'DISMISSED', child: dismissedChild };
+  const amendedChild = children.find((f) => f.detection_layer === 'AMENDED');
+  if (amendedChild) return { state: 'AMENDED', child: amendedChild };
+  if (parentFlag.is_confirmed === 1) return { state: 'CONFIRMED', child: null };
+  return { state: 'UNACTIONED', child: null };
+}
+
+// ---------------------------------------------------------------------------
 // Main component
 // ---------------------------------------------------------------------------
 
@@ -234,12 +249,9 @@ export default function SessionViewer({ sessionId, sessionList, reviewerName, re
   const [editingFlagId,      setEditingFlagId]      = useState(null);
   const [editForm,           setEditForm]           = useState({});
   const [editSaving,         setEditSaving]         = useState(false);
-  const [editConfirmFlagId,  setEditConfirmFlagId]  = useState(null);
-  const [amendedFlagIds,     setAmendedFlagIds]     = useState(new Set());
   const [dismissingFlagId,   setDismissingFlagId]   = useState(null);
   const [dismissNote,        setDismissNote]        = useState('');
   const [dismissSaving,      setDismissSaving]      = useState(false);
-  const [dismissedFlagIds,   setDismissedFlagIds]   = useState(new Set());
   const [flagCardHoverId,    setFlagCardHoverId]    = useState(null);
 
   // Workflow state
@@ -273,12 +285,9 @@ export default function SessionViewer({ sessionId, sessionList, reviewerName, re
     setEditingFlagId(null);
     setEditForm({});
     setEditSaving(false);
-    setEditConfirmFlagId(null);
-    setAmendedFlagIds(new Set());
     setDismissingFlagId(null);
     setDismissNote('');
     setDismissSaving(false);
-    setDismissedFlagIds(new Set());
     setFlagCardHoverId(null);
     setL2Note('');
     setL2NoteFocused(false);
@@ -399,7 +408,12 @@ export default function SessionViewer({ sessionId, sessionList, reviewerName, re
     if (editSaving) return;
     setEditSaving(true);
     try {
-      const res = await fetch(`/flags/${flag.flag_id}/amend`, {
+      // Always POST to /amend on the PARENT's flag_id.
+      // For AMENDED children, parent_flag_id holds the original parent's id.
+      // The backend is idempotent: if an AMENDED child already exists it updates
+      // it in place rather than creating a second one.
+      const targetId = flag.detection_layer === 'AMENDED' ? flag.parent_flag_id : flag.flag_id;
+      const res = await fetch(`/flags/${targetId}/amend`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ ...editForm, reviewer_id: reviewerName }),
@@ -408,9 +422,6 @@ export default function SessionViewer({ sessionId, sessionList, reviewerName, re
       const updated = await getSessionFlags(sessionId);
       setFlags(updated);
       setEditingFlagId(null);
-      setAmendedFlagIds((prev) => new Set([...prev, flag.flag_id]));
-      setEditConfirmFlagId(flag.flag_id);
-      setTimeout(() => setEditConfirmFlagId(null), 2000);
     } catch (_) {
     } finally {
       setEditSaving(false);
@@ -430,7 +441,6 @@ export default function SessionViewer({ sessionId, sessionList, reviewerName, re
       const updated = await getSessionFlags(sessionId);
       setFlags(updated);
       setDismissingFlagId(null);
-      setDismissedFlagIds((prev) => new Set([...prev, flag.flag_id]));
     } catch (_) {
     } finally {
       setDismissSaving(false);
@@ -521,44 +531,23 @@ export default function SessionViewer({ sessionId, sessionList, reviewerName, re
   const isNeedsFinalReview = status === 'NEEDS_FINAL_REVIEW';
   const isReviewed         = status && status !== 'PENDING' && session.reviewer_id;
 
-  // Flag summary derived client-side — drives L1 submit eligibility
-  const nonDismissedFlags   = flags.filter((f) => f.detection_layer !== 'DISMISSED');
-  const totalFlagCount      = nonDismissedFlags.length;
-  const actionedFlagCount   = nonDismissedFlags.filter((f) => f.is_confirmed === 1 || f.detection_layer === 'AMENDED').length;
+  // ── Flag state model — single source of truth ───────────────────────────
+  // parent_flag_id === null identifies original flags; detection_layer guard handles
+  // pre-migration orphaned AMENDED/DISMISSED rows that have parent_flag_id = null.
+  const parentFlags         = flags.filter((f) =>
+    f.parent_flag_id == null && !['AMENDED', 'DISMISSED'].includes(f.detection_layer)
+  );
+  const totalFlagCount      = parentFlags.length;
+  const actionedFlagCount   = parentFlags.filter((f) => getFlagState(f, flags).state !== 'UNACTIONED').length;
   const unactionedFlagCount = totalFlagCount - actionedFlagCount;
-  const canSubmit           = unactionedFlagCount === 0;
+  const canSubmit           = totalFlagCount === 0 || actionedFlagCount === totalFlagCount;
 
-  // ── Flag lineage grouping ────────────────────────────────────────────────
-  const childMap = {};
-  flags.forEach((f) => {
-    if (f.detection_layer === 'AMENDED' || f.detection_layer === 'DISMISSED') {
-      const parent = flags.find(
-        (p) => (p.detection_layer === 'LLM' || p.detection_layer === 'REGEX' || p.detection_layer === 'MANUAL')
-               && p.category_code === f.category_code
-      );
-      if (!childMap[f.category_code]) childMap[f.category_code] = [];
-      childMap[f.category_code].push({ ...f, parentDetectionLayer: parent ? parent.detection_layer : null });
-    }
-  });
-  const orderedFlags = [];
-  const _usedChildIds = new Set();
-  flags.forEach((f) => {
-    if (f.detection_layer === 'LLM' || f.detection_layer === 'REGEX' || f.detection_layer === 'MANUAL') {
-      orderedFlags.push({ flag: f, itemType: 'parent' });
-      (childMap[f.category_code] || []).forEach((child) => {
-        if (!_usedChildIds.has(child.flag_id)) {
-          orderedFlags.push({ flag: child, itemType: 'child' });
-          _usedChildIds.add(child.flag_id);
-        }
-      });
-    }
-  });
-  flags.forEach((f) => {
-    if ((f.detection_layer === 'AMENDED' || f.detection_layer === 'DISMISSED') && !_usedChildIds.has(f.flag_id)) {
-      orderedFlags.push({ flag: f, itemType: 'child' });
-    }
-  });
-  const activeFlagCount = flags.filter((f) => f.detection_layer !== 'DISMISSED').length;
+  // Buttons render only when role + session status permit
+  const canActOnFlags =
+    !isLocked && (
+      (reviewerRole === 'L1' && status === 'PENDING') ||
+      (reviewerRole === 'L2' && (status === 'SUBMITTED_FOR_REVIEW' || status === 'NEEDS_FINAL_REVIEW'))
+    );
 
   // ── Feature A — Click flag card to jump to matching turn ─────────────────
   const handleFlagCardClick = (flag) => {
@@ -713,9 +702,20 @@ export default function SessionViewer({ sessionId, sessionList, reviewerName, re
               const isHovered      = hoveredTurnIdx === idx;
               const isPopoverOpen  = openFlagPopover === idx;
 
-              const maxSev = turnFlags.length
-                ? (turnFlags.some((f) => f.severity === 'HIGH') ? 'HIGH'
-                  : turnFlags.some((f) => f.severity === 'MEDIUM') ? 'MEDIUM' : 'LOW')
+              // Compute live badge state for each parent flag on this turn.
+              // DISMISSED → no badge; AMENDED → show the amended category_code + severity.
+              const liveTurnBadges = turnFlags.map((f) => {
+                const { state, child } = getFlagState(f, flags);
+                if (state === 'DISMISSED') return null;
+                return {
+                  label:    state === 'AMENDED' ? child.category_code : f.category_code,
+                  severity: state === 'AMENDED' ? child.severity      : f.severity,
+                };
+              }).filter(Boolean);
+
+              const maxSev = liveTurnBadges.length
+                ? (liveTurnBadges.some((b) => b.severity === 'HIGH') ? 'HIGH'
+                  : liveTurnBadges.some((b) => b.severity === 'MEDIUM') ? 'MEDIUM' : 'LOW')
                 : null;
               const flagColor     = maxSev === 'HIGH' ? C.severeBorder : maxSev === 'MEDIUM' ? C.flaggedBorder : maxSev === 'LOW' ? C.cleanBorder : null;
               const flagBg        = maxSev === 'HIGH' ? C.severeBg    : maxSev === 'MEDIUM' ? C.flaggedBg    : maxSev === 'LOW' ? C.cleanBg    : null;
@@ -731,16 +731,16 @@ export default function SessionViewer({ sessionId, sessionList, reviewerName, re
                   onMouseEnter={() => setHoveredTurnIdx(idx)}
                   onMouseLeave={() => { if (!isPopoverOpen) setHoveredTurnIdx(null); }}
                 >
-                  {/* Category badges above bubble */}
-                  {turnFlags.length > 0 && (
+                  {/* Category badges above bubble — live state: DISMISSED hidden, AMENDED shows amended category */}
+                  {liveTurnBadges.length > 0 && (
                     <div style={{ display: 'flex', gap: 4, marginBottom: 4, flexWrap: 'wrap' }}>
-                      {turnFlags.map((f, fi) => (
-                        <span key={fi} style={{
+                      {liveTurnBadges.map((b, bi) => (
+                        <span key={bi} style={{
                           fontSize: 10, fontFamily: MONO, fontWeight: 500,
                           padding: '1px 6px', borderRadius: 3, textTransform: 'uppercase',
                           background: flagBg, color: flagTextColor, border: `1px solid ${flagColor}`,
                         }}>
-                          {f.category_code}
+                          {b.label}
                         </span>
                       ))}
                     </div>
@@ -762,9 +762,9 @@ export default function SessionViewer({ sessionId, sessionList, reviewerName, re
                       padding: '10px 14px',
                       borderRadius: isAstrologer ? '0 8px 8px 8px' : '8px 0 8px 8px',
                       fontSize: 13, lineHeight: 1.6,
-                      background: turnFlags.length > 0 ? '#FCEBEB' : (isAstrologer ? '#F1F5F9' : '#EFF6FF'),
-                      color: turnFlags.length > 0 ? '#791F1F' : C.textPrimary,
-                      border: turnFlags.length > 0 ? '1px solid #F7C1C1' : undefined,
+                      background: liveTurnBadges.length > 0 ? '#FCEBEB' : (isAstrologer ? '#F1F5F9' : '#EFF6FF'),
+                      color: liveTurnBadges.length > 0 ? '#791F1F' : C.textPrimary,
+                      border: liveTurnBadges.length > 0 ? '1px solid #F7C1C1' : undefined,
                       wordBreak: 'break-word', flex: 1,
                       boxShadow: highlightedTurnIdx === idx ? '0 0 0 3px #F0C419' : undefined,
                       transition: 'box-shadow 0.4s ease-out',
@@ -945,287 +945,320 @@ export default function SessionViewer({ sessionId, sessionList, reviewerName, re
           <div style={{ flex: 1, overflowY: 'auto', padding: 20 }}>
             <div style={{ fontSize: 10, fontFamily: MONO, textTransform: 'uppercase',
               letterSpacing: '0.08em', color: C.textMuted, marginBottom: 14 }}>
-              {activeFlagCount > 0 ? `Flags Detected (${activeFlagCount})` : 'Flags Detected'}
+              {totalFlagCount > 0 ? `Flags Detected (${totalFlagCount})` : 'Flags Detected'}
             </div>
 
-            {loading ? <SkeletonPane /> : flags.length === 0 ? (
+            {loading ? <SkeletonPane /> : parentFlags.length === 0 ? (
               <div style={{ fontSize: 13, color: C.textSecondary, fontStyle: 'italic' }}>
                 No flags detected for this session.
               </div>
             ) : (
-              orderedFlags.map(({ flag, itemType }, fi) => {
-                const ls = layerStyle(flag.detection_layer);
+              parentFlags.map((parentFlag, fi) => {
+                const { state, child }  = getFlagState(parentFlag, flags);
+                const isEditingParent   = editingFlagId === parentFlag.flag_id;
+                const isDismissConf     = dismissingFlagId === parentFlag.flag_id;
+                const isHoveredParent   = flagCardHoverId === parentFlag.flag_id;
+                const scrollMsg         = flagScrollMsg[parentFlag.flag_id];
+                const parentOpacity     = state === 'AMENDED' ? 0.45 : state === 'DISMISSED' ? 0.3 : 1;
 
-                const parentChildStatus = itemType === 'parent' ? (
-                  (childMap[flag.category_code] || []).some((c) => c.detection_layer === 'AMENDED')   ? 'AMENDED'   :
-                  (childMap[flag.category_code] || []).some((c) => c.detection_layer === 'DISMISSED') ? 'DISMISSED' :
-                  null
-                ) : null;
+                const showConfirm       = canActOnFlags && state === 'UNACTIONED';
+                const showEditParent    = canActOnFlags && (state === 'UNACTIONED' || state === 'CONFIRMED');
+                const showDismissParent = canActOnFlags && (state === 'UNACTIONED' || state === 'CONFIRMED');
 
-                const cardOpacity =
-                  itemType === 'parent' && parentChildStatus === 'AMENDED'   ? 0.4 :
-                  itemType === 'parent' && parentChildStatus === 'DISMISSED' ? 0.3 :
-                  1;
-
-                const showEdit =
-                  itemType === 'child'       ? false :
-                  parentChildStatus !== null ? false :
-                  (flag.detection_layer !== 'AMENDED' && flag.detection_layer !== 'DISMISSED');
-
-                const showDismiss =
-                  itemType === 'child' && flag.detection_layer === 'AMENDED'  ? true  :
-                  itemType === 'child'                                         ? false :
-                  parentChildStatus !== null                                   ? false :
-                  flag.detection_layer !== 'DISMISSED';
-
-                const isDismissedLyr = flag.detection_layer === 'DISMISSED';
-                const isEditing      = editingFlagId === flag.flag_id && itemType !== 'child';
-                const isDismissConf  = dismissingFlagId === flag.flag_id;
-                const isAmended      = amendedFlagIds.has(flag.flag_id);
-                const isDismissed    = dismissedFlagIds.has(flag.flag_id);
-                const isHoveredCard  = flagCardHoverId === flag.flag_id;
-                const isConfirmed    = editConfirmFlagId === flag.flag_id;
-                const scrollMsg      = flagScrollMsg[flag.flag_id];
-
-                // Show confirm area when: flag is actionable, not locked,
-                // and role/status permits (L1: PENDING only; L2: any non-locked status)
-                const showConfirmArea =
-                  !isLocked &&
-                  flag.detection_layer !== 'DISMISSED' &&
-                  flag.detection_layer !== 'AMENDED' &&
-                  itemType === 'parent' &&
-                  parentChildStatus === null &&
-                  (reviewerRole === 'L2' || status === 'PENDING');
+                const isEditingChild    = child && editingFlagId === child.flag_id;
+                const isHoveredChild    = child && flagCardHoverId === child.flag_id;
+                const showEditChild     = canActOnFlags && state === 'AMENDED';
 
                 return (
-                  <div
-                    key={flag.flag_id ?? fi}
-                    onClick={() => !isEditing && !isDismissConf && handleFlagCardClick(flag)}
-                    onMouseEnter={() => setFlagCardHoverId(flag.flag_id)}
-                    onMouseLeave={() => setFlagCardHoverId(null)}
-                    style={{
-                      background: isDismissedLyr ? '#F5F4F0'
-                        : (isHoveredCard && !isEditing && !isDismissConf ? '#FAFAF8' : C.bgSurface),
-                      border: `1px solid ${
-                        isHoveredCard && !isEditing && !isDismissConf ? '#D4D0C9'
-                        : isDismissedLyr ? '#D4D0C9' : C.border}`,
-                      borderRadius: 6, padding: '14px 16px', marginBottom: 10,
-                      cursor: isEditing || isDismissConf ? 'default' : 'pointer',
-                      opacity: cardOpacity,
-                      transition: 'opacity 0.3s, background 150ms, border-color 150ms',
-                    }}
-                  >
-                    {isEditing ? (
-                      /* ── Inline edit form ── */
-                      <div onClick={(e) => e.stopPropagation()}>
-                        <div style={{ fontSize: 10, fontFamily: MONO, textTransform: 'uppercase',
-                          letterSpacing: '0.06em', color: C.textMuted, marginBottom: 10 }}>
-                          Edit Flag
-                        </div>
-                        <select
-                          value={editForm.category_code}
-                          onChange={(e) => setEditForm((f) => ({ ...f, category_code: e.target.value }))}
-                          style={{ width: '100%', padding: '7px 10px', fontSize: 12,
-                            border: `1px solid ${C.border}`, borderRadius: 4,
-                            background: C.bgMuted, color: C.textPrimary, marginBottom: 8 }}
-                        >
-                          {INTENT_CATEGORIES.map((cat) => (
-                            <option key={cat} value={cat}>{cat}</option>
-                          ))}
-                        </select>
-                        <select
-                          value={editForm.severity}
-                          onChange={(e) => setEditForm((f) => ({ ...f, severity: e.target.value }))}
-                          style={{ width: '100%', padding: '7px 10px', fontSize: 12,
-                            border: `1px solid ${C.border}`, borderRadius: 4,
-                            background: C.bgMuted, color: C.textPrimary, marginBottom: 8 }}
-                        >
-                          {['HIGH', 'MEDIUM', 'LOW'].map((s) => (
-                            <option key={s} value={s}>{s}</option>
-                          ))}
-                        </select>
-                        <textarea
-                          rows={3}
-                          value={editForm.reasoning}
-                          onChange={(e) => setEditForm((f) => ({ ...f, reasoning: e.target.value }))}
-                          style={{ width: '100%', padding: '7px 10px', fontSize: 12,
-                            border: `1px solid ${C.border}`, borderRadius: 4,
-                            background: C.bgMuted, color: C.textPrimary,
-                            resize: 'none', marginBottom: 10 }}
-                        />
-                        <div style={{ display: 'flex', gap: 8 }}>
-                          <button
-                            disabled={editSaving}
-                            onClick={() => handleSaveAmend(flag)}
-                            style={{ flex: 1, padding: '7px 0', fontSize: 12, fontWeight: 500,
-                              background: editSaving ? '#D4D0C9' : C.accent,
-                              border: 'none', borderRadius: 4, color: '#FFFFFF',
-                              cursor: editSaving ? 'not-allowed' : 'pointer' }}
+                  <React.Fragment key={parentFlag.flag_id ?? fi}>
+                    {/* ── Parent flag card ── */}
+                    <div
+                      onClick={() => !isEditingParent && !isDismissConf && handleFlagCardClick(parentFlag)}
+                      onMouseEnter={() => setFlagCardHoverId(parentFlag.flag_id)}
+                      onMouseLeave={() => setFlagCardHoverId(null)}
+                      style={{
+                        background: isHoveredParent && !isEditingParent && !isDismissConf ? '#FAFAF8' : C.bgSurface,
+                        border: `1px solid ${isHoveredParent && !isEditingParent && !isDismissConf ? '#D4D0C9' : C.border}`,
+                        borderRadius: 6, padding: '14px 16px', marginBottom: child ? 4 : 10,
+                        cursor: isEditingParent || isDismissConf ? 'default' : 'pointer',
+                        opacity: parentOpacity,
+                        transition: 'opacity 0.3s, background 150ms, border-color 150ms',
+                      }}
+                    >
+                      {isEditingParent ? (
+                        /* ── Edit form (parent → POST /amend) ── */
+                        <div onClick={(e) => e.stopPropagation()}>
+                          <div style={{ fontSize: 10, fontFamily: MONO, textTransform: 'uppercase',
+                            letterSpacing: '0.06em', color: C.textMuted, marginBottom: 10 }}>
+                            Edit Flag
+                          </div>
+                          <select
+                            value={editForm.category_code}
+                            onChange={(e) => setEditForm((f) => ({ ...f, category_code: e.target.value }))}
+                            style={{ width: '100%', padding: '7px 10px', fontSize: 12,
+                              border: `1px solid ${C.border}`, borderRadius: 4,
+                              background: C.bgMuted, color: C.textPrimary, marginBottom: 8 }}
                           >
-                            {editSaving ? '…' : 'Save Amendment'}
-                          </button>
-                          <button
-                            onClick={() => setEditingFlagId(null)}
-                            style={{ flex: 1, padding: '7px 0', fontSize: 12,
-                              background: C.bgSurface, border: `1px solid ${C.border}`,
-                              borderRadius: 4, color: C.textSecondary, cursor: 'pointer' }}
+                            {INTENT_CATEGORIES.map((cat) => (
+                              <option key={cat} value={cat}>{cat}</option>
+                            ))}
+                          </select>
+                          <select
+                            value={editForm.severity}
+                            onChange={(e) => setEditForm((f) => ({ ...f, severity: e.target.value }))}
+                            style={{ width: '100%', padding: '7px 10px', fontSize: 12,
+                              border: `1px solid ${C.border}`, borderRadius: 4,
+                              background: C.bgMuted, color: C.textPrimary, marginBottom: 8 }}
                           >
-                            Cancel
-                          </button>
+                            {['HIGH', 'MEDIUM', 'LOW'].map((s) => (
+                              <option key={s} value={s}>{s}</option>
+                            ))}
+                          </select>
+                          <textarea
+                            rows={3}
+                            value={editForm.reasoning}
+                            onChange={(e) => setEditForm((f) => ({ ...f, reasoning: e.target.value }))}
+                            style={{ width: '100%', padding: '7px 10px', fontSize: 12,
+                              border: `1px solid ${C.border}`, borderRadius: 4,
+                              background: C.bgMuted, color: C.textPrimary,
+                              resize: 'none', marginBottom: 10 }}
+                          />
+                          <div style={{ display: 'flex', gap: 8 }}>
+                            <button
+                              disabled={editSaving}
+                              onClick={() => handleSaveAmend(parentFlag)}
+                              style={{ flex: 1, padding: '7px 0', fontSize: 12, fontWeight: 500,
+                                background: editSaving ? '#D4D0C9' : C.accent,
+                                border: 'none', borderRadius: 4, color: '#FFFFFF',
+                                cursor: editSaving ? 'not-allowed' : 'pointer' }}
+                            >
+                              {editSaving ? '…' : 'Save Amendment'}
+                            </button>
+                            <button
+                              onClick={() => setEditingFlagId(null)}
+                              style={{ flex: 1, padding: '7px 0', fontSize: 12,
+                                background: C.bgSurface, border: `1px solid ${C.border}`,
+                                borderRadius: 4, color: C.textSecondary, cursor: 'pointer' }}
+                            >
+                              Cancel
+                            </button>
+                          </div>
                         </div>
-                      </div>
-                    ) : (
-                      <>
-                        {/* Category + badge + action buttons */}
-                        <div style={{ display: 'flex', alignItems: 'center',
-                          justifyContent: 'space-between', gap: 8 }}>
-                          <span style={{ fontSize: 13, fontFamily: MONO, fontWeight: 500,
-                            color: isDismissedLyr ? '#9B9890' : C.textPrimary,
-                            textTransform: 'uppercase', flex: 1,
-                            overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                            {flag.category_code}
-                          </span>
-                          <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
-                            {/* Confirm button — leftmost */}
-                            {showConfirmArea && (
-                              flag.is_confirmed === 1 ? (
+                      ) : (
+                        <>
+                          {/* Category + badge + action buttons */}
+                          <div style={{ display: 'flex', alignItems: 'center',
+                            justifyContent: 'space-between', gap: 8 }}>
+                            <span style={{ fontSize: 13, fontFamily: MONO, fontWeight: 500,
+                              color: state === 'DISMISSED' ? '#9B9890' : C.textPrimary,
+                              textTransform: 'uppercase', flex: 1,
+                              overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                              {parentFlag.category_code}
+                            </span>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
+                              {state === 'CONFIRMED' && (
                                 <span style={{
                                   fontSize: 10, fontFamily: MONO,
                                   background: '#E1F5EE', border: '1px solid #9FE1CB',
                                   color: '#085041', borderRadius: 3, padding: '2px 8px',
                                   cursor: 'default', whiteSpace: 'nowrap',
                                 }}>✓ Confirmed</span>
-                              ) : (
-                                <FlagActionButton
-                                  label={confirmingFlagId === flag.flag_id ? '…' : 'Confirm'}
-                                  onClick={(e) => { e.stopPropagation(); handleConfirmFlag(flag); }}
-                                  hoverColor="#0F6E56" hoverBorder="#0F6E56" />
-                              )
-                            )}
-                            {!isLocked && showEdit && (
-                              <FlagActionButton label="Edit"
-                                onClick={(e) => { e.stopPropagation(); openEditForm(flag); }}
-                                hoverColor="#0F6E56" hoverBorder="#0F6E56" />
-                            )}
-                            {!isLocked && showDismiss && (
-                              <FlagActionButton label="Dismiss"
-                                onClick={(e) => { e.stopPropagation(); setDismissingFlagId(flag.flag_id); setDismissNote(''); }}
-                                hoverColor="#A32D2D" hoverBorder="#F7C1C1" />
-                            )}
-                            <div style={{ display: 'flex', gap: 4 }}>
-                              {flag.parentDetectionLayer && (
-                                <DetectionBadge layer={flag.parentDetectionLayer} />
                               )}
-                              <DetectionBadge layer={flag.detection_layer} />
+                              {showConfirm && (
+                                <FlagActionButton
+                                  label={confirmingFlagId === parentFlag.flag_id ? '…' : 'Confirm'}
+                                  onClick={(e) => { e.stopPropagation(); handleConfirmFlag(parentFlag); }}
+                                  hoverColor="#0F6E56" hoverBorder="#0F6E56" />
+                              )}
+                              {showEditParent && (
+                                <FlagActionButton label="Edit"
+                                  onClick={(e) => { e.stopPropagation(); openEditForm(parentFlag); }}
+                                  hoverColor="#0F6E56" hoverBorder="#0F6E56" />
+                              )}
+                              {showDismissParent && (
+                                <FlagActionButton label="Dismiss"
+                                  onClick={(e) => { e.stopPropagation(); setDismissingFlagId(parentFlag.flag_id); setDismissNote(''); }}
+                                  hoverColor="#A32D2D" hoverBorder="#F7C1C1" />
+                              )}
+                              <DetectionBadge layer={parentFlag.detection_layer} />
                             </div>
                           </div>
-                        </div>
 
-                        {/* Severity + confidence + FP risk */}
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 8,
-                          marginTop: 8, flexWrap: 'wrap' }}>
-                          <VerdictBadge verdict={flag.severity} />
-                          {flag.confidence_score != null && (
-                            <span style={{ fontSize: 11, fontFamily: MONO, background: C.bgStatsrow,
-                              border: `1px solid ${C.border}`, borderRadius: 3, padding: '2px 7px',
-                              color: isDismissedLyr ? '#9B9890' : C.textSecondary }}>
-                              {Math.round(flag.confidence_score * 100)}%
-                            </span>
-                          )}
-                          {flag.false_positive_risk && (
-                            <span style={{ fontSize: 11,
-                              color: isDismissedLyr ? '#9B9890' : C.textSecondary }}>
-                              FP risk: <b>{flag.false_positive_risk}</b>
-                            </span>
-                          )}
-                        </div>
+                          {/* Severity + confidence + FP risk */}
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 8,
+                            marginTop: 8, flexWrap: 'wrap' }}>
+                            <VerdictBadge verdict={parentFlag.severity} />
+                            {parentFlag.confidence_score != null && (
+                              <span style={{ fontSize: 11, fontFamily: MONO, background: C.bgStatsrow,
+                                border: `1px solid ${C.border}`, borderRadius: 3, padding: '2px 7px',
+                                color: state === 'DISMISSED' ? '#9B9890' : C.textSecondary }}>
+                                {Math.round(parentFlag.confidence_score * 100)}%
+                              </span>
+                            )}
+                            {parentFlag.false_positive_risk && (
+                              <span style={{ fontSize: 11,
+                                color: state === 'DISMISSED' ? '#9B9890' : C.textSecondary }}>
+                                FP risk: <b>{parentFlag.false_positive_risk}</b>
+                              </span>
+                            )}
+                          </div>
 
-                        {/* Reasoning */}
-                        {flag.reasoning && (
-                          <div style={{ fontSize: 12,
-                            color: isDismissedLyr ? '#9B9890' : C.textSecondary,
-                            lineHeight: 1.5, marginTop: 10, paddingTop: 10,
-                            borderTop: `1px solid ${C.borderLight}`, fontStyle: 'italic' }}>
-                            {flag.reasoning}
-                          </div>
-                        )}
-
-                        {/* "Flagged by" — only for MANUAL flags */}
-                        {flag.flagged_by && (
-                          <div style={{ fontSize: 11, fontFamily: MONO,
-                            color: C.textMuted, marginTop: 6 }}>
-                            Flagged by {flag.flagged_by}
-                          </div>
-                        )}
-
-                        {/* "Confirmed by" — shown when flag is confirmed */}
-                        {showConfirmArea && flag.is_confirmed === 1 && flag.confirmed_by && (
-                          <div style={{ fontSize: 10, fontFamily: MONO,
-                            color: '#9B9890', marginTop: 4 }}>
-                            Confirmed by {flag.confirmed_by}
-                          </div>
-                        )}
-
-                        {/* Parent suppression labels — data-driven from childMap */}
-                        {parentChildStatus === 'AMENDED' && (
-                          <div style={{ fontSize: 10, fontFamily: MONO,
-                            color: '#0F6E56', marginTop: 6 }}>
-                            Amended
-                          </div>
-                        )}
-                        {parentChildStatus === 'DISMISSED' && (
-                          <div style={{ fontSize: 10, fontFamily: MONO,
-                            color: '#A32D2D', marginTop: 6 }}>
-                            Dismissed
-                          </div>
-                        )}
-                        {/* Interim labels — between action and next flags refresh */}
-                        {!parentChildStatus && isAmended && (
-                          <div style={{ fontSize: 10, fontFamily: MONO,
-                            color: '#0F6E56', marginTop: 6 }}>
-                            Amended
-                          </div>
-                        )}
-                        {!parentChildStatus && isDismissed && (
-                          <div style={{ fontSize: 10, fontFamily: MONO,
-                            color: '#A32D2D', marginTop: 6 }}>
-                            Dismissed
-                          </div>
-                        )}
-
-                        {/* Dismiss confirmation panel */}
-                        {isDismissConf && (
-                          <div
-                            onClick={(e) => e.stopPropagation()}
-                            style={{ marginTop: 12, paddingTop: 12,
-                              borderTop: `1px solid ${C.borderLight}` }}
-                          >
-                            <div style={{ fontSize: 12, color: '#1C1C1A', marginBottom: 8 }}>
-                              Dismiss this flag?
+                          {/* Reasoning */}
+                          {parentFlag.reasoning && (
+                            <div style={{ fontSize: 12,
+                              color: state === 'DISMISSED' ? '#9B9890' : C.textSecondary,
+                              lineHeight: 1.5, marginTop: 10, paddingTop: 10,
+                              borderTop: `1px solid ${C.borderLight}`, fontStyle: 'italic' }}>
+                              {parentFlag.reasoning}
                             </div>
-                            <input
-                              type="text"
-                              placeholder="Reason for dismissal..."
-                              value={dismissNote}
-                              onChange={(e) => setDismissNote(e.target.value)}
+                          )}
+
+                          {/* "Flagged by" — only for MANUAL flags */}
+                          {parentFlag.flagged_by && (
+                            <div style={{ fontSize: 11, fontFamily: MONO,
+                              color: C.textMuted, marginTop: 6 }}>
+                              Flagged by {parentFlag.flagged_by}
+                            </div>
+                          )}
+
+                          {/* "Confirmed by" — shown when CONFIRMED */}
+                          {state === 'CONFIRMED' && parentFlag.confirmed_by && (
+                            <div style={{ fontSize: 10, fontFamily: MONO,
+                              color: '#9B9890', marginTop: 4 }}>
+                              Confirmed by {parentFlag.confirmed_by}
+                            </div>
+                          )}
+
+                          {/* State labels */}
+                          {state === 'AMENDED' && (
+                            <div style={{ fontSize: 10, fontFamily: MONO,
+                              color: '#0F6E56', marginTop: 6 }}>
+                              Amended
+                            </div>
+                          )}
+                          {state === 'DISMISSED' && (
+                            <div style={{ fontSize: 10, fontFamily: MONO,
+                              color: '#A32D2D', marginTop: 6 }}>
+                              Dismissed
+                            </div>
+                          )}
+
+                          {/* Dismiss confirmation panel */}
+                          {isDismissConf && (
+                            <div
+                              onClick={(e) => e.stopPropagation()}
+                              style={{ marginTop: 12, paddingTop: 12,
+                                borderTop: `1px solid ${C.borderLight}` }}
+                            >
+                              <div style={{ fontSize: 12, color: '#1C1C1A', marginBottom: 8 }}>
+                                Dismiss this flag?
+                              </div>
+                              <input
+                                type="text"
+                                placeholder="Reason for dismissal..."
+                                value={dismissNote}
+                                onChange={(e) => setDismissNote(e.target.value)}
+                                style={{ width: '100%', padding: '7px 10px', fontSize: 12,
+                                  border: `1px solid ${C.border}`, borderRadius: 4,
+                                  background: C.bgMuted, color: C.textPrimary, marginBottom: 8 }}
+                              />
+                              <div style={{ display: 'flex', gap: 8 }}>
+                                <button
+                                  disabled={dismissSaving}
+                                  onClick={() => handleConfirmDismiss(parentFlag)}
+                                  style={{ flex: 1, padding: '6px 0', fontSize: 12, fontWeight: 500,
+                                    background: dismissSaving ? '#D4D0C9' : '#A32D2D',
+                                    border: 'none', borderRadius: 4, color: '#FFFFFF',
+                                    cursor: dismissSaving ? 'not-allowed' : 'pointer' }}
+                                >
+                                  {dismissSaving ? '…' : 'Confirm Dismiss'}
+                                </button>
+                                <button
+                                  onClick={() => setDismissingFlagId(null)}
+                                  style={{ flex: 1, padding: '6px 0', fontSize: 12,
+                                    background: C.bgSurface, border: `1px solid ${C.border}`,
+                                    borderRadius: 4, color: C.textSecondary, cursor: 'pointer' }}
+                                >
+                                  Cancel
+                                </button>
+                              </div>
+                            </div>
+                          )}
+                        </>
+                      )}
+
+                      {/* Scroll feedback */}
+                      {scrollMsg && !isEditingParent && (
+                        <div style={{ fontSize: 10, fontFamily: MONO, marginTop: 6, color: '#0F6E56' }}>
+                          ↑ Viewing in transcript
+                        </div>
+                      )}
+                    </div>
+
+                    {/* ── Child flag card (AMENDED or DISMISSED) ── */}
+                    {child && (
+                      <div
+                        onMouseEnter={() => setFlagCardHoverId(child.flag_id)}
+                        onMouseLeave={() => setFlagCardHoverId(null)}
+                        style={{
+                          background: state === 'DISMISSED' ? '#F5F4F0' : (isHoveredChild && !isEditingChild ? '#FAFAF8' : C.bgSurface),
+                          border: `1px solid ${state === 'DISMISSED' || (isHoveredChild && !isEditingChild) ? '#D4D0C9' : C.border}`,
+                          borderRadius: 6, padding: '14px 16px', marginBottom: 10, marginLeft: 16,
+                          transition: 'background 150ms, border-color 150ms',
+                        }}
+                      >
+                        {isEditingChild ? (
+                          /* ── Edit form (child → PATCH) ── */
+                          <div onClick={(e) => e.stopPropagation()}>
+                            <div style={{ fontSize: 10, fontFamily: MONO, textTransform: 'uppercase',
+                              letterSpacing: '0.06em', color: C.textMuted, marginBottom: 10 }}>
+                              Edit Amendment
+                            </div>
+                            <select
+                              value={editForm.category_code}
+                              onChange={(e) => setEditForm((f) => ({ ...f, category_code: e.target.value }))}
                               style={{ width: '100%', padding: '7px 10px', fontSize: 12,
                                 border: `1px solid ${C.border}`, borderRadius: 4,
                                 background: C.bgMuted, color: C.textPrimary, marginBottom: 8 }}
+                            >
+                              {INTENT_CATEGORIES.map((cat) => (
+                                <option key={cat} value={cat}>{cat}</option>
+                              ))}
+                            </select>
+                            <select
+                              value={editForm.severity}
+                              onChange={(e) => setEditForm((f) => ({ ...f, severity: e.target.value }))}
+                              style={{ width: '100%', padding: '7px 10px', fontSize: 12,
+                                border: `1px solid ${C.border}`, borderRadius: 4,
+                                background: C.bgMuted, color: C.textPrimary, marginBottom: 8 }}
+                            >
+                              {['HIGH', 'MEDIUM', 'LOW'].map((s) => (
+                                <option key={s} value={s}>{s}</option>
+                              ))}
+                            </select>
+                            <textarea
+                              rows={3}
+                              value={editForm.reasoning}
+                              onChange={(e) => setEditForm((f) => ({ ...f, reasoning: e.target.value }))}
+                              style={{ width: '100%', padding: '7px 10px', fontSize: 12,
+                                border: `1px solid ${C.border}`, borderRadius: 4,
+                                background: C.bgMuted, color: C.textPrimary,
+                                resize: 'none', marginBottom: 10 }}
                             />
                             <div style={{ display: 'flex', gap: 8 }}>
                               <button
-                                disabled={dismissSaving}
-                                onClick={() => handleConfirmDismiss(flag)}
-                                style={{ flex: 1, padding: '6px 0', fontSize: 12, fontWeight: 500,
-                                  background: dismissSaving ? '#D4D0C9' : '#A32D2D',
+                                disabled={editSaving}
+                                onClick={() => handleSaveAmend(child)}
+                                style={{ flex: 1, padding: '7px 0', fontSize: 12, fontWeight: 500,
+                                  background: editSaving ? '#D4D0C9' : C.accent,
                                   border: 'none', borderRadius: 4, color: '#FFFFFF',
-                                  cursor: dismissSaving ? 'not-allowed' : 'pointer' }}
+                                  cursor: editSaving ? 'not-allowed' : 'pointer' }}
                               >
-                                {dismissSaving ? '…' : 'Confirm Dismiss'}
+                                {editSaving ? '…' : 'Save Amendment'}
                               </button>
                               <button
-                                onClick={() => setDismissingFlagId(null)}
-                                style={{ flex: 1, padding: '6px 0', fontSize: 12,
+                                onClick={() => setEditingFlagId(null)}
+                                style={{ flex: 1, padding: '7px 0', fontSize: 12,
                                   background: C.bgSurface, border: `1px solid ${C.border}`,
                                   borderRadius: 4, color: C.textSecondary, cursor: 'pointer' }}
                               >
@@ -1233,24 +1266,54 @@ export default function SessionViewer({ sessionId, sessionList, reviewerName, re
                               </button>
                             </div>
                           </div>
+                        ) : (
+                          <>
+                            {/* Child header: category + badge + Edit button */}
+                            <div style={{ display: 'flex', alignItems: 'center',
+                              justifyContent: 'space-between', gap: 8 }}>
+                              <span style={{ fontSize: 13, fontFamily: MONO, fontWeight: 500,
+                                color: state === 'DISMISSED' ? '#9B9890' : C.textPrimary,
+                                textTransform: 'uppercase', flex: 1,
+                                overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                {child.category_code}
+                              </span>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
+                                {showEditChild && (
+                                  <FlagActionButton label="Edit"
+                                    onClick={(e) => { e.stopPropagation(); openEditForm(child); }}
+                                    hoverColor="#0F6E56" hoverBorder="#0F6E56" />
+                                )}
+                                <DetectionBadge layer={child.detection_layer} />
+                              </div>
+                            </div>
+
+                            {/* Child severity + confidence */}
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 8,
+                              marginTop: 8, flexWrap: 'wrap' }}>
+                              <VerdictBadge verdict={child.severity} />
+                              {child.confidence_score != null && (
+                                <span style={{ fontSize: 11, fontFamily: MONO, background: C.bgStatsrow,
+                                  border: `1px solid ${C.border}`, borderRadius: 3, padding: '2px 7px',
+                                  color: state === 'DISMISSED' ? '#9B9890' : C.textSecondary }}>
+                                  {Math.round(child.confidence_score * 100)}%
+                                </span>
+                              )}
+                            </div>
+
+                            {/* Child reasoning */}
+                            {child.reasoning && (
+                              <div style={{ fontSize: 12,
+                                color: state === 'DISMISSED' ? '#9B9890' : C.textSecondary,
+                                lineHeight: 1.5, marginTop: 10, paddingTop: 10,
+                                borderTop: `1px solid ${C.borderLight}`, fontStyle: 'italic' }}>
+                                {child.reasoning}
+                              </div>
+                            )}
+                          </>
                         )}
-                      </>
-                    )}
-
-                    {/* Scroll feedback */}
-                    {scrollMsg && !isEditing && (
-                      <div style={{ fontSize: 10, fontFamily: MONO, marginTop: 6, color: '#0F6E56' }}>
-                        ↑ Viewing in transcript
                       </div>
                     )}
-
-                    {/* Post-amend 2s confirmation */}
-                    {isConfirmed && (
-                      <div style={{ fontSize: 10, fontFamily: MONO, color: '#0F6E56', marginTop: 4 }}>
-                        Amended ✓
-                      </div>
-                    )}
-                  </div>
+                  </React.Fragment>
                 );
               })
             )}
@@ -1453,7 +1516,7 @@ export default function SessionViewer({ sessionId, sessionList, reviewerName, re
                   <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 12 }}>
                     {ACTIONS.map((a) => {
                       const isSelected   = selectedAction === a.key;
-                      const clearBlocked = a.key === 'CLEAR' && activeFlagCount > 0;
+                      const clearBlocked = a.key === 'CLEAR' && totalFlagCount > 0;
                       const s = isSelected ? a.active : { bg: C.bgStatsrow, color: C.textSecondary, border: C.border };
                       return (
                         <button

@@ -32,6 +32,8 @@ from store.db import (
     submit_session_for_review,
     mark_needs_final_review,
     get_session_flag_summary,
+    get_amended_record,
+    update_amended_record,
     lock_session,
     unlock_session,
     initialise_db,
@@ -505,27 +507,46 @@ def save_session_note(session_id: str, body: SessionNoteRequest):
 
 @app.post("/flags/{flag_id}/amend")
 def amend_flag(flag_id: int, body: AmendFlagRequest):
+    """Create or update the AMENDED child for this parent flag.
+
+    Idempotent: if an AMENDED row already exists with parent_flag_id = flag_id,
+    update it in place (so re-editing never creates a second AMENDED child).
+    """
     conn = get_connection()
     try:
         with conn:
             original = conn.execute(
-                "SELECT session_id, turn_id, category_code, pattern_matched FROM flags WHERE flag_id = ?", (flag_id,)
+                "SELECT session_id, turn_id, category_code, pattern_matched FROM flags WHERE flag_id = ?",
+                (flag_id,),
             ).fetchone()
             if original is None:
                 raise HTTPException(status_code=404, detail=f"Flag {flag_id} not found")
+
+            # Lookup by parent_flag_id — correct even when category_code changes
             existing = conn.execute(
                 """SELECT flag_id FROM flags
-                   WHERE session_id = ? AND category_code = ? AND detection_layer = 'AMENDED'""",
-                (original["session_id"], original["category_code"]),
+                   WHERE parent_flag_id = ? AND detection_layer = 'AMENDED'""",
+                (flag_id,),
             ).fetchone()
+
             if existing:
-                return {"success": True, "message": "Already amended"}
+                conn.execute(
+                    """UPDATE flags
+                       SET category_code = ?,
+                           severity      = ?,
+                           reasoning     = ?
+                       WHERE flag_id = ? AND detection_layer = 'AMENDED'""",
+                    (body.category_code, body.severity, body.reasoning, existing["flag_id"]),
+                )
+                return {"success": True, "amended_flag_id": existing["flag_id"], "updated": True}
+
             cur = conn.execute(
                 """
                 INSERT INTO flags
                     (session_id, turn_id, category_code, detection_layer, severity,
-                     confidence_score, reasoning, false_positive_risk, pattern_matched)
-                VALUES (?, ?, ?, 'AMENDED', ?, 1.0, ?, 'LOW', ?)
+                     confidence_score, reasoning, false_positive_risk, pattern_matched,
+                     parent_flag_id)
+                VALUES (?, ?, ?, 'AMENDED', ?, 1.0, ?, 'LOW', ?, ?)
                 """,
                 (
                     original["session_id"],
@@ -533,10 +554,38 @@ def amend_flag(flag_id: int, body: AmendFlagRequest):
                     body.category_code,
                     body.severity,
                     body.reasoning,
-                    original["pattern_matched"] if original["pattern_matched"] else f"Amended by {body.reviewer_id}",
+                    original["pattern_matched"] or f"Amended by {body.reviewer_id}",
+                    flag_id,
                 ),
             )
-        return {"success": True, "new_flag_id": cur.lastrowid}
+        return {"success": True, "amended_flag_id": cur.lastrowid, "updated": False}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        conn.close()
+
+
+@app.patch("/flags/{flag_id}")
+def patch_flag(flag_id: int, body: AmendFlagRequest):
+    conn = get_connection()
+    try:
+        with conn:
+            result = conn.execute(
+                "SELECT flag_id FROM flags WHERE flag_id = ?", (flag_id,)
+            ).fetchone()
+            if result is None:
+                raise HTTPException(status_code=404, detail=f"Flag {flag_id} not found")
+            conn.execute(
+                """UPDATE flags
+                   SET category_code = ?,
+                       severity      = ?,
+                       reasoning     = ?
+                   WHERE flag_id = ?""",
+                (body.category_code, body.severity, body.reasoning, flag_id),
+            )
+        return {"success": True, "flag_id": flag_id}
     except HTTPException:
         raise
     except Exception as exc:
@@ -562,6 +611,10 @@ def confirm_flag_endpoint(flag_id: int, body: LockRequest):
 
 @app.post("/flags/{flag_id}/dismiss")
 def dismiss_flag(flag_id: int, body: DismissFlagRequest):
+    """Create a DISMISSED child for this parent flag.
+
+    Lookup uses parent_flag_id — immune to category_code changes on any prior amendment.
+    """
     conn = get_connection()
     try:
         with conn:
@@ -571,26 +624,31 @@ def dismiss_flag(flag_id: int, body: DismissFlagRequest):
             ).fetchone()
             if original is None:
                 raise HTTPException(status_code=404, detail=f"Flag {flag_id} not found")
+
+            # Lookup by parent_flag_id — unambiguous regardless of category changes
             existing = conn.execute(
                 """SELECT flag_id FROM flags
-                   WHERE session_id = ? AND category_code = ? AND detection_layer = 'DISMISSED'""",
-                (original["session_id"], original["category_code"]),
+                   WHERE parent_flag_id = ? AND detection_layer = 'DISMISSED'""",
+                (flag_id,),
             ).fetchone()
             if existing:
                 return {"success": True, "message": "Already dismissed"}
+
             conn.execute(
                 """
                 INSERT INTO flags
                     (session_id, turn_id, category_code, detection_layer, severity,
-                     confidence_score, reasoning, false_positive_risk, pattern_matched)
-                VALUES (?, ?, ?, 'DISMISSED', 'LOW', 0.0, ?, 'HIGH', ?)
+                     confidence_score, reasoning, false_positive_risk, pattern_matched,
+                     parent_flag_id)
+                VALUES (?, ?, ?, 'DISMISSED', 'LOW', 0.0, ?, 'HIGH', ?, ?)
                 """,
                 (
                     original["session_id"],
                     original["turn_id"],
                     original["category_code"],
                     f"Dismissed by reviewer: {body.note}",
-                    original["pattern_matched"] if original["pattern_matched"] else f"Dismissed by {body.reviewer_id}",
+                    original["pattern_matched"] or f"Dismissed by {body.reviewer_id}",
+                    flag_id,
                 ),
             )
             conn.execute(
