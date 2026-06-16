@@ -389,7 +389,8 @@ def ingest_only(data_path: str) -> None:
         s_cols = ", ".join(s_keys)
         s_ph   = ", ".join("?" * len(s_keys))
 
-        with conn:
+        conn.execute("BEGIN")
+        try:
             conn.executemany(
                 f"INSERT OR REPLACE INTO sessions ({s_cols}) VALUES ({s_ph})",
                 [list(item["session_data"].values()) for item in batch],
@@ -397,8 +398,8 @@ def ingest_only(data_path: str) -> None:
             conn.executemany(
                 """INSERT OR REPLACE INTO turns
                        (session_id, turn_id, speaker, message_text, timestamp,
-                        language_detected, is_automated)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                        language_detected, is_automated, has_link)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                 [
                     (
                         item["session_id"],
@@ -408,6 +409,7 @@ def ingest_only(data_path: str) -> None:
                         t.get("timestamp"),
                         t.get("language_detected"),
                         t.get("is_automated", 0),
+                        t.get("has_link", 0),
                     )
                     for item in batch
                     for t in item["turns"]
@@ -454,6 +456,10 @@ def ingest_only(data_path: str) -> None:
                        WHERE session_id = ? AND overall_verdict = 'UNPROCESSED'""",
                     verdict_updates,
                 )
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
 
     batch: list[dict] = []
     conn = get_connection()
@@ -493,7 +499,8 @@ def ingest_only(data_path: str) -> None:
                     "message_text":      msg["message_text"],
                     "timestamp":         msg["timestamp"],
                     "language_detected": msg.get("language_detected"),
-                    "is_automated":      msg["is_automated"],
+                    "is_automated":      msg.get("is_automated", 0),
+                    "has_link":          msg.get("has_link", 0),
                 }
                 for msg in session.get("messages", [])
             ]
