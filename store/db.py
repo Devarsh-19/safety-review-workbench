@@ -39,6 +39,8 @@ def initialise_db() -> None:
         "ALTER TABLE sessions ADD COLUMN submitted_by TEXT",
         "ALTER TABLE sessions ADD COLUMN submitted_at TEXT",
         "ALTER TABLE sessions ADD COLUMN needs_final_review INTEGER DEFAULT 0",
+        # Session assignment column
+        "ALTER TABLE sessions ADD COLUMN assigned_to TEXT",
     ]
 
     with get_connection() as conn:

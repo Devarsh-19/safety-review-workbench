@@ -129,46 +129,80 @@ def health():
 
 
 @app.get("/stats")
-def stats():
+def stats(
+    reviewer_name: Optional[str] = None,
+    reviewer_role: Optional[str] = None,
+):
+    # L1: scope all counts to sessions assigned to this reviewer only
+    if reviewer_role == 'L1' and reviewer_name:
+        scope  = " AND assigned_to = ?"
+        params = (reviewer_name,)
+    else:
+        scope  = ""
+        params = ()
+
     try:
         with get_connection() as conn:
-            total       = conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
+            total       = conn.execute(
+                f"SELECT COUNT(*) FROM sessions WHERE 1=1{scope}", params
+            ).fetchone()[0]
             pending     = conn.execute(
-                "SELECT COUNT(*) FROM sessions WHERE review_status = 'PENDING'"
+                f"SELECT COUNT(*) FROM sessions WHERE review_status = 'PENDING'{scope}", params
             ).fetchone()[0]
             reviewed    = conn.execute(
-                "SELECT COUNT(*) FROM sessions WHERE review_status != 'PENDING'"
+                f"SELECT COUNT(*) FROM sessions WHERE review_status != 'PENDING'{scope}", params
             ).fetchone()[0]
             severe      = conn.execute(
-                "SELECT COUNT(*) FROM sessions WHERE overall_verdict = 'SEVERE'"
+                f"SELECT COUNT(*) FROM sessions WHERE overall_verdict = 'SEVERE'{scope}", params
             ).fetchone()[0]
             flagged     = conn.execute(
-                "SELECT COUNT(*) FROM sessions WHERE overall_verdict = 'FLAGGED'"
+                f"SELECT COUNT(*) FROM sessions WHERE overall_verdict = 'FLAGGED'{scope}", params
             ).fetchone()[0]
             clean       = conn.execute(
-                "SELECT COUNT(*) FROM sessions WHERE overall_verdict = 'CLEAN'"
+                f"SELECT COUNT(*) FROM sessions WHERE overall_verdict = 'CLEAN'{scope}", params
             ).fetchone()[0]
             unprocessed = conn.execute(
-                "SELECT COUNT(*) FROM sessions WHERE overall_verdict = 'UNPROCESSED'"
+                f"SELECT COUNT(*) FROM sessions WHERE overall_verdict = 'UNPROCESSED'{scope}", params
             ).fetchone()[0]
             locked      = conn.execute(
-                "SELECT COUNT(*) FROM sessions WHERE review_status = 'LOCKED'"
+                f"SELECT COUNT(*) FROM sessions WHERE review_status = 'LOCKED'{scope}", params
             ).fetchone()[0]
             submitted   = conn.execute(
-                "SELECT COUNT(*) FROM sessions WHERE review_status = 'SUBMITTED_FOR_REVIEW'"
+                f"SELECT COUNT(*) FROM sessions WHERE review_status = 'SUBMITTED_FOR_REVIEW'{scope}", params
             ).fetchone()[0]
             needs_final = conn.execute(
-                "SELECT COUNT(*) FROM sessions WHERE review_status = 'NEEDS_FINAL_REVIEW'"
+                f"SELECT COUNT(*) FROM sessions WHERE review_status = 'NEEDS_FINAL_REVIEW'{scope}", params
             ).fetchone()[0]
+
+            # L2-only: per-reviewer assignment breakdown
+            reviewer_stats = None
+            if reviewer_role == 'L2':
+                rs_rows = conn.execute("""
+                    SELECT
+                        assigned_to AS reviewer,
+                        COUNT(*) AS total,
+                        SUM(CASE WHEN review_status = 'PENDING' THEN 1 ELSE 0 END) AS pending,
+                        SUM(CASE WHEN review_status = 'SUBMITTED_FOR_REVIEW' THEN 1 ELSE 0 END) AS submitted,
+                        SUM(CASE WHEN review_status = 'LOCKED' THEN 1 ELSE 0 END) AS locked
+                    FROM sessions
+                    WHERE assigned_to IS NOT NULL
+                    GROUP BY assigned_to
+                    ORDER BY assigned_to
+                """).fetchall()
+                reviewer_stats = [dict(r) for r in rs_rows]
+
     except Exception:
-        return {
+        result = {
             "total_sessions": 0, "total_pending": 0, "total_reviewed": 0,
             "count_severe": 0, "count_flagged": 0, "count_clean": 0,
             "count_unprocessed": 0, "count_locked": 0,
             "count_submitted": 0, "count_needs_final_review": 0,
         }
+        if reviewer_role == 'L2':
+            result["reviewer_stats"] = []
+        return result
 
-    return {
+    result = {
         "total_sessions":           total,
         "total_pending":            pending,
         "total_reviewed":           reviewed,
@@ -180,6 +214,9 @@ def stats():
         "count_submitted":          submitted,
         "count_needs_final_review": needs_final,
     }
+    if reviewer_stats is not None:
+        result["reviewer_stats"] = reviewer_stats
+    return result
 
 
 @app.get("/stats/reviewer")
@@ -235,15 +272,25 @@ def pending_sessions(limit: int = Query(default=50, ge=1, le=500)):
 
 @app.get("/sessions")
 def sessions(
-    verdict:  Optional[str] = None,
-    status:   Optional[str] = None,
-    language: Optional[str] = None,
+    verdict:       Optional[str] = None,
+    status:        Optional[str] = None,
+    language:      Optional[str] = None,
+    reviewer_name: Optional[str] = None,
+    reviewer_role: Optional[str] = None,
+    assigned_to:   Optional[str] = None,
 ):
     rows = fetch_sessions(
         verdict_filter=verdict,
         status_filter=status,
         language_filter=language,
     )
+
+    # Role-based filtering: L1 sees only their assigned sessions;
+    # L2 can optionally filter by a specific assignee.
+    if reviewer_role == 'L1' and reviewer_name:
+        rows = [r for r in rows if r.get('assigned_to') == reviewer_name]
+    elif reviewer_role == 'L2' and assigned_to:
+        rows = [r for r in rows if r.get('assigned_to') == assigned_to]
 
     # Enrich each row with flag counts (total, LLM/REGEX, manual) — excludes DISMISSED
     # and with turn_count from the turns table.

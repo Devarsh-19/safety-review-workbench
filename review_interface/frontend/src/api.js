@@ -11,8 +11,12 @@ async function request(path, options = {}) {
 
 // ── Aggregate stats ────────────────────────────────────────────────────────
 
-export function getStats() {
-  return request('/stats');
+export function getStats(params = {}) {
+  const qs = new URLSearchParams();
+  if (params.reviewer_name) qs.append('reviewer_name', params.reviewer_name);
+  if (params.reviewer_role) qs.append('reviewer_role', params.reviewer_role);
+  const q = qs.toString() ? `?${qs}` : '';
+  return request(`/stats${q}`);
 }
 
 export function getReviewerStats() {
@@ -29,9 +33,12 @@ export async function getViolationStats() {
 
 export function getSessions(filters = {}) {
   const params = new URLSearchParams();
-  if (filters.verdict)  params.append('verdict',  filters.verdict);
-  if (filters.status)   params.append('status',   filters.status);
-  if (filters.language) params.append('language', filters.language);
+  if (filters.verdict)       params.append('verdict',       filters.verdict);
+  if (filters.status)        params.append('status',        filters.status);
+  if (filters.language)      params.append('language',      filters.language);
+  if (filters.reviewer_name) params.append('reviewer_name', filters.reviewer_name);
+  if (filters.reviewer_role) params.append('reviewer_role', filters.reviewer_role);
+  if (filters.assigned_to)   params.append('assigned_to',   filters.assigned_to);
   const qs = params.toString() ? `?${params}` : '';
   return request(`/sessions${qs}`);
 }
