@@ -42,9 +42,8 @@ def initialise_db() -> None:
         "ALTER TABLE sessions ADD COLUMN submitted_by TEXT",
         "ALTER TABLE sessions ADD COLUMN submitted_at TEXT",
         "ALTER TABLE sessions ADD COLUMN needs_final_review INTEGER DEFAULT 0",
-        # Reviewer assignment from input CSV
-        "ALTER TABLE sessions ADD COLUMN assigned_reviewer TEXT",
-        "CREATE INDEX IF NOT EXISTS idx_sessions_assigned_reviewer ON sessions(assigned_reviewer)",
+        # Session assignment column
+        "ALTER TABLE sessions ADD COLUMN assigned_to TEXT",
     ]
 
     with get_connection() as conn:

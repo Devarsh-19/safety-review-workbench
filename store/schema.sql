@@ -27,7 +27,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     submitted_by        TEXT,                               -- L1 reviewer who submitted for final review
     submitted_at        TEXT,                               -- timestamp of submission
     needs_final_review  INTEGER DEFAULT 0,                  -- 1 if marked by L2 for final review
-    assigned_reviewer   TEXT,                               -- pre-assigned reviewer from input CSV
+    assigned_to         TEXT    DEFAULT NULL,               -- L1 reviewer assigned to this session
     created_at          TEXT    DEFAULT (datetime('now'))
 );
 
@@ -80,3 +80,4 @@ CREATE INDEX IF NOT EXISTS idx_sessions_language          ON sessions(language_d
 CREATE INDEX IF NOT EXISTS idx_sessions_assigned_reviewer ON sessions(assigned_reviewer);
 CREATE INDEX IF NOT EXISTS idx_flags_session_id        ON flags(session_id);
 CREATE INDEX IF NOT EXISTS idx_flags_category_code     ON flags(category_code);
+CREATE INDEX IF NOT EXISTS idx_sessions_assigned_to    ON sessions(assigned_to);
