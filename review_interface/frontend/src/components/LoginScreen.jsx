@@ -14,26 +14,36 @@ const REVIEWERS = [
 ];
 
 export default function LoginScreen({ onLogin }) {
-  const [name,          setName]          = useState('');
-  const [focused,       setFocused]       = useState(false);
-  const [stats,         setStats]         = useState(null);
-  const [assignedCount, setAssignedCount] = useState(null);
-  const [btnHover,      setBtnHover]      = useState(false);
+  const [name,           setName]           = useState('');
+  const [focused,        setFocused]        = useState(false);
+  const [stats,          setStats]          = useState(null);
+  const [assignedCount,  setAssignedCount]  = useState(null);
+  const [reviewerBreakdown, setReviewerBreakdown] = useState([]);
+  const [btnHover,       setBtnHover]       = useState(false);
 
+  // Fetch global stats + per-reviewer assignment breakdown on mount
   useEffect(() => {
-    getStats().then(setStats).catch(() => {});
+    // Use reviewer_role=L2 to get the reviewer_stats breakdown from the API
+    getStats({ reviewer_role: 'L2' })
+      .then((data) => {
+        setStats(data);
+        setReviewerBreakdown(data.reviewer_stats || []);
+      })
+      .catch(() => {});
   }, []);
 
-  // Fetch assigned-session count whenever a reviewer is selected
+  // Fetch personal queue stats when an L1 reviewer selects their name
   useEffect(() => {
     if (!name) { setAssignedCount(null); return; }
     const reviewer = REVIEWERS.find((r) => r.name === name);
-    // L2 reviewers see all — no personal count needed
     if (reviewer?.role === 'L2') { setAssignedCount(null); return; }
-    getSessions({ assigned_reviewer: name })
-      .then((sessions) => {
-        const pending = sessions.filter((s) => s.review_status === 'PENDING').length;
-        setAssignedCount({ total: sessions.length, pending });
+    // Use role-scoped stats endpoint for accurate personal count
+    getStats({ reviewer_name: name, reviewer_role: 'L1' })
+      .then((data) => {
+        setAssignedCount({
+          total:   data.total_sessions ?? 0,
+          pending: data.total_pending  ?? 0,
+        });
       })
       .catch(() => setAssignedCount(null));
   }, [name]);
@@ -112,7 +122,7 @@ export default function LoginScreen({ onLogin }) {
           border: `1px solid ${C.border}`,
           borderRadius: 6,
           padding: '40px 44px',
-          width: 400,
+          width: 460,
           maxWidth: '100%',
         }}>
           {/* Eyebrow */}
@@ -218,6 +228,69 @@ export default function LoginScreen({ onLogin }) {
                 </div>
               ))}
             </div>
+
+            {/* Per-reviewer assignment breakdown — always visible */}
+            {reviewerBreakdown.length > 0 && (
+              <div style={{ marginTop: 16 }}>
+                <div style={{
+                  fontSize: 11, fontFamily: MONO, textTransform: 'uppercase',
+                  letterSpacing: '0.05em', color: C.textSecondary, marginBottom: 8,
+                }}>
+                  Assignment Breakdown
+                </div>
+                <div style={{
+                  border: `1px solid ${C.border}`, borderRadius: 5, overflow: 'hidden',
+                }}>
+                  {/* Header */}
+                  <div style={{
+                    display: 'grid', gridTemplateColumns: '1fr 80px 80px',
+                    background: C.bgStatsrow, borderBottom: `1px solid ${C.border}`,
+                    padding: '6px 12px',
+                  }}>
+                    {['Reviewer', 'Assigned', 'Pending'].map((h) => (
+                      <div key={h} style={{
+                        fontSize: 10, fontFamily: MONO, fontWeight: 600,
+                        textTransform: 'uppercase', letterSpacing: '0.06em',
+                        color: C.textSecondary, textAlign: h === 'Reviewer' ? 'left' : 'right',
+                      }}>{h}</div>
+                    ))}
+                  </div>
+                  {/* Rows */}
+                  {reviewerBreakdown.map((r, i) => {
+                    const isLast    = i === reviewerBreakdown.length - 1;
+                    const isSelected = r.reviewer === name;
+                    return (
+                      <div key={r.reviewer} style={{
+                        display: 'grid', gridTemplateColumns: '1fr 80px 80px',
+                        padding: '7px 12px',
+                        borderBottom: isLast ? 'none' : `1px solid ${C.borderLight}`,
+                        background: isSelected ? '#F0FAF6' : C.bgSurface,
+                      }}>
+                        <div style={{
+                          fontSize: 13, color: C.textPrimary, fontWeight: isSelected ? 600 : 400,
+                        }}>
+                          {r.reviewer}
+                          {isSelected && (
+                            <span style={{
+                              marginLeft: 6, fontSize: 10, color: C.accent,
+                              fontFamily: MONO,
+                            }}>← you</span>
+                          )}
+                        </div>
+                        <div style={{
+                          fontSize: 12, fontFamily: MONO, color: C.accent,
+                          textAlign: 'right', fontWeight: 500,
+                        }}>{r.total}</div>
+                        <div style={{
+                          fontSize: 12, fontFamily: MONO, textAlign: 'right',
+                          color: r.pending > 0 ? C.severeText : C.textMuted,
+                        }}>{r.pending}</div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
 
             {/* Submit button */}
             <button
