@@ -259,7 +259,6 @@ export default function SessionViewer({ sessionId, sessionList, reviewerName, re
   const [l2Note,             setL2Note]             = useState('');
   const [l2NoteFocused,      setL2NoteFocused]      = useState(false);
   const [submitSuccess,      setSubmitSuccess]      = useState(false);
-  const [confirmingFlagId,   setConfirmingFlagId]   = useState(null);
   const [lockBtnHover,       setLockBtnHover]       = useState(false);
 
   // Refs
