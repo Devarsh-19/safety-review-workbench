@@ -394,6 +394,14 @@ export default function SessionViewer({ sessionId, sessionList, reviewerName, re
     }, 1500);
   };
 
+  // Refresh both the flags list AND the session object (so the header verdict
+  // badge reflects the recomputed overall_verdict after a flag change).
+  const refreshSessionAndFlags = async () => {
+    const detail = await getSessionDetail(sessionId);
+    setData(detail);
+    setFlags(detail.flags || []);
+  };
+
   // ── Feature B — Flag card edit / dismiss ─────────────────────────────────
   const openEditForm = (flag) => {
     setEditingFlagId(flag.flag_id);
@@ -414,8 +422,7 @@ export default function SessionViewer({ sessionId, sessionList, reviewerName, re
         body: JSON.stringify({ ...editForm, reviewer_id: reviewerName }),
       });
       if (!res.ok) throw new Error('amend failed');
-      const updated = await getSessionFlags(sessionId);
-      setFlags(updated);
+      await refreshSessionAndFlags();
       setEditingFlagId(null);
       setToast('Flag updated');
       setTimeout(() => setToast(null), 2000);
@@ -435,8 +442,7 @@ export default function SessionViewer({ sessionId, sessionList, reviewerName, re
         body: JSON.stringify({ reviewer_id: reviewerName, note: '' }),
       });
       if (!res.ok) throw new Error('dismiss failed');
-      const updated = await getSessionFlags(sessionId);
-      setFlags(updated);
+      await refreshSessionAndFlags();
       setDismissingFlagId(null);
     } catch (_) {
     } finally {
@@ -450,8 +456,7 @@ export default function SessionViewer({ sessionId, sessionList, reviewerName, re
     setConfirmingFlagId(flag.flag_id);
     try {
       await confirmFlag(flag.flag_id, reviewerName);
-      const updated = await getSessionFlags(sessionId);
-      setFlags(updated);
+      await refreshSessionAndFlags();
       setToast('Flag confirmed');
       setTimeout(() => setToast(null), 2000);
     } catch (_) {
@@ -465,7 +470,8 @@ export default function SessionViewer({ sessionId, sessionList, reviewerName, re
     if (submitting) return;
     setSubmitting(true);
     try {
-      await submitSession(sessionId, reviewerName, null);
+      // Note is fully optional — pass whatever the reviewer typed, or null.
+      await submitSession(sessionId, reviewerName, l2Note.trim() || null);
       setToast('Submitted for review');
       setTimeout(() => { setToast(null); onBack(); }, 2000);
     } catch (err) {
