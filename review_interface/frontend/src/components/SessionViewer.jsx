@@ -472,10 +472,14 @@ export default function SessionViewer({ sessionId, sessionList, reviewerName, re
     try {
       // Note is fully optional — pass whatever the reviewer typed, or null.
       await submitSession(sessionId, reviewerName, l2Note.trim() || null);
+      // Refresh in place so the panel switches to the submitted state.
+      // Do NOT auto-navigate — let the reviewer choose Next / Prev / Queue.
+      await refreshSessionAndFlags();
       setToast('Submitted for review');
-      setTimeout(() => { setToast(null); onBack(); }, 2000);
+      setTimeout(() => setToast(null), 2000);
     } catch (err) {
       setToast(`Error: ${err.message}`);
+    } finally {
       setSubmitting(false);
     }
   };
