@@ -6,10 +6,9 @@ import { getStats, getSessions } from '../api';
 
 const REVIEWERS = [
   { name: 'Gaurav',   role: 'L1' },
-  { name: 'Yusuf',    role: 'L1' },
   { name: 'Nikhil',   role: 'L1' },
   { name: 'Divyansh', role: 'L1' },
-  { name: 'Vineet',   role: 'L1' },
+  { name: 'Yusuf',    role: 'L1' },
   { name: 'Amogh',    role: 'L2' },
 ];
 
