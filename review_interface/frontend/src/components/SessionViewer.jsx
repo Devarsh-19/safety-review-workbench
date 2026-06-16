@@ -3,7 +3,7 @@ import { C, MONO } from '../tokens';
 import VerdictBadge from './VerdictBadge';
 import {
   getSessionDetail, getSessionFlags, submitReview,
-  manualFlag, saveSessionNote,
+  manualFlag, saveSessionNote, confirmFlag,
 } from '../api';
 
 // ---------------------------------------------------------------------------
@@ -34,6 +34,23 @@ const INTENT_CATEGORIES = [
 ];
 
 // ---------------------------------------------------------------------------
+// Active flag resolution
+// Returns the display-level flag list: for each original flag, if an
+// amendment exists (parent_flag_id set) return the amendment; otherwise
+// return the original. This mirrors the backend's active row logic.
+// ---------------------------------------------------------------------------
+function getActiveFlags(flags) {
+  const amendedParentIds = new Set(
+    flags.filter((f) => f.parent_flag_id != null).map((f) => f.parent_flag_id)
+  );
+  return flags.filter((f) => {
+    if (f.parent_flag_id != null) return true;   // amendment — this is the active version
+    if (amendedParentIds.has(f.flag_id)) return false; // original that has been amended — skip
+    return true;                                  // original with no amendment — active
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Flag → turn association
 // Priority 1: direct turn_id match (value equality, not index arithmetic)
 // Priority 2: pattern_matched exact substring containment (for null turn_id)
@@ -42,8 +59,9 @@ const INTENT_CATEGORIES = [
 // ---------------------------------------------------------------------------
 function buildFlagsByTurnIdx(turns, flags) {
   const result = {};
-  flags.forEach((flag) => {
-    if (flag.detection_layer === 'DISMISSED') return;
+  // Only show active flags (amendments are the active version of a flag)
+  const activeFlags = getActiveFlags(flags);
+  activeFlags.forEach((flag) => {
 
     // Priority 1 — direct turn_id value match
     if (flag.turn_id != null) {
@@ -131,12 +149,10 @@ function Toast({ message }) {
 // ---------------------------------------------------------------------------
 // Detection-layer badge colours
 // ---------------------------------------------------------------------------
-function layerStyle(layer) {
-  if (layer === 'LLM')       return { bg: C.llmBg,    text: C.llmText,    border: C.llmBorder    };
-  if (layer === 'MANUAL')    return { bg: C.manualBg, text: C.manualText, border: C.manualBorder };
-  if (layer === 'AMENDED')   return { bg: '#E1F5EE',  text: '#085041',    border: '#9FE1CB'      };
-  if (layer === 'DISMISSED') return { bg: '#F5F4F0',  text: '#9B9890',    border: '#D4D0C9'      };
-  return                              { bg: C.regexBg, text: C.regexText,  border: C.regexBorder  };
+function layerStyle(source) {
+  if (source === 'LLM')    return { bg: C.llmBg,    text: C.llmText,    border: C.llmBorder    };
+  if (source === 'MANUAL') return { bg: C.manualBg, text: C.manualText, border: C.manualBorder };
+  return                           { bg: C.regexBg,  text: C.regexText,  border: C.regexBorder  };
 }
 
 // ---------------------------------------------------------------------------
@@ -220,12 +236,9 @@ export default function SessionViewer({ sessionId, sessionList, reviewerName, on
   const [editingFlagId,      setEditingFlagId]      = useState(null);
   const [editForm,           setEditForm]           = useState({});
   const [editSaving,         setEditSaving]         = useState(false);
-  const [editConfirmFlagId,  setEditConfirmFlagId]  = useState(null);
-  const [amendedFlagIds,     setAmendedFlagIds]     = useState(new Set());
   const [dismissingFlagId,   setDismissingFlagId]   = useState(null);
-  const [dismissNote,        setDismissNote]        = useState('');
   const [dismissSaving,      setDismissSaving]      = useState(false);
-  const [dismissedFlagIds,   setDismissedFlagIds]   = useState(new Set());
+  const [confirmingFlagId,   setConfirmingFlagId]   = useState(null);
   const [flagCardHoverId,    setFlagCardHoverId]    = useState(null);
 
   // Refs
@@ -252,12 +265,9 @@ export default function SessionViewer({ sessionId, sessionList, reviewerName, on
     setEditingFlagId(null);
     setEditForm({});
     setEditSaving(false);
-    setEditConfirmFlagId(null);
-    setAmendedFlagIds(new Set());
     setDismissingFlagId(null);
-    setDismissNote('');
     setDismissSaving(false);
-    setDismissedFlagIds(new Set());
+    setConfirmingFlagId(null);
     setFlagCardHoverId(null);
 
     getSessionDetail(sessionId)
@@ -382,9 +392,8 @@ export default function SessionViewer({ sessionId, sessionList, reviewerName, on
       const updated = await getSessionFlags(sessionId);
       setFlags(updated);
       setEditingFlagId(null);
-      setAmendedFlagIds((prev) => new Set([...prev, flag.flag_id]));
-      setEditConfirmFlagId(flag.flag_id);
-      setTimeout(() => setEditConfirmFlagId(null), 2000);
+      setToast('Flag updated');
+      setTimeout(() => setToast(null), 2000);
     } catch (_) {
     } finally {
       setEditSaving(false);
@@ -398,16 +407,35 @@ export default function SessionViewer({ sessionId, sessionList, reviewerName, on
       const res = await fetch(`/flags/${flag.flag_id}/dismiss`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ reviewer_id: reviewerName, note: dismissNote }),
+        body: JSON.stringify({ reviewer_id: reviewerName, note: '' }),
       });
       if (!res.ok) throw new Error('dismiss failed');
       const updated = await getSessionFlags(sessionId);
       setFlags(updated);
       setDismissingFlagId(null);
-      setDismissedFlagIds((prev) => new Set([...prev, flag.flag_id]));
     } catch (_) {
     } finally {
       setDismissSaving(false);
+    }
+  };
+
+  const handleConfirmFlag = async (flag) => {
+    if (confirmingFlagId) return;
+    setConfirmingFlagId(flag.flag_id);
+    try {
+      const res = await fetch(`/flags/${flag.flag_id}/confirm`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reviewer_id: reviewerName }),
+      });
+      if (!res.ok) throw new Error('confirm failed');
+      const updated = await getSessionFlags(sessionId);
+      setFlags(updated);
+      setToast('Flag confirmed');
+      setTimeout(() => setToast(null), 2000);
+    } catch (_) {
+    } finally {
+      setConfirmingFlagId(null);
     }
   };
 
@@ -432,37 +460,11 @@ export default function SessionViewer({ sessionId, sessionList, reviewerName, on
   const isLocked        = session?.review_status === 'LOCKED';
   const isReviewed      = session?.review_status && session.review_status !== 'PENDING' && session.reviewer_id;
 
-  // ── Flag lineage grouping ────────────────────────────────────────────────
-  const childMap = {};
-  flags.forEach((f) => {
-    if (f.detection_layer === 'AMENDED' || f.detection_layer === 'DISMISSED') {
-      const parent = flags.find(
-        (p) => (p.detection_layer === 'LLM' || p.detection_layer === 'REGEX' || p.detection_layer === 'MANUAL')
-               && p.category_code === f.category_code
-      );
-      if (!childMap[f.category_code]) childMap[f.category_code] = [];
-      childMap[f.category_code].push({ ...f, parentDetectionLayer: parent ? parent.detection_layer : null });
-    }
-  });
-  const orderedFlags = [];
-  const _usedChildIds = new Set();
-  flags.forEach((f) => {
-    if (f.detection_layer === 'LLM' || f.detection_layer === 'REGEX' || f.detection_layer === 'MANUAL') {
-      orderedFlags.push({ flag: f, itemType: 'parent' });
-      (childMap[f.category_code] || []).forEach((child) => {
-        if (!_usedChildIds.has(child.flag_id)) {
-          orderedFlags.push({ flag: child, itemType: 'child' });
-          _usedChildIds.add(child.flag_id);
-        }
-      });
-    }
-  });
-  flags.forEach((f) => {
-    if ((f.detection_layer === 'AMENDED' || f.detection_layer === 'DISMISSED') && !_usedChildIds.has(f.flag_id)) {
-      orderedFlags.push({ flag: f, itemType: 'child' });
-    }
-  });
-  const activeFlagCount = flags.filter((f) => f.detection_layer !== 'DISMISSED').length;
+  // ── Active flag resolution ───────────────────────────────────────────────
+  // Show only the active version of each flag: amendment if it exists, else original.
+  // No AMENDED/DISMISSED labels — every flag card looks fresh.
+  const displayedFlags  = getActiveFlags(flags);
+  const activeFlagCount = displayedFlags.length;
 
   // ── Feature A — Click flag card to jump to matching turn ─────────────────
   const handleFlagCardClick = (flag) => {
@@ -832,44 +834,19 @@ export default function SessionViewer({ sessionId, sessionList, reviewerName, on
               {activeFlagCount > 0 ? `Flags Detected (${activeFlagCount})` : 'Flags Detected'}
             </div>
 
-            {loading ? <SkeletonPane /> : flags.length === 0 ? (
+            {loading ? <SkeletonPane /> : displayedFlags.length === 0 ? (
               <div style={{ fontSize: 13, color: C.textSecondary, fontStyle: 'italic' }}>
                 No flags detected for this session.
               </div>
             ) : (
-              orderedFlags.map(({ flag, itemType }, fi) => {
-                const ls = layerStyle(flag.detection_layer);
-
-                const parentChildStatus = itemType === 'parent' ? (
-                  (childMap[flag.category_code] || []).some((c) => c.detection_layer === 'AMENDED')   ? 'AMENDED'   :
-                  (childMap[flag.category_code] || []).some((c) => c.detection_layer === 'DISMISSED') ? 'DISMISSED' :
-                  null
-                ) : null;
-
-                const cardOpacity =
-                  itemType === 'parent' && parentChildStatus === 'AMENDED'   ? 0.4 :
-                  itemType === 'parent' && parentChildStatus === 'DISMISSED' ? 0.3 :
-                  1;
-
-                const showEdit =
-                  itemType === 'child'       ? false :
-                  parentChildStatus !== null ? false :
-                  (flag.detection_layer !== 'AMENDED' && flag.detection_layer !== 'DISMISSED');
-
-                const showDismiss =
-                  itemType === 'child' && flag.detection_layer === 'AMENDED'  ? true  :
-                  itemType === 'child'                                         ? false :
-                  parentChildStatus !== null                                   ? false :
-                  flag.detection_layer !== 'DISMISSED';
-
-                const isDismissedLyr = flag.detection_layer === 'DISMISSED';
-                const isEditing      = editingFlagId === flag.flag_id && itemType !== 'child';
-                const isDismissConf  = dismissingFlagId === flag.flag_id;
-                const isAmended      = amendedFlagIds.has(flag.flag_id);
-                const isDismissed    = dismissedFlagIds.has(flag.flag_id);
-                const isHoveredCard  = flagCardHoverId === flag.flag_id;
-                const isConfirmed    = editConfirmFlagId === flag.flag_id;
-                const scrollMsg      = flagScrollMsg[flag.flag_id];
+              displayedFlags.map((flag, fi) => {
+                const ls            = layerStyle(flag.source || flag.detection_layer);
+                const isEditing     = editingFlagId === flag.flag_id;
+                const isDismissConf = dismissingFlagId === flag.flag_id;
+                const isHoveredCard = flagCardHoverId === flag.flag_id;
+                const isConfirming  = confirmingFlagId === flag.flag_id;
+                const isConfirmedStatus = flag.status === 'CONFIRMED';
+                const scrollMsg     = flagScrollMsg[flag.flag_id];
 
                 return (
                   <div
@@ -878,15 +855,15 @@ export default function SessionViewer({ sessionId, sessionList, reviewerName, on
                     onMouseEnter={() => setFlagCardHoverId(flag.flag_id)}
                     onMouseLeave={() => setFlagCardHoverId(null)}
                     style={{
-                      background: isDismissedLyr ? '#F5F4F0'
+                      background: isConfirmedStatus ? '#F0FAF6'
                         : (isHoveredCard && !isEditing && !isDismissConf ? '#FAFAF8' : C.bgSurface),
                       border: `1px solid ${
-                        isHoveredCard && !isEditing && !isDismissConf ? '#D4D0C9'
-                        : isDismissedLyr ? '#D4D0C9' : C.border}`,
+                        isConfirmedStatus ? '#9FE1CB'
+                        : isHoveredCard && !isEditing && !isDismissConf ? '#D4D0C9'
+                        : C.border}`,
                       borderRadius: 6, padding: '14px 16px', marginBottom: 10,
                       cursor: isEditing || isDismissConf ? 'default' : 'pointer',
-                      opacity: cardOpacity,
-                      transition: 'opacity 0.3s, background 150ms, border-color 150ms',
+                      transition: 'background 150ms, border-color 150ms',
                     }}
                   >
                     {isEditing ? (
@@ -950,32 +927,39 @@ export default function SessionViewer({ sessionId, sessionList, reviewerName, on
                       </div>
                     ) : (
                       <>
-                        {/* Category + badge + action buttons */}
+                        {/* Category + action buttons + Detection Layer tab */}
                         <div style={{ display: 'flex', alignItems: 'center',
                           justifyContent: 'space-between', gap: 8 }}>
                           <span style={{ fontSize: 13, fontFamily: MONO, fontWeight: 500,
-                            color: isDismissedLyr ? '#9B9890' : C.textPrimary,
-                            textTransform: 'uppercase', flex: 1,
+                            color: C.textPrimary, textTransform: 'uppercase', flex: 1,
                             overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                             {flag.category_code}
+                            {isConfirmedStatus && (
+                              <span style={{ marginLeft: 6, fontSize: 10, fontFamily: MONO,
+                                color: '#085041', background: '#E1F5EE', border: '1px solid #9FE1CB',
+                                borderRadius: 3, padding: '1px 5px' }}>
+                                ✓ Confirmed
+                              </span>
+                            )}
                           </span>
                           <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
-                            {!isLocked && showEdit && (
+                            {!isLocked && !isConfirmedStatus && (
+                              <FlagActionButton label="Confirm"
+                                onClick={(e) => { e.stopPropagation(); handleConfirmFlag(flag); }}
+                                hoverColor="#085041" hoverBorder="#9FE1CB" />
+                            )}
+                            {!isLocked && (
                               <FlagActionButton label="Edit"
                                 onClick={(e) => { e.stopPropagation(); openEditForm(flag); }}
                                 hoverColor="#0F6E56" hoverBorder="#0F6E56" />
                             )}
-                            {!isLocked && showDismiss && (
+                            {!isLocked && (
                               <FlagActionButton label="Dismiss"
-                                onClick={(e) => { e.stopPropagation(); setDismissingFlagId(flag.flag_id); setDismissNote(''); }}
+                                onClick={(e) => { e.stopPropagation(); setDismissingFlagId(flag.flag_id); }}
                                 hoverColor="#A32D2D" hoverBorder="#F7C1C1" />
                             )}
-                            <div style={{ display: 'flex', gap: 4 }}>
-                              {flag.parentDetectionLayer && (
-                                <DetectionBadge layer={flag.parentDetectionLayer} />
-                              )}
-                              <DetectionBadge layer={flag.detection_layer} />
-                            </div>
+                            {/* Detection Layer tab — read-only, shows source */}
+                            <DetectionBadge layer={flag.source || flag.detection_layer || 'LLM'} />
                           </div>
                         </div>
 
@@ -986,13 +970,12 @@ export default function SessionViewer({ sessionId, sessionList, reviewerName, on
                           {flag.confidence_score != null && (
                             <span style={{ fontSize: 11, fontFamily: MONO, background: C.bgStatsrow,
                               border: `1px solid ${C.border}`, borderRadius: 3, padding: '2px 7px',
-                              color: isDismissedLyr ? '#9B9890' : C.textSecondary }}>
+                              color: C.textSecondary }}>
                               {Math.round(flag.confidence_score * 100)}%
                             </span>
                           )}
                           {flag.false_positive_risk && (
-                            <span style={{ fontSize: 11,
-                              color: isDismissedLyr ? '#9B9890' : C.textSecondary }}>
+                            <span style={{ fontSize: 11, color: C.textSecondary }}>
                               FP risk: <b>{flag.false_positive_risk}</b>
                             </span>
                           )}
@@ -1000,46 +983,18 @@ export default function SessionViewer({ sessionId, sessionList, reviewerName, on
 
                         {/* Reasoning */}
                         {flag.reasoning && (
-                          <div style={{ fontSize: 12,
-                            color: isDismissedLyr ? '#9B9890' : C.textSecondary,
+                          <div style={{ fontSize: 12, color: C.textSecondary,
                             lineHeight: 1.5, marginTop: 10, paddingTop: 10,
                             borderTop: `1px solid ${C.borderLight}`, fontStyle: 'italic' }}>
                             {flag.reasoning}
                           </div>
                         )}
 
-                        {/* "Flagged by" — only for MANUAL flags */}
+                        {/* Flagged by — only for MANUAL source flags */}
                         {flag.flagged_by && (
                           <div style={{ fontSize: 11, fontFamily: MONO,
                             color: C.textMuted, marginTop: 6 }}>
                             Flagged by {flag.flagged_by}
-                          </div>
-                        )}
-
-                        {/* Parent suppression labels — data-driven from childMap */}
-                        {parentChildStatus === 'AMENDED' && (
-                          <div style={{ fontSize: 10, fontFamily: MONO,
-                            color: '#0F6E56', marginTop: 6 }}>
-                            Amended
-                          </div>
-                        )}
-                        {parentChildStatus === 'DISMISSED' && (
-                          <div style={{ fontSize: 10, fontFamily: MONO,
-                            color: '#A32D2D', marginTop: 6 }}>
-                            Dismissed
-                          </div>
-                        )}
-                        {/* Interim labels — between action and next flags refresh */}
-                        {!parentChildStatus && isAmended && (
-                          <div style={{ fontSize: 10, fontFamily: MONO,
-                            color: '#0F6E56', marginTop: 6 }}>
-                            Amended
-                          </div>
-                        )}
-                        {!parentChildStatus && isDismissed && (
-                          <div style={{ fontSize: 10, fontFamily: MONO,
-                            color: '#A32D2D', marginTop: 6 }}>
-                            Dismissed
                           </div>
                         )}
 
@@ -1051,17 +1006,8 @@ export default function SessionViewer({ sessionId, sessionList, reviewerName, on
                               borderTop: `1px solid ${C.borderLight}` }}
                           >
                             <div style={{ fontSize: 12, color: '#1C1C1A', marginBottom: 8 }}>
-                              Dismiss this flag?
+                              Dismiss this flag? This cannot be undone.
                             </div>
-                            <input
-                              type="text"
-                              placeholder="Reason for dismissal..."
-                              value={dismissNote}
-                              onChange={(e) => setDismissNote(e.target.value)}
-                              style={{ width: '100%', padding: '7px 10px', fontSize: 12,
-                                border: `1px solid ${C.border}`, borderRadius: 4,
-                                background: C.bgMuted, color: C.textPrimary, marginBottom: 8 }}
-                            />
                             <div style={{ display: 'flex', gap: 8 }}>
                               <button
                                 disabled={dismissSaving}
@@ -1094,10 +1040,10 @@ export default function SessionViewer({ sessionId, sessionList, reviewerName, on
                       </div>
                     )}
 
-                    {/* Post-amend 2s confirmation */}
-                    {isConfirmed && (
-                      <div style={{ fontSize: 10, fontFamily: MONO, color: '#0F6E56', marginTop: 4 }}>
-                        Amended ✓
+                    {/* Confirming in-progress indicator */}
+                    {isConfirming && (
+                      <div style={{ fontSize: 10, fontFamily: MONO, color: '#085041', marginTop: 4 }}>
+                        Confirming…
                       </div>
                     )}
                   </div>

@@ -44,8 +44,11 @@ CREATE TABLE IF NOT EXISTS flags (
     flag_id             INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id          TEXT,
     turn_id             INTEGER,
-    category_code       TEXT,                               -- e.g. 'OFF_PLATFORM', 'NSFW', 'FEAR_MANIPULATION'
-    detection_layer     TEXT,                               -- 'REGEX', 'LLM', or 'MANUAL'
+    category_code       TEXT,                               -- e.g. 'OFF_PLATFORM_SOLICITATION', 'NSFW', 'FEAR_MANIPULATION'
+    detection_layer     TEXT,                               -- kept for backwards compat; use source + status instead
+    source              TEXT,                               -- 'LLM' | 'REGEX' | 'MANUAL' — origin, never changes
+    status              TEXT    DEFAULT 'ACTIVE',           -- 'ACTIVE' | 'CONFIRMED' — current state
+    parent_flag_id      INTEGER,                            -- set on amendment rows; points to the original flag
     severity            TEXT,                               -- 'LOW', 'MEDIUM', 'HIGH'
     confidence_score    REAL,
     reasoning           TEXT,

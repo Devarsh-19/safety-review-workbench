@@ -31,6 +31,7 @@ from store.db import (
     lock_session,
     unlock_session,
     initialise_db,
+    recompute_session_verdict,
 )
 from store.writer import write_review_action
 
@@ -236,10 +237,9 @@ def sessions(
                 SELECT
                     session_id,
                     COUNT(*) AS flag_count,
-                    SUM(CASE WHEN detection_layer IN ('LLM','REGEX') THEN 1 ELSE 0 END) AS llm_flag_count,
-                    SUM(CASE WHEN detection_layer = 'MANUAL' THEN 1 ELSE 0 END) AS manual_flag_count
+                    SUM(CASE WHEN source IN ('LLM','REGEX') THEN 1 ELSE 0 END) AS llm_flag_count,
+                    SUM(CASE WHEN source = 'MANUAL' THEN 1 ELSE 0 END) AS manual_flag_count
                 FROM flags
-                WHERE detection_layer NOT IN ('DISMISSED')
                 GROUP BY session_id
             """).fetchall():
                 flag_data[r["session_id"]] = dict(r)
@@ -284,7 +284,7 @@ def get_session_flags(session_id: str):
         with get_connection() as conn:
             rows = conn.execute("""
                 SELECT f.*,
-                       CASE WHEN f.detection_layer = 'MANUAL'
+                       CASE WHEN f.source = 'MANUAL'
                             THEN rl.reviewer_id ELSE NULL END AS flagged_by
                 FROM flags f
                 LEFT JOIN review_log rl
@@ -317,7 +317,7 @@ def session_detail(session_id: str):
             ).fetchall()
             flags = conn.execute("""
                 SELECT f.*,
-                       CASE WHEN f.detection_layer = 'MANUAL'
+                       CASE WHEN f.source = 'MANUAL'
                             THEN rl.reviewer_id ELSE NULL END AS flagged_by
                 FROM flags f
                 LEFT JOIN review_log rl
@@ -363,9 +363,9 @@ def manual_flag(session_id: str, body: ManualFlagRequest):
             cur = conn.execute(
                 """
                 INSERT INTO flags
-                    (session_id, turn_id, category_code, detection_layer, severity,
-                     confidence_score, reasoning, false_positive_risk, pattern_matched)
-                VALUES (?, ?, ?, 'MANUAL', 'MEDIUM', 1.0, ?, 'LOW', ?)
+                    (session_id, turn_id, category_code, detection_layer, source, status,
+                     severity, confidence_score, reasoning, false_positive_risk, pattern_matched)
+                VALUES (?, ?, ?, 'MANUAL', 'MANUAL', 'ACTIVE', 'MEDIUM', 1.0, ?, 'LOW', ?)
                 """,
                 (
                     session_id,
@@ -383,6 +383,7 @@ def manual_flag(session_id: str, body: ManualFlagRequest):
                 """,
                 (session_id, flag_id, body.reviewer_id, body.note),
             )
+            recompute_session_verdict(session_id, conn)
         return {"success": True, "flag_id": flag_id}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
@@ -435,38 +436,75 @@ def save_session_note(session_id: str, body: SessionNoteRequest):
 
 @app.post("/flags/{flag_id}/amend")
 def amend_flag(flag_id: int, body: AmendFlagRequest):
+    """
+    Edit a flag. Replaces any existing amendment for this flag with a new one.
+    The original flag row is kept as silent audit history.
+    The amendment resets to ACTIVE so the reviewer must re-confirm.
+    Triggers session verdict recomputation.
+    """
     conn = get_connection()
     try:
         with conn:
-            original = conn.execute(
-                "SELECT session_id, turn_id, category_code, pattern_matched FROM flags WHERE flag_id = ?", (flag_id,)
+            # Find the target row (could be original or existing amendment)
+            target = conn.execute(
+                "SELECT flag_id, session_id, turn_id, pattern_matched, parent_flag_id FROM flags WHERE flag_id = ?",
+                (flag_id,),
             ).fetchone()
-            if original is None:
+            if target is None:
                 raise HTTPException(status_code=404, detail=f"Flag {flag_id} not found")
-            existing = conn.execute(
-                """SELECT flag_id FROM flags
-                   WHERE session_id = ? AND category_code = ? AND detection_layer = 'AMENDED'""",
-                (original["session_id"], original["category_code"]),
+
+            session_id = target["session_id"]
+
+            # Determine the original flag_id
+            # If editing an amendment, its parent_flag_id is the original
+            # If editing an original, it IS the original
+            original_flag_id = target["parent_flag_id"] if target["parent_flag_id"] else flag_id
+
+            # Delete any existing amendment for this original (keep only one)
+            conn.execute(
+                "DELETE FROM flags WHERE parent_flag_id = ?",
+                (original_flag_id,),
+            )
+
+            # Get the original row for context
+            original = conn.execute(
+                "SELECT turn_id, pattern_matched FROM flags WHERE flag_id = ?",
+                (original_flag_id,),
             ).fetchone()
-            if existing:
-                return {"success": True, "message": "Already amended"}
+
+            # Insert new amendment row — source=MANUAL, status=ACTIVE (fresh flag)
             cur = conn.execute(
                 """
                 INSERT INTO flags
-                    (session_id, turn_id, category_code, detection_layer, severity,
-                     confidence_score, reasoning, false_positive_risk, pattern_matched)
-                VALUES (?, ?, ?, 'AMENDED', ?, 1.0, ?, 'LOW', ?)
+                    (session_id, turn_id, category_code, detection_layer, source, status,
+                     parent_flag_id, severity, confidence_score, reasoning,
+                     false_positive_risk, pattern_matched)
+                VALUES (?, ?, ?, 'MANUAL', 'MANUAL', 'ACTIVE', ?, ?, 1.0, ?, 'LOW', ?)
                 """,
                 (
-                    original["session_id"],
-                    original["turn_id"],
+                    session_id,
+                    original["turn_id"] if original else target["turn_id"],
                     body.category_code,
+                    original_flag_id,
                     body.severity,
                     body.reasoning,
-                    original["pattern_matched"] if original["pattern_matched"] else f"Amended by {body.reviewer_id}",
+                    (original["pattern_matched"] if original and original["pattern_matched"]
+                     else f"Amended by {body.reviewer_id}"),
                 ),
             )
-        return {"success": True, "new_flag_id": cur.lastrowid}
+            new_flag_id = cur.lastrowid
+
+            # Log the amendment
+            conn.execute(
+                """INSERT INTO review_log (session_id, flag_id, action, reviewer_id, note)
+                   VALUES (?, ?, 'AMENDED', ?, ?)""",
+                (session_id, new_flag_id, body.reviewer_id, body.reasoning),
+            )
+
+            # Recompute session verdict based on updated flags
+            recompute_session_verdict(session_id, conn)
+
+        return {"success": True, "new_flag_id": new_flag_id}
     except HTTPException:
         raise
     except Exception as exc:
@@ -477,45 +515,85 @@ def amend_flag(flag_id: int, body: AmendFlagRequest):
 
 @app.post("/flags/{flag_id}/dismiss")
 def dismiss_flag(flag_id: int, body: DismissFlagRequest):
+    """
+    Hard-delete a flag and its amendment (if any) from the database.
+    Only this specific flag is removed — other flags on the session are untouched.
+    Triggers session verdict recomputation.
+    """
     conn = get_connection()
     try:
         with conn:
-            original = conn.execute(
-                "SELECT session_id, turn_id, category_code, pattern_matched FROM flags WHERE flag_id = ?",
+            # Find the row being dismissed (could be original or amendment)
+            target = conn.execute(
+                "SELECT flag_id, session_id, parent_flag_id FROM flags WHERE flag_id = ?",
                 (flag_id,),
             ).fetchone()
-            if original is None:
+            if target is None:
                 raise HTTPException(status_code=404, detail=f"Flag {flag_id} not found")
-            existing = conn.execute(
-                """SELECT flag_id FROM flags
-                   WHERE session_id = ? AND category_code = ? AND detection_layer = 'DISMISSED'""",
-                (original["session_id"], original["category_code"]),
-            ).fetchone()
-            if existing:
-                return {"success": True, "message": "Already dismissed"}
-            conn.execute(
-                """
-                INSERT INTO flags
-                    (session_id, turn_id, category_code, detection_layer, severity,
-                     confidence_score, reasoning, false_positive_risk, pattern_matched)
-                VALUES (?, ?, ?, 'DISMISSED', 'LOW', 0.0, ?, 'HIGH', ?)
-                """,
-                (
-                    original["session_id"],
-                    original["turn_id"],
-                    original["category_code"],
-                    f"Dismissed by reviewer: {body.note}",
-                    original["pattern_matched"] if original["pattern_matched"] else f"Dismissed by {body.reviewer_id}",
-                ),
-            )
-            conn.execute(
-                """
-                INSERT INTO review_log (session_id, flag_id, action, reviewer_id, note)
-                VALUES (?, ?, 'FLAG_DISMISSED', ?, ?)
-                """,
-                (original["session_id"], flag_id, body.reviewer_id, body.note),
-            )
+
+            session_id = target["session_id"]
+
+            # Determine original flag_id
+            original_flag_id = target["parent_flag_id"] if target["parent_flag_id"] else flag_id
+
+            # Delete the amendment row (if exists)
+            conn.execute("DELETE FROM flags WHERE parent_flag_id = ?", (original_flag_id,))
+            # Delete the original row
+            conn.execute("DELETE FROM flags WHERE flag_id = ?", (original_flag_id,))
+
+            # Recompute verdict based on remaining flags
+            recompute_session_verdict(session_id, conn)
+
         return {"success": True}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        conn.close()
+
+
+@app.post("/flags/{flag_id}/confirm")
+def confirm_flag(flag_id: int, body: LockRequest):
+    """
+    Confirm a flag. Sets status = CONFIRMED on the active row:
+    - If an amendment exists for this flag, confirm the amendment row.
+    - Otherwise confirm the original row.
+    Triggers session verdict recomputation.
+    """
+    conn = get_connection()
+    try:
+        with conn:
+            target = conn.execute(
+                "SELECT flag_id, session_id, parent_flag_id FROM flags WHERE flag_id = ?",
+                (flag_id,),
+            ).fetchone()
+            if target is None:
+                raise HTTPException(status_code=404, detail=f"Flag {flag_id} not found")
+
+            session_id       = target["session_id"]
+            original_flag_id = target["parent_flag_id"] if target["parent_flag_id"] else flag_id
+
+            # Find amendment row if one exists
+            amendment = conn.execute(
+                "SELECT flag_id FROM flags WHERE parent_flag_id = ?",
+                (original_flag_id,),
+            ).fetchone()
+
+            active_flag_id = amendment["flag_id"] if amendment else original_flag_id
+
+            conn.execute(
+                "UPDATE flags SET status = 'CONFIRMED' WHERE flag_id = ?",
+                (active_flag_id,),
+            )
+            conn.execute(
+                """INSERT INTO review_log (session_id, flag_id, action, reviewer_id, note)
+                   VALUES (?, ?, 'CONFIRM_FLAG', ?, '')""",
+                (session_id, active_flag_id, body.reviewer_id),
+            )
+            recompute_session_verdict(session_id, conn)
+
+        return {"success": True, "confirmed_flag_id": active_flag_id}
     except HTTPException:
         raise
     except Exception as exc:

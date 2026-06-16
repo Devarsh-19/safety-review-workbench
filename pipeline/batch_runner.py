@@ -390,6 +390,8 @@ def ingest_only(data_path: str) -> None:
                 {
                     'category_code':       'EXTERNAL_MEDIA_CONTENT',
                     'detection_layer':     'REGEX',
+                    'source':              'REGEX',
+                    'status':              'ACTIVE',
                     'severity':            'MEDIUM',
                     'confidence_score':    0.7,
                     'reasoning':           'Message contains an external link or media — requires manual verification',

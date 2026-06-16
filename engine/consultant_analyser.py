@@ -387,6 +387,8 @@ class ConsultantAnalyser:
         return [{
             'category_code':       'RE_ENGAGEMENT_SOLICITATION',
             'detection_layer':     'REGEX',
+            'source':              'REGEX',
+            'status':              'ACTIVE',
             'severity':            'HIGH',
             'confidence_score':    0.92,
             'reasoning':           (

@@ -79,6 +79,16 @@ export function saveSessionNote(sessionId, note, reviewerId) {
   });
 }
 
+// ── Flag operations ────────────────────────────────────────────────────────
+
+export function confirmFlag(flagId, reviewerId) {
+  return request(`/flags/${flagId}/confirm`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ reviewer_id: reviewerId }),
+  });
+}
+
 // ── Export ─────────────────────────────────────────────────────────────────
 
 export function exportCsv() {

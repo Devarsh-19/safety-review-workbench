@@ -31,6 +31,17 @@ def initialise_db() -> None:
         "ALTER TABLE turns ADD COLUMN has_link INTEGER DEFAULT 0",
         "ALTER TABLE sessions ADD COLUMN locked_by TEXT",
         "ALTER TABLE sessions ADD COLUMN locked_at TEXT",
+        # Flag source/status refactor
+        "ALTER TABLE flags ADD COLUMN source TEXT",
+        "ALTER TABLE flags ADD COLUMN status TEXT DEFAULT 'ACTIVE'",
+        "ALTER TABLE flags ADD COLUMN parent_flag_id INTEGER",
+        # Back-fill source from detection_layer for existing rows
+        "UPDATE flags SET source = detection_layer WHERE source IS NULL AND detection_layer IN ('LLM','REGEX','MANUAL')",
+        "UPDATE flags SET source = 'MANUAL', status = 'ACTIVE' WHERE source IS NULL AND detection_layer = 'AMENDED'",
+        # Hard-delete any legacy DISMISSED rows — no longer kept
+        "DELETE FROM flags WHERE detection_layer = 'DISMISSED'",
+        # Default status for any remaining rows that have no status
+        "UPDATE flags SET status = 'ACTIVE' WHERE status IS NULL",
     ]
 
     with get_connection() as conn:
@@ -39,9 +50,52 @@ def initialise_db() -> None:
                 conn.execute(migration)
                 conn.commit()
             except Exception:
-                pass  # Column already exists, safe to ignore
+                pass  # Column already exists or no-op — safe to ignore
 
     print(f"Database initialised at {DB_PATH}")
+
+
+def recompute_session_verdict(session_id: str, conn) -> str:
+    """
+    Recompute and persist overall_verdict for a session based on its current
+    active flags. Uses the amendment row if one exists for a flag, otherwise
+    uses the original row. Returns the new verdict string.
+    """
+    from engine.verdict_rules import get_db_verdict_for_flags, get_db_confidence_for_verdict
+
+    # Fetch all flags for this session — exclude amendment children from the
+    # base query; we'll pick them up via parent_flag_id logic below.
+    rows = conn.execute(
+        """SELECT flag_id, category_code, source, status, parent_flag_id
+           FROM flags WHERE session_id = ?""",
+        (session_id,),
+    ).fetchall()
+
+    # Build active category list:
+    # 1. Collect parent flags (no parent_flag_id)
+    # 2. If a parent has an amendment child, use the child's category_code
+    # 3. If a parent has no amendment, use the parent's own category_code
+    parent_ids_with_amendment = {
+        r["parent_flag_id"] for r in rows if r["parent_flag_id"] is not None
+    }
+    active_codes = []
+    for r in rows:
+        if r["parent_flag_id"] is not None:
+            # This is an amendment row — it is the active version; include it
+            active_codes.append(r["category_code"])
+        elif r["flag_id"] not in parent_ids_with_amendment:
+            # Original row with no amendment — it is the active version
+            active_codes.append(r["category_code"])
+        # else: original row that has been amended — skip, amendment already included
+
+    verdict    = get_db_verdict_for_flags(active_codes)
+    confidence = get_db_confidence_for_verdict(verdict)
+
+    conn.execute(
+        "UPDATE sessions SET overall_verdict = ?, confidence_score = ? WHERE session_id = ?",
+        (verdict, confidence, session_id),
+    )
+    return verdict
 
 
 def fetch_sessions(

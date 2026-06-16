@@ -40,9 +40,9 @@ def write_turns(session_id: str, turns: list[dict]) -> None:
 def write_flags(session_id: str, flags: list[dict]) -> None:
     query = """
         INSERT OR IGNORE INTO flags
-            (session_id, turn_id, category_code, detection_layer, severity,
-             confidence_score, reasoning, false_positive_risk, pattern_matched)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (session_id, turn_id, category_code, detection_layer, source, status,
+             severity, confidence_score, reasoning, false_positive_risk, pattern_matched)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """
     rows = [
         (
@@ -50,6 +50,9 @@ def write_flags(session_id: str, flags: list[dict]) -> None:
             f.get("turn_id"),
             f.get("category_code"),
             f.get("detection_layer"),
+            # source: prefer explicit field, fall back to detection_layer for compat
+            f.get("source") or f.get("detection_layer"),
+            f.get("status", "ACTIVE"),
             f.get("severity"),
             f.get("confidence_score"),
             f.get("reasoning"),
@@ -125,9 +128,9 @@ def write_session_complete(
                 conn.executemany(
                     """
                     INSERT OR IGNORE INTO flags
-                        (session_id, turn_id, category_code, detection_layer, severity,
-                         confidence_score, reasoning, false_positive_risk, pattern_matched)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        (session_id, turn_id, category_code, detection_layer, source, status,
+                         severity, confidence_score, reasoning, false_positive_risk, pattern_matched)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     [
                         (
@@ -135,6 +138,8 @@ def write_session_complete(
                             f.get("turn_id"),
                             f.get("category_code"),
                             f.get("detection_layer"),
+                            f.get("source") or f.get("detection_layer"),
+                            f.get("status", "ACTIVE"),
                             f.get("severity"),
                             f.get("confidence_score"),
                             f.get("reasoning"),
