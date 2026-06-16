@@ -945,16 +945,6 @@ export default function SessionViewer({ sessionId, sessionList, reviewerName, re
                 const isConfirmedStatus = flag.status === 'CONFIRMED';
                 const scrollMsg     = flagScrollMsg[flag.flag_id];
 
-                // Show confirm area when: flag is actionable, not locked,
-                // and role/status permits (L1: PENDING only; L2: any non-locked status)
-                const showConfirmArea =
-                  !isLocked &&
-                  flag.detection_layer !== 'DISMISSED' &&
-                  flag.detection_layer !== 'AMENDED' &&
-                  itemType === 'parent' &&
-                  parentChildStatus === null &&
-                  (reviewerRole === 'L2' || status === 'PENDING');
-
                 return (
                   <div
                     key={flag.flag_id ?? fi}
