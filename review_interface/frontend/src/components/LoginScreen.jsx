@@ -9,6 +9,7 @@ const REVIEWERS = [
   { name: 'Nikhil',   role: 'L1' },
   { name: 'Divyansh', role: 'L1' },
   { name: 'Yusuf',    role: 'L1' },
+  { name: 'Vineet',   role: 'L1' },
   { name: 'Amogh',    role: 'L2' },
 ];
 
