@@ -530,10 +530,12 @@ export default function SessionViewer({ sessionId, sessionList, reviewerName, re
   const isNeedsFinalReview = status === 'NEEDS_FINAL_REVIEW';
   const isReviewed         = status && status !== 'PENDING' && session.reviewer_id;
 
-  // Flag summary derived client-side — drives L1 submit eligibility
-  const nonDismissedFlags   = flags.filter((f) => f.detection_layer !== 'DISMISSED');
-  const totalFlagCount      = nonDismissedFlags.length;
-  const actionedFlagCount   = nonDismissedFlags.filter((f) => f.is_confirmed === 1 || f.detection_layer === 'AMENDED').length;
+  // Flag summary derived client-side — drives L1 submit eligibility.
+  // Uses the new model: active flags = amendment-or-original (via getActiveFlags),
+  // actioned = status === 'CONFIRMED'.
+  const activeFlagsForSummary = getActiveFlags(flags);
+  const totalFlagCount      = activeFlagsForSummary.length;
+  const actionedFlagCount   = activeFlagsForSummary.filter((f) => f.status === 'CONFIRMED').length;
   const unactionedFlagCount = totalFlagCount - actionedFlagCount;
   const canSubmit           = unactionedFlagCount === 0;
 

@@ -28,7 +28,6 @@ from store.db import (
     fetch_sessions,
     fetch_pending_review_sessions,
     update_review_status,
-    confirm_flag,
     submit_session_for_review,
     mark_needs_final_review,
     get_session_flag_summary,
@@ -583,21 +582,6 @@ def amend_flag(flag_id: int, body: AmendFlagRequest):
         conn.close()
 
 
-@app.post("/flags/{flag_id}/confirm")
-def confirm_flag_endpoint(flag_id: int, body: LockRequest):
-    with get_connection() as conn:
-        flag = conn.execute(
-            "SELECT flag_id FROM flags WHERE flag_id = ?", (flag_id,)
-        ).fetchone()
-    if flag is None:
-        raise HTTPException(status_code=404, detail=f"Flag {flag_id} not found")
-    try:
-        confirm_flag(flag_id, body.reviewer_id)
-        return {"success": True, "flag_id": flag_id}
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
-
-
 @app.post("/flags/{flag_id}/dismiss")
 def dismiss_flag(flag_id: int, body: DismissFlagRequest):
     """
@@ -639,7 +623,7 @@ def dismiss_flag(flag_id: int, body: DismissFlagRequest):
 
 
 @app.post("/flags/{flag_id}/confirm")
-def confirm_flag(flag_id: int, body: LockRequest):
+def confirm_flag_endpoint(flag_id: int, body: LockRequest):
     """
     Confirm a flag. Sets status = CONFIRMED on the active row:
     - If an amendment exists for this flag, confirm the amendment row.
