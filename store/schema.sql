@@ -74,10 +74,9 @@ CREATE TABLE IF NOT EXISTS review_log (
 );
 
 -- Indexes
-CREATE INDEX IF NOT EXISTS idx_sessions_verdict           ON sessions(overall_verdict);
-CREATE INDEX IF NOT EXISTS idx_sessions_review_status     ON sessions(review_status);
-CREATE INDEX IF NOT EXISTS idx_sessions_language          ON sessions(language_detected);
-CREATE INDEX IF NOT EXISTS idx_sessions_assigned_reviewer ON sessions(assigned_reviewer);
+CREATE INDEX IF NOT EXISTS idx_sessions_verdict        ON sessions(overall_verdict);
+CREATE INDEX IF NOT EXISTS idx_sessions_review_status  ON sessions(review_status);
+CREATE INDEX IF NOT EXISTS idx_sessions_language       ON sessions(language_detected);
+CREATE INDEX IF NOT EXISTS idx_sessions_assigned_to    ON sessions(assigned_to);
 CREATE INDEX IF NOT EXISTS idx_flags_session_id        ON flags(session_id);
 CREATE INDEX IF NOT EXISTS idx_flags_category_code     ON flags(category_code);
-CREATE INDEX IF NOT EXISTS idx_sessions_assigned_to    ON sessions(assigned_to);

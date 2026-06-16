@@ -361,18 +361,23 @@ def sessions(
     reviewer_role: Optional[str] = None,
     assigned_to:   Optional[str] = None,
 ):
+    # Determine the assigned_to filter to push down to the DB query:
+    # - L1 reviewer → always scope to their own sessions (server-enforced)
+    # - L2 reviewer → optional filter by a specific assignee (for inspection)
+    # - No role     → no assignment filter (e.g. health checks, scripts)
+    if reviewer_role == 'L1' and reviewer_name:
+        effective_assigned_to = reviewer_name          # manual or auto-assigned
+    elif reviewer_role == 'L2' and assigned_to:
+        effective_assigned_to = assigned_to            # L2 drilling into one reviewer
+    else:
+        effective_assigned_to = None                   # L2 sees all
+
     rows = fetch_sessions(
         verdict_filter=verdict,
         status_filter=status,
         language_filter=language,
+        assigned_to_filter=effective_assigned_to,
     )
-
-    # Role-based filtering: L1 sees only their assigned sessions;
-    # L2 can optionally filter by a specific assignee.
-    if reviewer_role == 'L1' and reviewer_name:
-        rows = [r for r in rows if r.get('assigned_to') == reviewer_name]
-    elif reviewer_role == 'L2' and assigned_to:
-        rows = [r for r in rows if r.get('assigned_to') == assigned_to]
 
     # Enrich each row with flag counts (total, LLM/REGEX, manual) — excludes DISMISSED
     # and with turn_count from the turns table.

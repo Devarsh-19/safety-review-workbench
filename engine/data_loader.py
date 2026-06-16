@@ -364,7 +364,7 @@ class DataLoader:
             "session_start":           session_start,
             "session_end":             session_end,
             "duration_minutes":        duration,
-            "assigned_reviewer":       first_val("assigned_to"),
+            "assigned_to":             first_val("assigned_to"),
             "messages":                messages,
         }
 
@@ -538,7 +538,7 @@ class DataLoader:
                 "session_start":           session_start,
                 "session_end":             session_end,
                 "duration_minutes":        duration,
-                "assigned_reviewer":       first_val("assigned_to") if "assigned_to" in group.columns else None,
+                "assigned_to":             first_val("assigned_to") if "assigned_to" in group.columns else None,
                 "messages":                messages,
             })
 

@@ -17,10 +17,18 @@ from engine.verdict_rules        import (
     get_db_verdict_for_flags,
 )
 
+import itertools
 import sqlite3
 
 from store.db     import initialise_db, DB_PATH, get_connection
 from store.writer import write_session_complete
+
+# ---------------------------------------------------------------------------
+# L1 reviewer pool for round-robin auto-assignment.
+# Only used when a session has no assigned_to value in the input CSV.
+# Amogh (L2) is excluded — L2 reviews submissions, not individual sessions.
+# ---------------------------------------------------------------------------
+L1_REVIEWERS = ["Gaurav", "Nikhil", "Divyansh", "Yusuf", "Vineet"]
 
 from pipeline.logger     import get_logger, log_session_result, log_batch_summary, log_error
 from pipeline.checkpoint import (
@@ -381,6 +389,9 @@ def ingest_only(data_path: str) -> None:
     n_written = 0
     n_skipped = 0
 
+    # Round-robin iterator for auto-assignment when assigned_to is absent in CSV
+    _reviewer_cycle = itertools.cycle(L1_REVIEWERS)
+
     BATCH_SIZE = 500
 
     def _flush_batch(batch: list[dict], conn: sqlite3.Connection) -> None:
@@ -489,7 +500,13 @@ def ingest_only(data_path: str) -> None:
                 "astrotalk_flag_category": None,
                 "astrotalk_severity":      None,
                 "review_status":           "PENDING",
-                "assigned_reviewer":       session.get("assigned_reviewer"),
+                # Assignment decision:
+                # - If the CSV provides assigned_to → use it directly (manual assignment).
+                # - If assigned_to is absent/empty → auto-assign round-robin (auto assignment).
+                "assigned_to": (
+                    session.get("assigned_to")
+                    or next(_reviewer_cycle)
+                ),
             }
 
             turns = [

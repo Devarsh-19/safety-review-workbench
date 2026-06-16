@@ -19,22 +19,26 @@ Options:
 
 import argparse
 import os
+import sys
+from pathlib import Path
 import sqlite3
 
 from dotenv import load_dotenv
 load_dotenv()
 
-DB_PATH = os.getenv("DB_PATH", "store/astrotalk.db")
+# Allow importing from project root
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-# Assignment configuration
-# Modify this list to change who gets sessions and in what rotation order
-REVIEWERS = ["Nikhil", "Vineet", "Divyansh"]
+DB_PATH = os.getenv("DB_PATH", "store/results.db")
+
+# L1 reviewer pool — Amogh (L2) is excluded; he reviews submissions, not sessions.
+# Modify this list to change rotation order.
+REVIEWERS = ["Gaurav", "Nikhil", "Divyansh", "Yusuf", "Vineet"]
 
 
 def get_connection() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
+    from store.db import get_connection as _get_conn
+    return _get_conn()
 
 
 def assign_sessions(dry_run: bool = False) -> dict:
