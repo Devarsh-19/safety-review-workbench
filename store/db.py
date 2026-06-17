@@ -18,9 +18,19 @@ def get_connection() -> sqlite3.Connection:
 
 
 def initialise_db() -> None:
+    # Run the base schema statement-by-statement so a single failing statement
+    # (e.g. an index on a not-yet-migrated column) cannot abort the whole init.
     schema = _SCHEMA_PATH.read_text(encoding="utf-8")
     with get_connection() as conn:
-        conn.executescript(schema)
+        for statement in schema.split(";"):
+            stmt = statement.strip()
+            if not stmt:
+                continue
+            try:
+                conn.execute(stmt)
+                conn.commit()
+            except Exception:
+                pass  # e.g. index on a column added later by migrations
 
     migrations = [
         "ALTER TABLE sessions ADD COLUMN session_note TEXT",
@@ -47,6 +57,10 @@ def initialise_db() -> None:
         "DELETE FROM flags WHERE detection_layer = 'DISMISSED'",
         # Default status for any remaining rows that have no status
         "UPDATE flags SET status = 'ACTIVE' WHERE status IS NULL",
+        # Indexes on migration-added columns — created AFTER the column exists
+        "CREATE INDEX IF NOT EXISTS idx_sessions_assigned_to ON sessions(assigned_to)",
+        "CREATE INDEX IF NOT EXISTS idx_flags_parent_flag_id ON flags(parent_flag_id)",
+        "CREATE INDEX IF NOT EXISTS idx_flags_status ON flags(status)",
     ]
 
     with get_connection() as conn:
