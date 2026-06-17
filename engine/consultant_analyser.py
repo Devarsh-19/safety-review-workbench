@@ -358,6 +358,24 @@ class ConsultantAnalyser:
             'continue chatting', 'continue the chat',
             'to continue', 'resume chat',
         ]
+        # System/template phrases that the platform emits as astrologer turns
+        # but are NOT genuine human re-engagement (often is_automated=0 in data).
+        system_message_patterns = [
+            'thank you for consulting', 'thanks for consulting',
+            'thank you for chatting', 'thanks for chatting',
+            'please rate', 'rate your experience', 'rate me',
+            'give your rating', 'kindly rate', 'do rate',
+            'recharge', 'low balance', 'insufficient balance',
+            'your session has', 'session will end', 'chat will end',
+            'follow up', 'book again', 'consult again',
+            'thank you for your time', 'have a nice day',
+        ]
+
+        def _is_system_message(turn) -> bool:
+            if turn.get('is_automated') == 1:
+                return True
+            text = str(turn.get('message_text', '')).lower()
+            return any(p in text for p in system_message_patterns)
 
         last_auto_idx = -1
         for i, turn in enumerate(turns):
@@ -373,11 +391,13 @@ class ConsultantAnalyser:
         if last_auto_idx == -1:
             return []
 
+        # Genuine re-engagement = astrologer messages after session end that are
+        # NOT automated and NOT system/template messages.
         post_session_turns = [
             t for i, t in enumerate(turns)
             if i > last_auto_idx
             and t.get('speaker') == 'ASTROLOGER'
-            and t.get('is_automated') != 1
+            and not _is_system_message(t)
         ]
 
         if not post_session_turns:

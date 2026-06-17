@@ -541,6 +541,9 @@ export default function SessionViewer({ sessionId, sessionList, reviewerName, re
   const isSubmitted        = status === 'SUBMITTED_FOR_REVIEW';
   const isNeedsFinalReview = status === 'NEEDS_FINAL_REVIEW';
   const isReviewed         = status && status !== 'PENDING' && session.reviewer_id;
+  // Flags can only be edited / dismissed / confirmed while the session is still
+  // PENDING. Once submitted for L2 review (or locked) the flags are read-only.
+  const flagsEditable      = status === 'PENDING' && !isLocked;
 
   // Flag summary derived client-side — drives L1 submit eligibility.
   // Uses the new model: active flags = amendment-or-original (via getActiveFlags),
@@ -1080,19 +1083,19 @@ export default function SessionViewer({ sessionId, sessionList, reviewerName, re
                             )}
                           </span>
                           <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
-                            {/* Confirm button — uses status field (new model) */}
-                            {!isLocked && !isConfirmedStatus && (
+                            {/* Action buttons — only while session is PENDING (editable) */}
+                            {flagsEditable && !isConfirmedStatus && (
                               <FlagActionButton
                                 label={confirmingFlagId === flag.flag_id ? '…' : 'Confirm'}
                                 onClick={(e) => { e.stopPropagation(); handleConfirmFlag(flag); }}
                                 hoverColor="#085041" hoverBorder="#9FE1CB" />
                             )}
-                            {!isLocked && (
+                            {flagsEditable && (
                               <FlagActionButton label="Edit"
                                 onClick={(e) => { e.stopPropagation(); openEditForm(flag); }}
                                 hoverColor="#0F6E56" hoverBorder="#0F6E56" />
                             )}
-                            {!isLocked && (
+                            {flagsEditable && (
                               <FlagActionButton label="Dismiss"
                                 onClick={(e) => { e.stopPropagation(); setDismissingFlagId(flag.flag_id); }}
                                 hoverColor="#A32D2D" hoverBorder="#F7C1C1" />

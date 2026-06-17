@@ -18,19 +18,15 @@ def get_connection() -> sqlite3.Connection:
 
 
 def initialise_db() -> None:
-    # Run the base schema statement-by-statement so a single failing statement
-    # (e.g. an index on a not-yet-migrated column) cannot abort the whole init.
+    # schema.sql contains ONLY base tables + indexes on always-present columns.
+    # Indexes on migration-added columns (assigned_to, status, parent_flag_id)
+    # live in the migrations list below, so executescript here never references
+    # a not-yet-added column. executescript correctly handles SQL comments and
+    # multi-statement scripts (a naive split on ';' would break on semicolons
+    # inside comments).
     schema = _SCHEMA_PATH.read_text(encoding="utf-8")
     with get_connection() as conn:
-        for statement in schema.split(";"):
-            stmt = statement.strip()
-            if not stmt:
-                continue
-            try:
-                conn.execute(stmt)
-                conn.commit()
-            except Exception:
-                pass  # e.g. index on a column added later by migrations
+        conn.executescript(schema)
 
     migrations = [
         "ALTER TABLE sessions ADD COLUMN session_note TEXT",
@@ -223,13 +219,17 @@ def submit_session_for_review(
     note: str = None,
 ) -> None:
     with get_connection() as conn:
+        # Recompute the verdict from active flags first — a session with no
+        # active flags moves off UNPROCESSED to CLEAN.
+        recompute_session_verdict(session_id, conn)
         conn.execute(
             """UPDATE sessions
                SET review_status = 'SUBMITTED_FOR_REVIEW',
                    submitted_by  = ?,
                    submitted_at  = datetime('now'),
                    reviewer_id   = ?,
-                   reviewer_note = ?
+                   reviewer_note = ?,
+                   reviewed_at   = datetime('now')
                WHERE session_id = ?""",
             (reviewer_id, reviewer_id, note, session_id),
         )
