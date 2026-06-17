@@ -361,7 +361,9 @@ export default function SessionViewer({ sessionId, sessionList, reviewerName, re
     setFlaggingProgress(true);
     try {
       await manualFlag(sessionId, {
-        turn_id:       null,
+        // Capture the real turn_id so the flag attributes to a speaker
+        // (astrologer / user) for per-speaker counts.
+        turn_id:       turn.turn_id ?? null,
         category_code: popoverCategory,
         note:          popoverNote,
         reviewer_id:   reviewerName,
@@ -554,6 +556,10 @@ export default function SessionViewer({ sessionId, sessionList, reviewerName, re
   // No AMENDED/DISMISSED labels — every flag card looks fresh.
   const displayedFlags  = getActiveFlags(flags);
   const activeFlagCount = displayedFlags.length;
+
+  // ── Per-speaker flag attribution (who was flagged, how many times) ────────
+  const astrologerFlagCount = displayedFlags.filter((f) => f.flagged_speaker === 'ASTROLOGER').length;
+  const userFlagCount       = displayedFlags.filter((f) => f.flagged_speaker === 'USER').length;
 
   // ── Feature A — Click flag card to jump to matching turn ─────────────────
   const handleFlagCardClick = (flag) => {
@@ -939,9 +945,31 @@ export default function SessionViewer({ sessionId, sessionList, reviewerName, re
           {/* Flags list */}
           <div style={{ flex: 1, overflowY: 'auto', padding: 20 }}>
             <div style={{ fontSize: 10, fontFamily: MONO, textTransform: 'uppercase',
-              letterSpacing: '0.08em', color: C.textMuted, marginBottom: 14 }}>
+              letterSpacing: '0.08em', color: C.textMuted, marginBottom: 6 }}>
               {activeFlagCount > 0 ? `Flags Detected (${activeFlagCount})` : 'Flags Detected'}
             </div>
+
+            {/* Per-speaker attribution — who was flagged, how many times */}
+            {activeFlagCount > 0 && (astrologerFlagCount > 0 || userFlagCount > 0) && (
+              <div style={{ display: 'flex', gap: 8, marginBottom: 14, flexWrap: 'wrap' }}>
+                {astrologerFlagCount > 0 && (
+                  <span style={{
+                    fontSize: 10, fontFamily: MONO, padding: '2px 8px', borderRadius: 3,
+                    background: '#FCEFE6', color: '#9A4A18', border: '1px solid #F2C9A8',
+                  }}>
+                    Astrologer: {astrologerFlagCount}
+                  </span>
+                )}
+                {userFlagCount > 0 && (
+                  <span style={{
+                    fontSize: 10, fontFamily: MONO, padding: '2px 8px', borderRadius: 3,
+                    background: '#E6F1FB', color: '#0C447C', border: '1px solid #B5D4F4',
+                  }}>
+                    User: {userFlagCount}
+                  </span>
+                )}
+              </div>
+            )}
 
             {loading ? <SkeletonPane /> : displayedFlags.length === 0 ? (
               <div style={{ fontSize: 13, color: C.textSecondary, fontStyle: 'italic' }}>
@@ -1074,7 +1102,7 @@ export default function SessionViewer({ sessionId, sessionList, reviewerName, re
                           </div>
                         </div>
 
-                        {/* Severity + confidence + FP risk */}
+                        {/* Severity + confidence + FP risk + flagged speaker */}
                         <div style={{ display: 'flex', alignItems: 'center', gap: 8,
                           marginTop: 8, flexWrap: 'wrap' }}>
                           <VerdictBadge verdict={flag.severity} />
@@ -1083,6 +1111,17 @@ export default function SessionViewer({ sessionId, sessionList, reviewerName, re
                               border: `1px solid ${C.border}`, borderRadius: 3, padding: '2px 7px',
                               color: C.textSecondary }}>
                               {Math.round(flag.confidence_score * 100)}%
+                            </span>
+                          )}
+                          {flag.flagged_speaker && (
+                            <span style={{
+                              fontSize: 10, fontFamily: MONO, padding: '2px 7px', borderRadius: 3,
+                              textTransform: 'capitalize',
+                              background: flag.flagged_speaker === 'ASTROLOGER' ? '#FCEFE6' : '#E6F1FB',
+                              color:      flag.flagged_speaker === 'ASTROLOGER' ? '#9A4A18' : '#0C447C',
+                              border:     `1px solid ${flag.flagged_speaker === 'ASTROLOGER' ? '#F2C9A8' : '#B5D4F4'}`,
+                            }}>
+                              {flag.flagged_speaker === 'ASTROLOGER' ? 'Astrologer' : 'User'}
                             </span>
                           )}
                           {flag.false_positive_risk && (

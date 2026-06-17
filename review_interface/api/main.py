@@ -343,16 +343,20 @@ def get_session_flags(session_id: str):
     """
     Returns all flags for a session.
     MANUAL flags are enriched with flagged_by (reviewer_id from review_log).
+    flagged_speaker (ASTROLOGER / USER) is derived via the flag's turn_id.
     """
     try:
         with get_connection() as conn:
             rows = conn.execute("""
                 SELECT f.*,
                        CASE WHEN f.source = 'MANUAL'
-                            THEN rl.reviewer_id ELSE NULL END AS flagged_by
+                            THEN rl.reviewer_id ELSE NULL END AS flagged_by,
+                       t.speaker AS flagged_speaker
                 FROM flags f
                 LEFT JOIN review_log rl
                     ON rl.flag_id = f.flag_id AND rl.action = 'MANUAL_FLAG'
+                LEFT JOIN turns t
+                    ON t.session_id = f.session_id AND t.turn_id = f.turn_id
                 WHERE f.session_id = ?
                 ORDER BY f.flag_id
             """, (session_id,)).fetchall()
@@ -382,10 +386,13 @@ def session_detail(session_id: str):
             flags = conn.execute("""
                 SELECT f.*,
                        CASE WHEN f.source = 'MANUAL'
-                            THEN rl.reviewer_id ELSE NULL END AS flagged_by
+                            THEN rl.reviewer_id ELSE NULL END AS flagged_by,
+                       t.speaker AS flagged_speaker
                 FROM flags f
                 LEFT JOIN review_log rl
                     ON rl.flag_id = f.flag_id AND rl.action = 'MANUAL_FLAG'
+                LEFT JOIN turns t
+                    ON t.session_id = f.session_id AND t.turn_id = f.turn_id
                 WHERE f.session_id = ?
                 ORDER BY f.flag_id
             """, (session_id,)).fetchall()
