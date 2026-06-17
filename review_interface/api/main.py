@@ -37,6 +37,18 @@ from store.db import (
     recompute_session_verdict,
 )
 from store.writer import write_review_action
+from engine.verdict_rules import get_db_verdict_for_flags
+
+
+# ---------------------------------------------------------------------------
+# Helper — derive a flag's severity from its category's verdict class.
+# SEVERE category -> HIGH, FLAGGED category -> MEDIUM, CLEAN -> LOW.
+# Used so manually-tagged flags get the correct severity (NSFW etc. = HIGH)
+# instead of a hardcoded MEDIUM.
+# ---------------------------------------------------------------------------
+def _severity_for_category(category_code: str) -> str:
+    verdict = get_db_verdict_for_flags([category_code])
+    return {"SEVERE": "HIGH", "FLAGGED": "MEDIUM", "CLEAN": "LOW"}.get(verdict, "MEDIUM")
 
 
 # ---------------------------------------------------------------------------
@@ -431,17 +443,19 @@ def manual_flag(session_id: str, body: ManualFlagRequest):
     conn = get_connection()
     try:
         with conn:
+            severity = _severity_for_category(body.category_code)
             cur = conn.execute(
                 """
                 INSERT INTO flags
                     (session_id, turn_id, category_code, detection_layer, source, status,
                      severity, confidence_score, reasoning, false_positive_risk, pattern_matched)
-                VALUES (?, ?, ?, 'MANUAL', 'MANUAL', 'ACTIVE', 'MEDIUM', 1.0, ?, 'LOW', ?)
+                VALUES (?, ?, ?, 'MANUAL', 'MANUAL', 'ACTIVE', ?, 1.0, ?, 'LOW', ?)
                 """,
                 (
                     session_id,
                     body.turn_id,
                     body.category_code,
+                    severity,
                     body.note,
                     body.message_text[:200],
                 ),
