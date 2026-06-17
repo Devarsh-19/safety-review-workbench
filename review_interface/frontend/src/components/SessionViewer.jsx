@@ -541,9 +541,14 @@ export default function SessionViewer({ sessionId, sessionList, reviewerName, re
   const isSubmitted        = status === 'SUBMITTED_FOR_REVIEW';
   const isNeedsFinalReview = status === 'NEEDS_FINAL_REVIEW';
   const isReviewed         = status && status !== 'PENDING' && session.reviewer_id;
-  // Flags can only be edited / dismissed / confirmed while the session is still
-  // PENDING. Once submitted for L2 review (or locked) the flags are read-only.
-  const flagsEditable      = status === 'PENDING' && !isLocked;
+  // Flag editability by role:
+  //  - L1 can edit/dismiss/confirm only while the session is still PENDING.
+  //    Once they submit for L2 review, their flags freeze (read-only).
+  //  - L2 (final reviewer) can edit/dismiss/confirm any session that is not
+  //    yet LOCKED — including SUBMITTED_FOR_REVIEW / NEEDS_FINAL_REVIEW.
+  const flagsEditable = !isLocked && (
+    reviewerRole === 'L2' ? true : status === 'PENDING'
+  );
 
   // Flag summary derived client-side — drives L1 submit eligibility.
   // Uses the new model: active flags = amendment-or-original (via getActiveFlags),
@@ -578,9 +583,20 @@ export default function SessionViewer({ sessionId, sessionList, reviewerName, re
       }, 2000);
     };
 
+    // AUTHORITATIVE: if the flag has a turn_id, jump straight to that turn.
+    // Never fall through to fuzzy text matching — that's what caused flags to
+    // land on the wrong message (e.g. message 15 jumping to message 4).
+    if (flag.turn_id != null) {
+      const idx = turns.findIndex((t) => String(t.turn_id) === String(flag.turn_id));
+      if (idx >= 0) { doScroll(idx); return; }
+      return; // turn_id set but not found — do not guess
+    }
+
+    // ── Fuzzy fallback below — ONLY for legacy flags with no turn_id ──────────
+
     // Step 0: pattern_matched exact substring (reliable for MANUAL flags whose
     // pattern_matched is the first 200 chars of the flagged message_text)
-    if (flag.turn_id == null) {
+    {
       const pm = (flag.pattern_matched || '').trim().toLowerCase();
       if (pm.length >= 4) {
         for (let i = 0; i < turns.length; i++) {
