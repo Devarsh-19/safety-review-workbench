@@ -249,6 +249,8 @@ export default function SessionQueue({ reviewerName, reviewerRole, onSelectSessi
     IDENTITY_FRAUD:              '#185FA5',
     FAKE_REMEDIES:               '#854F0B',
     UNAUTHORIZED_MEDICAL_ADVICE: '#3B6D11',
+    SELF_HARM:                   '#6B0000',
+    VIOLENCE:                    '#A32D2D',
     COMPETITOR_PROMOTION:        '#6B6860',
     RE_ENGAGEMENT_SOLICITATION:  '#0F6E56',
     EXTERNAL_MEDIA_CONTENT:      '#185FA5',

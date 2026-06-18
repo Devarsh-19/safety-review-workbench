@@ -37,6 +37,8 @@ SEVERE_FLAGS = {
     "hate_speech",
     "fake_remedies",
     "unauthorized_medical_advice",
+    "self_harm",
+    "violence",
 }
 
 # ---------------------------------------------------------------------------
