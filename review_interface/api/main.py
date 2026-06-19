@@ -738,13 +738,28 @@ def needs_final_review(session_id: str, body: LockRequest):
 # ---------------------------------------------------------------------------
 
 @app.get("/export/csv")
-def export_csv():
-    """Download all reviewed sessions as a CSV file."""
+def export_csv(
+    reviewer_name: Optional[str] = None,
+    reviewer_role: Optional[str] = None,
+):
+    """
+    Download reviewed sessions as a CSV file.
+    - L1 reviewers can export ONLY the sessions they submitted themselves.
+    - L2 (and unspecified) can export all reviewed sessions.
+    """
     date_str = datetime.now().strftime("%Y%m%d")
+
+    # Role-based scope
+    scope = ""
+    params: tuple = ()
+    if reviewer_role == "L1" and reviewer_name:
+        # Only sessions this L1 reviewer submitted / reviewed
+        scope = " AND (s.submitted_by = ? OR s.reviewer_id = ?)"
+        params = (reviewer_name, reviewer_name)
 
     try:
         with get_connection() as conn:
-            rows = conn.execute("""
+            rows = conn.execute(f"""
                 SELECT s.session_id, s.overall_verdict, s.language_detected,
                        s.duration_minutes, s.session_type, s.review_status,
                        s.reviewer_id, s.reviewer_note, s.session_note,
@@ -755,9 +770,9 @@ def export_csv():
                     SELECT session_id, COUNT(*) AS flag_count
                     FROM flags GROUP BY session_id
                 ) fc ON fc.session_id = s.session_id
-                WHERE s.review_status != 'PENDING'
+                WHERE s.review_status != 'PENDING'{scope}
                 ORDER BY s.reviewed_at DESC
-            """).fetchall()
+            """, params).fetchall()
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 

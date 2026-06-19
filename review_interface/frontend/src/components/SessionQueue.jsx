@@ -79,6 +79,8 @@ export default function SessionQueue({ reviewerName, reviewerRole, onSelectSessi
   const [showProgress,    setShowProgress]    = useState(false);// Feature 7
   const [reviewerStats,   setReviewerStats]   = useState([]);
   const [loadingProgress, setLoadingProgress] = useState(false);
+  // L2 Reviewer Progress (assignment breakdown) — collapsible, expanded by default
+  const [showReviewerProgress, setShowReviewerProgress] = useState(true);
 
   // ── Violation heatmap state ────────────────────────────────────────────
   const [showHeatmap,     setShowHeatmap]     = useState(false);
@@ -228,7 +230,8 @@ export default function SessionQueue({ reviewerName, reviewerRole, onSelectSessi
 
   const handleExport = () => {
     setExporting(true);
-    exportCsv();
+    // L1 reviewers export only their own submitted sessions; L2 exports all.
+    exportCsv(reviewerName, reviewerRole);
     setTimeout(() => setExporting(false), 1000);
   };
 
@@ -251,6 +254,7 @@ export default function SessionQueue({ reviewerName, reviewerRole, onSelectSessi
     UNAUTHORIZED_MEDICAL_ADVICE: '#3B6D11',
     SELF_HARM:                   '#6B0000',
     VIOLENCE:                    '#A32D2D',
+    INSTIGATION:                 '#8A2BE2',
     COMPETITOR_PROMOTION:        '#6B6860',
     RE_ENGAGEMENT_SOLICITATION:  '#0F6E56',
     EXTERNAL_MEDIA_CONTENT:      '#185FA5',
@@ -368,6 +372,7 @@ export default function SessionQueue({ reviewerName, reviewerRole, onSelectSessi
             <select style={selectSt} value={assigneeFilter} onChange={(e) => setAssigneeFilter(e.target.value)}>
               <option value="">All Reviewers</option>
               <option value="Nikhil">Nikhil</option>
+              <option value="Yusuf">Yusuf</option>
               <option value="Vineet">Vineet</option>
               <option value="Divyansh">Divyansh</option>
             </select>
@@ -465,15 +470,23 @@ export default function SessionQueue({ reviewerName, reviewerRole, onSelectSessi
         </div>
       )}
 
-      {/* L2 reviewer progress — assignment-based breakdown per reviewer */}
+      {/* L2 reviewer progress — assignment-based breakdown per reviewer (collapsible) */}
       {reviewerRole === 'L2' && stats?.reviewer_stats?.length > 0 && (
         <div style={{ flexShrink: 0, padding: '10px 20px', background: C.bgSurface, borderBottom: `1px solid ${C.border}` }}>
-          <div style={{
-            fontSize: 10, fontFamily: MONO, fontWeight: 600, textTransform: 'uppercase',
-            letterSpacing: '0.06em', color: C.textSecondary, marginBottom: 8,
-          }}>
+          <button
+            onClick={() => setShowReviewerProgress((v) => !v)}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 6, background: 'none',
+              border: 'none', cursor: 'pointer', padding: 0,
+              marginBottom: showReviewerProgress ? 8 : 0,
+              fontSize: 10, fontFamily: MONO, fontWeight: 600, textTransform: 'uppercase',
+              letterSpacing: '0.06em', color: C.textSecondary,
+            }}
+          >
+            <span>{showReviewerProgress ? '▾' : '▸'}</span>
             Reviewer Progress
-          </div>
+          </button>
+          {showReviewerProgress && (
           <div style={{ border: `1px solid ${C.border}`, borderRadius: 6, overflow: 'hidden' }}>
             <table style={{ width: '100%', borderCollapse: 'collapse', background: C.bgSurface }}>
               <thead>
@@ -522,6 +535,7 @@ export default function SessionQueue({ reviewerName, reviewerRole, onSelectSessi
               </tbody>
             </table>
           </div>
+          )}
         </div>
       )}
 

@@ -115,7 +115,11 @@ export function markNeedsFinalReview(sessionId, reviewerId) {
 }
 
 // ── Export ─────────────────────────────────────────────────────────────────
-
-export function exportCsv() {
-  window.open(`${API_BASE}/export/csv`, '_blank');
+// L1 reviewers get only their own submitted sessions; L2 gets all.
+export function exportCsv(reviewerName, reviewerRole) {
+  const qs = new URLSearchParams();
+  if (reviewerName) qs.append('reviewer_name', reviewerName);
+  if (reviewerRole) qs.append('reviewer_role', reviewerRole);
+  const q = qs.toString() ? `?${qs}` : '';
+  window.open(`${API_BASE}/export/csv${q}`, '_blank');
 }
