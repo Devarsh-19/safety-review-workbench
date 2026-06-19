@@ -89,6 +89,7 @@ export default function SessionQueue({ reviewerName, reviewerRole, onSelectSessi
 
   // ── Column filter state ────────────────────────────────────────────────
   const [colFilterId,     setColFilterId]     = useState('');
+  const [colFilterAstro,  setColFilterAstro]  = useState('');   // '', 'flagged', 'clean'
   const [colFilterLang,   setColFilterLang]   = useState('');
   const [colFilterType,   setColFilterType]   = useState('');
   const [colFilterMinDur,   setColFilterMinDur]   = useState('');
@@ -178,6 +179,7 @@ export default function SessionQueue({ reviewerName, reviewerRole, onSelectSessi
     .filter((s) => !searchQuery.trim()    || s.session_id.includes(searchQuery.trim()))
     .filter((s) => minConfidence === 0    || ((s.confidence_score ?? 0) * 100 >= minConfidence))
     .filter((s) => !colFilterId.trim()    || s.session_id.includes(colFilterId.trim()))
+    .filter((s) => !colFilterAstro        || (colFilterAstro === 'flagged' ? s.astrotalk_flagged === 1 : s.astrotalk_flagged !== 1))
     .filter((s) => !colFilterLang.trim()  || (s.language_detected || '').toLowerCase().includes(colFilterLang.trim().toLowerCase()))
     .filter((s) => !colFilterType         || s.session_type === colFilterType)
     .filter((s) => !colFilterMinDur         || (s.duration_minutes ?? 0) >= Number(colFilterMinDur))
@@ -644,7 +646,7 @@ export default function SessionQueue({ reviewerName, reviewerRole, onSelectSessi
       )}
 
       {/* Table area */}
-      <div style={{ flex: 1, overflowY: 'auto', padding: '16px 20px' }}>
+      <div style={{ flex: 1, overflowY: 'auto', overflowX: 'auto', padding: '16px 20px' }}>
         {loading ? (
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center',
             padding: '60px 0', gap: 12, color: C.textSecondary, fontSize: 14 }}>
@@ -680,12 +682,20 @@ export default function SessionQueue({ reviewerName, reviewerRole, onSelectSessi
                       onFocus={() => setFocusedFilter('id')} onBlur={() => setFocusedFilter(null)}
                       style={filterInputSt('id')} />
                   </th>
-                  {reviewerRole === 'L2' && <th style={{ padding: '4px 8px' }} />}
-                  <th style={{ padding: '4px 8px' }} />
-                  <th style={{ padding: '4px 8px' }} />
-                  <th style={{ padding: '4px 8px' }} />
-                  <th style={{ padding: '4px 8px' }} />
-                  <th style={{ padding: '4px 8px', fontWeight: 'normal' }}>
+                  {reviewerRole === 'L2' && <th style={{ padding: '4px 8px' }} />/* Assigned To */}
+                  <th style={{ padding: '4px 8px' }} />{/* Verdict */}
+                  <th style={{ padding: '4px 8px', fontWeight: 'normal' }}>{/* AstroTalk */}
+                    <select value={colFilterAstro} onChange={(e) => setColFilterAstro(e.target.value)}
+                      style={filterInputSt('astro')}>
+                      <option value="">All</option>
+                      <option value="flagged">Flagged</option>
+                      <option value="clean">Clean</option>
+                    </select>
+                  </th>
+                  <th style={{ padding: '4px 8px' }} />{/* Flags */}
+                  <th style={{ padding: '4px 8px' }} />{/* LLM Flags */}
+                  <th style={{ padding: '4px 8px' }} />{/* Manual Flags */}
+                  <th style={{ padding: '4px 8px', fontWeight: 'normal' }}>{/* Language */}
                     <input type="text" placeholder="Filter lang..."
                       value={colFilterLang} onChange={(e) => setColFilterLang(e.target.value)}
                       onFocus={() => setFocusedFilter('lang')} onBlur={() => setFocusedFilter(null)}
@@ -871,7 +881,7 @@ export default function SessionQueue({ reviewerName, reviewerRole, onSelectSessi
                       </td>
 
                       <td style={td(isLast)}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'stretch', gap: 5 }}>
                           {reviewerRole === 'L2' && ['SUBMITTED_FOR_REVIEW', 'NEEDS_FINAL_REVIEW', 'REVIEWED', 'CONFIRMED', 'OVERRIDDEN'].includes(s.review_status) && (
                             <button
                               onClick={() => handleLockSession(s.session_id)}
@@ -915,6 +925,7 @@ export default function SessionQueue({ reviewerName, reviewerRole, onSelectSessi
                           setStatusFilter('');
                           setAssigneeFilter('');
                           setColFilterId('');
+                          setColFilterAstro('');
                           setColFilterLang('');
                           setColFilterType('');
                           setColFilterMinDur('');
