@@ -104,8 +104,8 @@ export default function SessionQueue({ reviewerName, reviewerRole, onSelectSessi
 
   // ── Dynamic column list — L2 gets an 'Assigned To' column after Session ID
   const COLS = reviewerRole === 'L2'
-    ? ['Session ID', 'Assigned To', 'Verdict', 'Flags', 'LLM Flags', 'Manual Flags', 'Language', 'Type', 'Duration', 'Turns', 'Status', 'Reviewer', 'Action']
-    : ['Session ID', 'Verdict', 'Flags', 'LLM Flags', 'Manual Flags', 'Language', 'Type', 'Duration', 'Turns', 'Status', 'Reviewer', 'Action'];
+    ? ['Session ID', 'Assigned To', 'Verdict', 'AstroTalk', 'Flags', 'LLM Flags', 'Manual Flags', 'Language', 'Type', 'Duration', 'Turns', 'Status', 'Reviewer', 'Action']
+    : ['Session ID', 'Verdict', 'AstroTalk', 'Flags', 'LLM Flags', 'Manual Flags', 'Language', 'Type', 'Duration', 'Turns', 'Status', 'Reviewer', 'Action'];
 
   // ── Data fetching ──────────────────────────────────────────────────────
 
@@ -744,6 +744,21 @@ export default function SessionQueue({ reviewerName, reviewerRole, onSelectSessi
                       )}
 
                       <td style={td(isLast)}><VerdictBadge verdict={s.overall_verdict} /></td>
+
+                      {/* AstroTalk's own flag from the input CSV */}
+                      <td style={td(isLast)}>
+                        {s.astrotalk_flagged === 1 ? (
+                          <span style={{
+                            fontSize: 10, fontFamily: MONO, padding: '2px 7px', borderRadius: 3,
+                            background: C.severeBg, color: C.severeText, border: `1px solid ${C.severeBorder}`,
+                          }}>Flagged</span>
+                        ) : (
+                          <span style={{
+                            fontSize: 10, fontFamily: MONO, padding: '2px 7px', borderRadius: 3,
+                            background: C.bgStatsrow, color: C.textSecondary, border: `1px solid ${C.border}`,
+                          }}>Clean</span>
+                        )}
+                      </td>
 
                       {/* Total flags (excludes DISMISSED) */}
                       <td style={td(isLast)}>

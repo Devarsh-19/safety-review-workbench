@@ -685,6 +685,16 @@ export default function SessionViewer({ sessionId, sessionList, reviewerName, re
             {isLocked && <span style={{ marginRight: 4 }}>🔒</span>}{sessionId}
           </span>
           {!loading && <VerdictBadge verdict={session.overall_verdict} />}
+          {!loading && (
+            <span style={{
+              fontSize: 11, fontFamily: MONO, padding: '2px 8px', borderRadius: 3,
+              background: session.astrotalk_flagged === 1 ? C.severeBg : C.bgStatsrow,
+              color:      session.astrotalk_flagged === 1 ? C.severeText : C.textSecondary,
+              border: `1px solid ${session.astrotalk_flagged === 1 ? C.severeBorder : C.border}`,
+            }}>
+              AstroTalk: {session.astrotalk_flagged === 1 ? 'Flagged' : 'Clean'}
+            </span>
+          )}
           {!loading && session.language_detected && (
             <span style={{ fontSize: 11, fontFamily: MONO, background: C.bgStatsrow,
               border: `1px solid ${C.border}`, padding: '2px 8px', borderRadius: 3, color: C.textSecondary }}>
