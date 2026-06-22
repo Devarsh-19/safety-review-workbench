@@ -19,6 +19,7 @@ Output columns (one row per turn / turn-flag):
     detection_layer  - the flag's source: LLM / REGEX / MANUAL (blank if not flagged)
     status           - the flag's status: ACTIVE / CONFIRMED (blank if not flagged)
     speaker          - who sent the message (ASTROLOGER / USER)
+    is_automated_message - 1 if the turn was an automated message, else 0
 
 Read-only — never modifies the database.
 
@@ -41,7 +42,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from store.db import get_connection  # noqa: E402
 
 CSV_COLUMNS = ["session_id", "verdict", "reviewed_by", "turn_id", "turn_text",
-               "severity", "flag_type", "detection_layer", "status", "speaker"]
+               "severity", "flag_type", "detection_layer", "status", "speaker",
+               "is_automated_message"]
 
 
 def _active_flag_ids(conn, session_ids: set[str]) -> set[int]:
@@ -66,12 +68,12 @@ def _active_flag_ids(conn, session_ids: set[str]) -> set[int]:
 def export(out_path: Path) -> None:
     conn = get_connection()
 
-    # 1) Submitted sessions + verdict + who reviewed (submitted_by, fallback reviewer_id)
+    # 1) Submitted + locked sessions + verdict + who reviewed (submitted_by, fallback reviewer_id)
     #    UNPROCESSED sessions are excluded — only properly reviewed verdicts.
     sessions = conn.execute(
         """SELECT session_id, overall_verdict, submitted_by, reviewer_id
            FROM sessions
-           WHERE review_status = 'SUBMITTED_FOR_REVIEW'
+           WHERE review_status IN ('SUBMITTED_FOR_REVIEW', 'LOCKED')
              AND overall_verdict IS NOT NULL
              AND overall_verdict != 'UNPROCESSED'
            ORDER BY session_id"""
@@ -126,22 +128,23 @@ def export(out_path: Path) -> None:
 
         for sid in ordered_session_ids:
             turns = conn.execute(
-                "SELECT turn_id, speaker, message_text FROM turns WHERE session_id = ? ORDER BY turn_id",
+                "SELECT turn_id, speaker, message_text, is_automated FROM turns WHERE session_id = ? ORDER BY turn_id",
                 (sid,),
             ).fetchall()
             for t in turns:
                 n_turns += 1
                 base = {
-                    "session_id":      sid,
-                    "verdict":         verdict_by_session.get(sid, ""),
-                    "reviewed_by":     reviewer_by_session.get(sid, ""),
-                    "turn_id":         t["turn_id"],
-                    "turn_text":       t["message_text"],
-                    "speaker":         t["speaker"],
-                    "severity":        "",
-                    "flag_type":       "",
-                    "detection_layer": "",
-                    "status":          "",
+                    "session_id":            sid,
+                    "verdict":               verdict_by_session.get(sid, ""),
+                    "reviewed_by":           reviewer_by_session.get(sid, ""),
+                    "turn_id":               t["turn_id"],
+                    "turn_text":             t["message_text"],
+                    "speaker":               t["speaker"],
+                    "is_automated_message":  t["is_automated"],
+                    "severity":              "",
+                    "flag_type":             "",
+                    "detection_layer":       "",
+                    "status":                "",
                 }
                 tflags = flags_by_turn.get((sid, t["turn_id"]), [])
                 if not tflags:
