@@ -97,7 +97,26 @@ def export(out_path: Path) -> None:
             if f["flag_id"] in active_ids:
                 flags_by_turn.setdefault((f["session_id"], f["turn_id"]), []).append(f)
 
-    # 3) Every turn of every submitted session (full chat)
+    # 3) Order sessions: SEVERE first, then FLAGGED, then CLEAN (others last);
+    #    within each verdict tier, most active flags first.
+    flag_count_by_session: dict[str, int] = {}
+    for flags in flags_by_turn.values():
+        for f in flags:
+            flag_count_by_session[f["session_id"]] = flag_count_by_session.get(f["session_id"], 0) + 1
+
+    VERDICT_RANK = {"SEVERE": 0, "FLAGGED": 1, "CLEAN": 2}
+
+    def sort_key(sid: str):
+        verdict = verdict_by_session.get(sid, "")
+        return (
+            VERDICT_RANK.get(verdict, 3),
+            -flag_count_by_session.get(sid, 0),
+            sid,
+        )
+
+    ordered_session_ids = sorted(session_ids, key=sort_key)
+
+    # 4) Every turn of every submitted session (full chat)
     n_turns = 0
     n_rows = 0
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -105,7 +124,7 @@ def export(out_path: Path) -> None:
         writer = csv.DictWriter(fh, fieldnames=CSV_COLUMNS)
         writer.writeheader()
 
-        for sid in sorted(session_ids):
+        for sid in ordered_session_ids:
             turns = conn.execute(
                 "SELECT turn_id, speaker, message_text FROM turns WHERE session_id = ? ORDER BY turn_id",
                 (sid,),
