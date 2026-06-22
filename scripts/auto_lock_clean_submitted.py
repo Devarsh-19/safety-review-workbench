@@ -21,13 +21,14 @@ Usage:
 """
 
 import argparse
-import os
-import sqlite3
+import sys
+from pathlib import Path
 
 from dotenv import load_dotenv
 load_dotenv()
 
-DB_PATH = os.getenv("DB_PATH", "store/astrotalk.db")
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from store.db import get_connection, DB_PATH  # noqa: E402
 
 LOCKED_BY = "AUTO_LOCK"
 
@@ -39,12 +40,6 @@ SELECT_TARGETS = """
       AND overall_verdict = 'CLEAN'
     ORDER BY session_id ASC
 """
-
-
-def get_connection() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
 
 
 def auto_lock(commit: bool = False) -> int:
