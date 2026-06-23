@@ -174,8 +174,22 @@ export default function SessionQueue({ reviewerName, reviewerRole, onSelectSessi
     else                        { setSortCol(null); setSortDir(null); }
   };
 
-  // Client-side filters (column filters AND-ed with top-bar filters) + optional sort
+  // Role-based queue visibility: L1 should not see sessions already submitted
+  // for L2 review or already locked; L2 should not see locked (finalised)
+  // sessions. Only applies to the default/implicit queue — an explicit
+  // status filter selection overrides this.
   let displayedSessions = sessions
+    .filter((s) => {
+      if (statusFilter) return true;
+      if (reviewerRole === 'L1') {
+        return s.review_status !== 'SUBMITTED_FOR_REVIEW' && s.review_status !== 'LOCKED';
+      }
+      if (reviewerRole === 'L2') {
+        return s.review_status !== 'LOCKED';
+      }
+      return true;
+    })
+    // Client-side filters (column filters AND-ed with top-bar filters) + optional sort
     .filter((s) => !searchQuery.trim()    || s.session_id.includes(searchQuery.trim()))
     .filter((s) => minConfidence === 0    || ((s.confidence_score ?? 0) * 100 >= minConfidence))
     .filter((s) => !colFilterId.trim()    || s.session_id.includes(colFilterId.trim()))
