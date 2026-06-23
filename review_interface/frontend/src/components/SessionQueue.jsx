@@ -910,7 +910,7 @@ export default function SessionQueue({ reviewerName, reviewerRole, onSelectSessi
                           )}
                           <button
                             className="review-btn"
-                            onClick={() => onSelectSession(s.session_id, sessions)}
+                            onClick={() => onSelectSession(s.session_id, displayedSessions)}
                             style={{
                               padding: '5px 14px', fontSize: 12, fontWeight: 500,
                               background: s.review_status === 'LOCKED' ? C.bgStatsrow : C.accent,
