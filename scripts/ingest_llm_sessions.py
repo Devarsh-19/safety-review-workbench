@@ -87,6 +87,7 @@ _ALIASES = {
     "sent_at_ist":          "timestamp",
     "flagged":              "astrotalk_flagged",
     "language":             "language_code",
+    "llm_flag":             "llm_flags",   # singular alias
 }
 
 
