@@ -4,31 +4,38 @@ ingest_llm_sessions.py
 Ingests LLM-pre-analysed session CSV data into the SQLite DB.
 One row per turn in the input; each turn may carry LLM-detected flags.
 
+If sessions/turns already exist in the DB (e.g. from a prior
+batch_runner --ingest-only run), they are skipped — existing review
+status and session data are never overwritten. LLM flags are always
+inserted (de-duped by session_id + turn_id + category_code + source)
+and the session verdict is always recomputed from active flags.
+
 Input CSV columns
 -----------------
 Standard session/turn columns (same as raw AstroTalk export):
     session_id, astrologer_id, user_id, session_start, session_end,
     duration_minutes, session_type, session_date, month, language_code,
     language_detected, astrotalk_flagged, astrotalk_flag_category,
-    astrotalk_severity, turn_id (message_seq), speaker (sender),
-    message_text, is_automated, timestamp
+    astrotalk_severity, turn_id (or message_seq), speaker (or sender),
+    message_text, is_automated (or is_automated_message), timestamp
+    (or sent_at_ist)
 
 Plus two extra LLM columns:
     llm_flags        - pipe-separated flag codes e.g. "NSFW|FEAR_MANIPULATION"
                        or empty/blank if the turn is clean
-    confidence_score - float 0.0-1.0, LLM confidence for the flagged turn
+    confidence_score - float 0.0-1.0, the LLM's confidence for that turn
                        (blank / 0 if no flags)
 
 What gets written
 -----------------
-  sessions  - one row per unique session_id (INSERT OR IGNORE)
-              overall_verdict + confidence_score auto-computed from flags
-              review_status = 'PENDING'
-  turns     - one row per (session_id, turn_id)  (INSERT OR IGNORE)
-  flags     - one row per flag per turn, source='LLM', status='ACTIVE'
-              severity derived from flag category via verdict_rules
+  sessions  - INSERT OR IGNORE (skip if already present)
+  turns     - INSERT OR IGNORE (skip if already present)
+  flags     - INSERT if no existing LLM flag with same
+              (session_id, turn_id, category_code, source='LLM')
+  sessions  - overall_verdict + confidence_score always recomputed
+              from all active flags after ingestion
 
-Safe to re-run — INSERT OR IGNORE skips already-ingested rows.
+Safe to re-run — no duplicates created.
 
 Usage
 -----
@@ -49,9 +56,18 @@ load_dotenv()
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from store.db import get_connection, recompute_session_verdict  # noqa: E402
 from engine.verdict_rules import to_canonical_flag, get_db_verdict_for_flags  # noqa: E402
+import importlib.util as _ilu
+_cp_spec = _ilu.spec_from_file_location(
+    "checkpoint",
+    Path(__file__).resolve().parents[1] / "pipeline" / "checkpoint.py",
+)
+_cp = _ilu.module_from_spec(_cp_spec)
+_cp_spec.loader.exec_module(_cp)
+load_checkpoint = _cp.load_checkpoint
+save_checkpoint = _cp.save_checkpoint
 
 # ---------------------------------------------------------------------------
-# Severity derivation — same logic as backfill_flag_severity.py
+# Severity derivation
 # ---------------------------------------------------------------------------
 _VERDICT_TO_SEVERITY = {"SEVERE": "HIGH", "FLAGGED": "MEDIUM", "CLEAN": "LOW"}
 
@@ -62,19 +78,34 @@ def _severity_for_flag(category_code: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# CSV column aliases → canonical field names
+# Column name aliases → canonical field names
 # ---------------------------------------------------------------------------
+_ALIASES = {
+    "message_seq":          "turn_id",
+    "sender":               "speaker",
+    "is_automated_message": "is_automated",
+    "sent_at_ist":          "timestamp",
+    "flagged":              "astrotalk_flagged",
+    "language":             "language_code",
+}
+
+
 def _norm_row(row: dict) -> dict:
-    """Normalise column name aliases from different CSV exports."""
-    aliases = {
-        "message_seq":          "turn_id",
-        "sender":               "speaker",
-        "is_automated_message": "is_automated",
-        "sent_at_ist":          "timestamp",
-        "flagged":              "astrotalk_flagged",
-        "language":             "language_code",
-    }
-    return {aliases.get(k, k): v for k, v in row.items()}
+    return {_ALIASES.get(k, k): v for k, v in row.items()}
+
+
+def _float_or_none(val) -> float | None:
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return None
+
+
+def _norm_speaker(val: str) -> str:
+    v = str(val).strip().upper()
+    if v in ("ASTROLOGER", "CONSULTANT"):
+        return "ASTROLOGER"
+    return "USER"
 
 
 # ---------------------------------------------------------------------------
@@ -82,9 +113,9 @@ def _norm_row(row: dict) -> dict:
 # ---------------------------------------------------------------------------
 def ingest(input_path: Path, dry_run: bool = False) -> None:
     conn = get_connection()
+    processed_ids = load_checkpoint()
 
-    # Collect all rows grouped by session_id
-    sessions_meta: dict[str, dict] = {}       # session_id -> session-level fields
+    sessions_meta: dict[str, dict]    = {}
     turns_by_session: dict[str, list] = defaultdict(list)
     flags_by_session: dict[str, list] = defaultdict(list)
 
@@ -98,42 +129,39 @@ def ingest(input_path: Path, dry_run: bool = False) -> None:
             if not sid or not turn_id:
                 continue
 
-            # ── Session-level fields (use first row seen per session) ──────
+            # ── Session-level (first row wins) ────────────────────────────
             if sid not in sessions_meta:
                 astrotalk_flagged_raw = row.get("astrotalk_flagged", "")
                 astrotalk_flagged = (
-                    1 if str(astrotalk_flagged_raw).strip().lower() in ("1", "yes", "true") else 0
+                    1 if str(astrotalk_flagged_raw).lower() in ("1", "yes", "true") else 0
                 )
                 sessions_meta[sid] = {
-                    "session_id":             sid,
-                    "astrologer_id":          row.get("astrologer_id") or None,
-                    "user_id":                row.get("user_id") or None,
-                    "session_start":          row.get("session_start") or None,
-                    "session_end":            row.get("session_end") or None,
-                    "duration_minutes":       _float_or_none(row.get("duration_minutes")),
-                    "session_type":           row.get("session_type") or None,
-                    "session_date":           row.get("session_date") or None,
-                    "month":                  row.get("month") or None,
-                    "language_code":          row.get("language_code") or None,
-                    "language_detected":      row.get("language_detected") or None,
-                    "astrotalk_flagged":      astrotalk_flagged,
+                    "session_id":              sid,
+                    "astrologer_id":           row.get("astrologer_id") or None,
+                    "user_id":                 row.get("user_id") or None,
+                    "session_start":           row.get("session_start") or None,
+                    "session_end":             row.get("session_end") or None,
+                    "duration_minutes":        _float_or_none(row.get("duration_minutes")),
+                    "session_type":            row.get("session_type") or None,
+                    "session_date":            row.get("session_date") or None,
+                    "month":                   row.get("month") or None,
+                    "language_code":           row.get("language_code") or None,
+                    "language_detected":       row.get("language_detected") or None,
+                    "astrotalk_flagged":       astrotalk_flagged,
                     "astrotalk_flag_category": row.get("astrotalk_flag_category") or None,
-                    "astrotalk_severity":     row.get("astrotalk_severity") or None,
-                    "review_status":          "PENDING",
-                    "overall_verdict":        "CLEAN",   # placeholder; recomputed below
-                    "confidence_score":       0.0,       # placeholder; recomputed below
+                    "astrotalk_severity":      row.get("astrotalk_severity") or None,
+                    "review_status":           "PENDING",
+                    "overall_verdict":         "CLEAN",
+                    "confidence_score":        0.0,
                 }
 
-            # ── Turn row ───────────────────────────────────────────────────
-            speaker = str(row.get("speaker", "")).upper()
-            if speaker not in ("USER", "ASTROLOGER"):
-                speaker = "USER"
-
+            # ── Turn ──────────────────────────────────────────────────────
             turns_by_session[sid].append({
                 "turn_id":      int(turn_id),
-                "speaker":      speaker,
+                "speaker":      _norm_speaker(row.get("speaker", "")),
                 "message_text": row.get("message_text") or "",
-                "is_automated": 1 if str(row.get("is_automated", "0")).lower() in ("1", "yes", "true") else 0,
+                "is_automated": 1 if str(row.get("is_automated", "0")).lower()
+                                in ("1", "yes", "true") else 0,
                 "timestamp":    row.get("timestamp") or None,
             })
 
@@ -157,10 +185,10 @@ def ingest(input_path: Path, dry_run: bool = False) -> None:
                         "confidence_score": conf,
                     })
 
-    # ── Compute verdict + confidence per session from its collected flags ──
+    # ── Compute initial verdict per session ────────────────────────────────
     for sid, meta in sessions_meta.items():
-        flag_codes = [f["category_code"] for f in flags_by_session[sid]]
-        verdict    = get_db_verdict_for_flags(flag_codes) if flag_codes else "CLEAN"
+        flag_codes  = [f["category_code"] for f in flags_by_session[sid]]
+        verdict     = get_db_verdict_for_flags(flag_codes) if flag_codes else "CLEAN"
         conf_scores = [f["confidence_score"] for f in flags_by_session[sid]
                        if f.get("confidence_score") is not None]
         meta["overall_verdict"]  = verdict
@@ -170,21 +198,35 @@ def ingest(input_path: Path, dry_run: bool = False) -> None:
     n_turns    = sum(len(t) for t in turns_by_session.values())
     n_flags    = sum(len(f) for f in flags_by_session.values())
 
-    print(f"  Parsed sessions : {n_sessions}")
-    print(f"  Parsed turns    : {n_turns}")
-    print(f"  Parsed flags    : {n_flags}")
+    # ── Check which sessions already exist in DB ───────────────────────────
+    existing_sessions = set()
+    if sessions_meta:
+        ph = ",".join("?" * len(sessions_meta))
+        existing_sessions = {
+            r[0] for r in conn.execute(
+                f"SELECT session_id FROM sessions WHERE session_id IN ({ph})",
+                list(sessions_meta.keys()),
+            ).fetchall()
+        }
+
+    print(f"  Sessions in CSV      : {n_sessions}")
+    print(f"  Already in DB        : {len(existing_sessions)}")
+    print(f"  New sessions         : {n_sessions - len(existing_sessions)}")
+    print(f"  Turns in CSV         : {n_turns}")
+    print(f"  LLM flags in CSV     : {n_flags}")
+    print(f"  Sample session_ids   : {list(sessions_meta.keys())[:3]}")
 
     if dry_run:
         print("\nDRY RUN — no changes written.")
         conn.close()
         return
 
-    # ── Write to DB ────────────────────────────────────────────────────────
+    # ── Write sessions (skip existing) ────────────────────────────────────
     sessions_written = turns_written = flags_written = 0
 
     for sid, meta in sessions_meta.items():
-        cols  = ", ".join(meta.keys())
-        ph    = ", ".join("?" * len(meta))
+        cols = ", ".join(meta.keys())
+        ph   = ", ".join("?" * len(meta))
         before = conn.total_changes
         conn.execute(
             f"INSERT OR IGNORE INTO sessions ({cols}) VALUES ({ph})",
@@ -192,7 +234,9 @@ def ingest(input_path: Path, dry_run: bool = False) -> None:
         )
         sessions_written += conn.total_changes - before
 
-        for t in turns_by_session[sid]:
+    # ── Write turns (skip existing) ───────────────────────────────────────
+    for sid, turns in turns_by_session.items():
+        for t in turns:
             before = conn.total_changes
             conn.execute(
                 """INSERT OR IGNORE INTO turns
@@ -203,42 +247,52 @@ def ingest(input_path: Path, dry_run: bool = False) -> None:
             )
             turns_written += conn.total_changes - before
 
-        for f in flags_by_session[sid]:
-            before = conn.total_changes
+    # ── Write LLM flags (de-duped by session+turn+category+source) ────────
+    for sid, flags in flags_by_session.items():
+        for f in flags:
+            existing = conn.execute(
+                """SELECT 1 FROM flags
+                   WHERE session_id = ? AND turn_id = ?
+                     AND category_code = ? AND source = 'LLM'""",
+                (sid, f["turn_id"], f["category_code"]),
+            ).fetchone()
+            if existing:
+                continue
             conn.execute(
-                """INSERT OR IGNORE INTO flags
+                """INSERT INTO flags
                        (session_id, turn_id, category_code, detection_layer, source,
                         status, severity, confidence_score)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                 (sid, f["turn_id"], f["category_code"], f["detection_layer"],
                  f["source"], f["status"], f["severity"], f["confidence_score"]),
             )
-            flags_written += conn.total_changes - before
+            flags_written += 1
 
-        # Auto-recompute verdict from all active flags now in DB
+    # ── Recompute verdict for every session (existing or new) ─────────────
+    for sid in sessions_meta:
         recompute_session_verdict(sid, conn)
 
     conn.commit()
     conn.close()
 
-    print(f"  Sessions written : {sessions_written}  (skipped already-present: {n_sessions - sessions_written})")
-    print(f"  Turns written    : {turns_written}")
-    print(f"  Flags written    : {flags_written}")
-    print("\nDone. Verdict auto-recomputed for all ingested sessions.")
+    # Update checkpoint so batch_runner knows these sessions are processed
+    for sid in sessions_meta:
+        processed_ids.add(sid)
+    save_checkpoint(processed_ids)
 
-
-def _float_or_none(val) -> float | None:
-    try:
-        return float(val)
-    except (TypeError, ValueError):
-        return None
+    print(f"\n  Sessions written     : {sessions_written}  "
+          f"(skipped existing: {n_sessions - sessions_written})")
+    print(f"  Turns written        : {turns_written}")
+    print(f"  LLM flags written    : {flags_written}")
+    print(f"\nDone. Verdict recomputed for all {n_sessions} sessions.")
+    print(f"  Checkpoint updated   : {len(processed_ids)} total sessions logged.")
 
 
 def main() -> None:
     p = argparse.ArgumentParser(
         description="Ingest LLM-pre-analysed session CSV into the safety review DB"
     )
-    p.add_argument("--input", required=True, help="Path to input CSV file")
+    p.add_argument("--input",   required=True, help="Path to input CSV file")
     p.add_argument("--dry-run", action="store_true",
                    help="Parse and count without writing to DB")
     args = p.parse_args()
