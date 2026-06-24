@@ -178,6 +178,7 @@ export default function SessionQueue({ reviewerName, reviewerRole, onSelectSessi
   // for L2 review or already locked; L2 should not see locked (finalised)
   // sessions. Only applies to the default/implicit queue — an explicit
   // status filter selection overrides this.
+  const ALLOWED_LANGUAGES = ['english', 'hindi', 'hinglish'];
   let displayedSessions = sessions
     .filter((s) => {
       if (statusFilter) return true;
@@ -188,6 +189,14 @@ export default function SessionQueue({ reviewerName, reviewerRole, onSelectSessi
         return s.review_status !== 'LOCKED';
       }
       return true;
+    })
+    .filter((s) => {
+      // Hide non-English/Hindi/Hinglish sessions for both L1 and L2.
+      // Explicit column language filter overrides this rule.
+      // Sessions with no detected language are shown (not hidden by default).
+      if (colFilterLang.trim()) return true;
+      if (!s.language_detected) return true;
+      return ALLOWED_LANGUAGES.includes(s.language_detected.toLowerCase());
     })
     // Client-side filters (column filters AND-ed with top-bar filters) + optional sort
     .filter((s) => !searchQuery.trim()    || s.session_id.includes(searchQuery.trim()))
