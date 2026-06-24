@@ -185,15 +185,15 @@ def ingest(input_path: Path, dry_run: bool = False) -> None:
     for sid, meta in sessions_meta.items():
         cols  = ", ".join(meta.keys())
         ph    = ", ".join("?" * len(meta))
+        before = conn.total_changes
         conn.execute(
             f"INSERT OR IGNORE INTO sessions ({cols}) VALUES ({ph})",
             list(meta.values()),
         )
-        sessions_written += conn.execute(
-            "SELECT changes()"
-        ).fetchone()[0]
+        sessions_written += conn.total_changes - before
 
         for t in turns_by_session[sid]:
+            before = conn.total_changes
             conn.execute(
                 """INSERT OR IGNORE INTO turns
                        (session_id, turn_id, speaker, message_text, is_automated, timestamp)
@@ -201,9 +201,10 @@ def ingest(input_path: Path, dry_run: bool = False) -> None:
                 (sid, t["turn_id"], t["speaker"], t["message_text"],
                  t["is_automated"], t["timestamp"]),
             )
-            turns_written += conn.execute("SELECT changes()").fetchone()[0]
+            turns_written += conn.total_changes - before
 
         for f in flags_by_session[sid]:
+            before = conn.total_changes
             conn.execute(
                 """INSERT OR IGNORE INTO flags
                        (session_id, turn_id, category_code, detection_layer, source,
@@ -212,7 +213,7 @@ def ingest(input_path: Path, dry_run: bool = False) -> None:
                 (sid, f["turn_id"], f["category_code"], f["detection_layer"],
                  f["source"], f["status"], f["severity"], f["confidence_score"]),
             )
-            flags_written += conn.execute("SELECT changes()").fetchone()[0]
+            flags_written += conn.total_changes - before
 
         # Auto-recompute verdict from all active flags now in DB
         recompute_session_verdict(sid, conn)
