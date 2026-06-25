@@ -64,8 +64,11 @@ def build_sessions_from_csv(input_csv_path: Path) -> dict[int, dict]:
       - New to_check format: sender, message_text, message_seq, is_automated_message
 
     Rows with is_automated_message == '1' are SKIPPED (not sent to the LLM).
+
+    session_id is treated as a unique string key (e.g. "SESS_1001" or
+    "321490380"); each session groups its multiple message rows together.
     """
-    all_sessions: dict[int, dict] = {}
+    all_sessions: dict[str, dict] = {}
 
     with open(input_csv_path, encoding="utf-8") as f:
         reader = csv.DictReader(f)
@@ -75,9 +78,8 @@ def build_sessions_from_csv(input_csv_path: Path) -> dict[int, dict]:
         is_new_format = "message_text" in headers
 
         for row in reader:
-            try:
-                sid = int(row["session_id"])
-            except (ValueError, KeyError):
+            sid = (row.get("session_id") or "").strip()
+            if not sid:
                 continue
 
             # Skip automated messages (only present in new format)
@@ -236,12 +238,12 @@ def main():
         help="Path to the JSON results file (default: moderation_results.json).",
     )
     parser.add_argument(
-        "--session-id", type=int, default=None,
-        help="Single session ID to moderate.",
+        "--session-id", type=str, default=None,
+        help="Single session ID to moderate (e.g. SESS_1001).",
     )
     parser.add_argument(
         "--session-ids", type=str, default=None,
-        help="Comma-separated session IDs (e.g. 123,456,789).",
+        help="Comma-separated session IDs (e.g. SESS_1001,SESS_1003).",
     )
     args = parser.parse_args()
 
@@ -268,9 +270,9 @@ def main():
 
     # ── Determine which session IDs to run ────────────────────────────
     if args.session_ids:
-        wanted = [int(s.strip()) for s in args.session_ids.split(",")]
+        wanted = [s.strip() for s in args.session_ids.split(",") if s.strip()]
     elif args.session_id:
-        wanted = [args.session_id]
+        wanted = [args.session_id.strip()]
     else:
         wanted = list(all_sessions.keys())
 
