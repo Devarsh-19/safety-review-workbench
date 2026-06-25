@@ -12,9 +12,7 @@ Usage:
 
 from __future__ import annotations
 
-import os
-
-from config import MODEL_ID, API_KEY_ENV, MAX_OUTPUT_TOKENS
+from config import MODEL_ID, GOOGLE_API_KEY, MAX_OUTPUT_TOKENS
 
 
 def call_gemini_model(
@@ -30,7 +28,7 @@ def call_gemini_model(
     from google import genai
     from google.genai import types
 
-    client = genai.Client(api_key=os.environ.get(API_KEY_ENV))
+    client = genai.Client(api_key=GOOGLE_API_KEY)
 
     gen_config = types.GenerateContentConfig(
         cached_content=cache_name,

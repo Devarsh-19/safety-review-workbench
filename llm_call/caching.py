@@ -12,9 +12,7 @@ Usage:
 
 from __future__ import annotations
 
-import os
-
-from config import MODEL_ID, API_KEY_ENV
+from config import MODEL_ID, GOOGLE_API_KEY
 
 
 def create_gemini_cache(system_prompt: str) -> str | None:
@@ -25,7 +23,7 @@ def create_gemini_cache(system_prompt: str) -> str | None:
     from google import genai
     from google.genai import types
 
-    client = genai.Client(api_key=os.environ.get(API_KEY_ENV))
+    client = genai.Client(api_key=GOOGLE_API_KEY)
     try:
         cache = client.caches.create(
             model=MODEL_ID,
@@ -44,7 +42,7 @@ def create_gemini_cache(system_prompt: str) -> str | None:
 def delete_gemini_cache(cache_name: str):
     """Delete the Gemini server-side cache."""
     from google import genai
-    client = genai.Client(api_key=os.environ.get(API_KEY_ENV))
+    client = genai.Client(api_key=GOOGLE_API_KEY)
     try:
         client.caches.delete(name=cache_name)
     except Exception:

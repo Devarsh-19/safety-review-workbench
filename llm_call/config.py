@@ -7,7 +7,9 @@ Single hardcoded model (Gemini 3 Flash). Imported by the API caller,
 the caching helpers, and the runner.
 """
 
-MODEL_ID = "gemini-3-flash-preview"   # API model ID
-API_KEY_ENV = "GOOGLE_API_KEY"        # env var holding the API key
-MAX_OUTPUT_TOKENS = 16384             # generation cap
-MAX_RETRIES = 2                       # API call retries per session
+# Hardcoded model + key.
+# WARNING: do NOT commit a real key — this file is tracked in git.
+MODEL_ID = "gemini-3-flash-preview"            # API model ID (hardcoded)
+GOOGLE_API_KEY = "PASTE_YOUR_GOOGLE_API_KEY_HERE"  # hardcoded API key
+MAX_OUTPUT_TOKENS = 16384                      # generation cap
+MAX_RETRIES = 2                                # API call retries per session
