@@ -1,0 +1,343 @@
+"""
+moderate.py
+===========
+Single-model content-moderation runner for AstroTalk sessions.
+
+Calls Gemini 3 Flash on every session in an input CSV and writes the parsed
+moderation result to a JSON file. The JSON is saved after EVERY session
+(atomic write) so an API failure or crash never loses earlier work, and a
+re-run resumes by skipping sessions already present in the file.
+
+There is NO benchmarking and NO CSV merge here — merging the JSON back onto
+the source rows is a separate, manually triggered step.
+
+Usage:
+    cd LLM
+    python moderate.py --input session40_llm_testing.csv
+    python moderate.py --input to_check.csv --session-id 321490380
+    python moderate.py --input to_check.csv --session-ids 321490380,323566934
+    python moderate.py --input to_check.csv --output results.json
+
+Environment variables (set in .env):
+    GOOGLE_API_KEY   — for Gemini
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import json
+import os
+import re
+import sys
+import time
+from pathlib import Path
+
+from prompts import SYSTEM_INSTRUCTION, USER_MESSAGE_TMPL
+from parser import parse_llm_response
+from config import MODEL_ID, API_KEY_ENV, SUPPORTS_CACHE, MAX_RETRIES
+from gemini_api import call_gemini_model
+from caching import create_gemini_cache, delete_gemini_cache
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  SECTION 1 — Session loading from CSV
+# ═══════════════════════════════════════════════════════════════════════════
+
+def format_session_text(messages: list[dict]) -> str:
+    """Format all session messages into a single text block with turn IDs."""
+    lines = []
+    for msg in messages:
+        role = msg.get("role", "USER")
+        turn_id = msg.get("message_id", 0)
+        text = msg.get("message", "").strip()
+        if text:
+            lines.append(f"[Turn {turn_id}] {role}: {text}")
+    return "\n".join(lines)
+
+
+def build_sessions_from_csv(input_csv_path: Path) -> dict[int, dict]:
+    """Build session dicts from the input CSV.
+
+    Auto-detects column format:
+      - Old GT format: speaker, turn_text, turn_id
+      - New to_check format: sender, message_text, message_seq, is_automated_message
+
+    Rows with is_automated_message == '1' are SKIPPED (not sent to the LLM).
+    """
+    all_sessions: dict[int, dict] = {}
+
+    with open(input_csv_path, encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        headers = set(reader.fieldnames or [])
+
+        # Detect format
+        is_new_format = "message_text" in headers
+
+        for row in reader:
+            try:
+                sid = int(row["session_id"])
+            except (ValueError, KeyError):
+                continue
+
+            # Skip automated messages (only present in new format)
+            if row.get("is_automated_message", "0") == "1":
+                continue
+
+            if sid not in all_sessions:
+                all_sessions[sid] = {"order_id": sid, "messages": []}
+
+            if is_new_format:
+                # to_check.csv format
+                sender = row.get("sender", "").lower()
+                role = "CONSULTANT" if sender == "consultant" else "USER"
+                text = re.sub(r"<br\s*/?>", "\n", row.get("message_text", ""))
+                text = re.sub(r"<[^>]+>", "", text)
+                turn_id = int(row.get("message_seq", 0))
+            else:
+                # Old GT format (submitted_flags)
+                role = "CONSULTANT" if row.get("speaker", "").upper() == "ASTROLOGER" else "USER"
+                text = re.sub(r"<br\s*/?>", "\n", row.get("turn_text", ""))
+                text = re.sub(r"<[^>]+>", "", text)
+                turn_id = int(row.get("turn_id", 0))
+
+            all_sessions[sid]["messages"].append({
+                "role": role,
+                "message": text,
+                "timestamp": "",
+                "message_id": turn_id,
+            })
+
+    # Sort messages by turn_id
+    for sess in all_sessions.values():
+        sess["messages"].sort(key=lambda m: m["message_id"])
+
+    return all_sessions
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  SECTION 2 — Incremental JSON results store
+# ═══════════════════════════════════════════════════════════════════════════
+
+def load_results(output_path: Path) -> dict[str, dict]:
+    """Load existing results (keyed by session_id as string), or empty dict."""
+    if output_path.exists():
+        try:
+            with open(output_path, encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return data
+        except (json.JSONDecodeError, OSError):
+            print(f"  [WARN] Could not read existing {output_path.name}; starting fresh.")
+    return {}
+
+
+def save_results(output_path: Path, results: dict[str, dict]):
+    """Atomically write results to disk (temp file + replace)."""
+    tmp_path = output_path.with_suffix(output_path.suffix + ".tmp")
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(results, f, ensure_ascii=False, indent=2)
+    os.replace(tmp_path, output_path)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  SECTION 3 — Per-session moderation
+# ═══════════════════════════════════════════════════════════════════════════
+
+def moderate_session(
+    sid: int,
+    session: dict,
+    cache_name: str | None,
+) -> dict:
+    """Call Gemini on one session and return a result entry.
+
+    The entry always carries a `status`:
+      - "ok"          parsed successfully
+      - "parse_error" got a response but JSON parsing failed
+      - "api_error"   the API call failed after retries
+    """
+    messages = session.get("messages", [])
+    user_prompt = USER_MESSAGE_TMPL.format(
+        session_id=sid,
+        num_messages=len(messages),
+        session_text=format_session_text(messages),
+    )
+
+    raw_response = ""
+    input_tokens = output_tokens = cached_tokens = 0
+    latency = 0.0
+    api_error = ""
+
+    for attempt in range(1, MAX_RETRIES + 1):
+        start = time.perf_counter()
+        try:
+            raw_response, in_tok, out_tok, cache_tok = call_gemini_model(
+                SYSTEM_INSTRUCTION, user_prompt, cache_name
+            )
+            latency = time.perf_counter() - start
+            input_tokens, output_tokens, cached_tokens = in_tok, out_tok, cache_tok
+            api_error = ""
+            break
+        except Exception as exc:
+            latency = time.perf_counter() - start
+            api_error = f"{type(exc).__name__}: {exc}"
+            if attempt < MAX_RETRIES:
+                time.sleep(2.0)
+
+    entry: dict = {
+        "session_id": sid,
+        "num_messages": len(messages),
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "cached_tokens": cached_tokens,
+        "latency_s": round(latency, 2),
+        "raw_response": raw_response,
+    }
+
+    if api_error:
+        entry["status"] = "api_error"
+        entry["error"] = api_error
+        entry["session_severity"] = ""
+        entry["intents_triggered"] = []
+        return entry
+
+    try:
+        parsed = parse_llm_response(raw_response)
+        entry["status"] = "ok"
+        entry["session_severity"] = parsed.get("session_severity", "")
+        entry["intents_triggered"] = parsed.get("intents_triggered", [])
+    except Exception as exc:
+        entry["status"] = "parse_error"
+        entry["error"] = f"{type(exc).__name__}: {exc}"
+        entry["session_severity"] = ""
+        entry["intents_triggered"] = []
+
+    return entry
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  SECTION 4 — Main entry point
+# ═══════════════════════════════════════════════════════════════════════════
+
+def main():
+    sys.stdout.reconfigure(encoding="utf-8")
+    from dotenv import load_dotenv
+    load_dotenv(Path(__file__).parent / ".env")
+
+    parser = argparse.ArgumentParser(
+        description="Gemini 3 Flash content-moderation runner (JSON output)"
+    )
+    parser.add_argument(
+        "--input", type=str, required=True,
+        help="Path to the input CSV of session messages.",
+    )
+    parser.add_argument(
+        "--output", type=str, default="moderation_results.json",
+        help="Path to the JSON results file (default: moderation_results.json).",
+    )
+    parser.add_argument(
+        "--session-id", type=int, default=None,
+        help="Single session ID to moderate.",
+    )
+    parser.add_argument(
+        "--session-ids", type=str, default=None,
+        help="Comma-separated session IDs (e.g. 123,456,789).",
+    )
+    args = parser.parse_args()
+
+    input_path = Path(args.input)
+    if not input_path.is_absolute():
+        input_path = Path(__file__).parent / input_path
+    output_path = Path(args.output)
+    if not output_path.is_absolute():
+        output_path = Path(__file__).parent / output_path
+
+    if not input_path.exists():
+        print(f"  [X] Input CSV not found: {input_path}")
+        sys.exit(1)
+
+    # API key check
+    if not os.environ.get(API_KEY_ENV):
+        print(f"  [X] {API_KEY_ENV} not set (add it to .env).")
+        sys.exit(1)
+
+    # ── Load sessions ─────────────────────────────────────────────────
+    print(f"\n  Building sessions from {input_path.name}...")
+    all_sessions = build_sessions_from_csv(input_path)
+    print(f"  Sessions in CSV: {len(all_sessions)}")
+
+    # ── Determine which session IDs to run ────────────────────────────
+    if args.session_ids:
+        wanted = [int(s.strip()) for s in args.session_ids.split(",")]
+    elif args.session_id:
+        wanted = [args.session_id]
+    else:
+        wanted = list(all_sessions.keys())
+
+    session_ids = [sid for sid in wanted if sid in all_sessions]
+    if not session_ids:
+        print("  [X] No valid session IDs found in the CSV!")
+        sys.exit(1)
+
+    # ── Resume: skip sessions already in the results file ─────────────
+    results = load_results(output_path)
+    todo = [sid for sid in session_ids if str(sid) not in results]
+    skipped = len(session_ids) - len(todo)
+
+    print("=" * 90)
+    print("  GEMINI 3 FLASH CONTENT MODERATION")
+    print(f"  Model: {MODEL_ID}")
+    print(f"  Output: {output_path.name}")
+    print(f"  To run: {len(todo)} sessions"
+          + (f"  (resuming — {skipped} already done)" if skipped else ""))
+    print("=" * 90)
+
+    if not todo:
+        print("\n  Nothing to do — all requested sessions already in results.")
+        return
+
+    # ── Create server-side cache for the system prompt ────────────────
+    cache_name = None
+    if SUPPORTS_CACHE:
+        print("  Creating cache...", end=" ", flush=True)
+        cache_name = create_gemini_cache(SYSTEM_INSTRUCTION)
+        print("OK" if cache_name else "FAILED (running without cache)")
+
+    # ── Run ───────────────────────────────────────────────────────────
+    try:
+        for i, sid in enumerate(todo, 1):
+            print(f"  [{i}/{len(todo)}] Session {sid}...", end=" ", flush=True)
+
+            entry = moderate_session(sid, all_sessions[sid], cache_name)
+
+            # Persist immediately after every single session (crash-safe).
+            results[str(sid)] = entry
+            save_results(output_path, results)
+
+            n_flags = len(entry.get("intents_triggered", []))
+            cache_str = (f"cache={entry['cached_tokens']}"
+                         if entry.get("cached_tokens") else "no-cache")
+            if entry["status"] == "ok":
+                print(f"{entry['session_severity'] or 'Green'} | {n_flags} flags | "
+                      f"{entry['latency_s']}s | {cache_str}")
+            else:
+                print(f"{entry['status'].upper()}: {entry.get('error', '')[:60]}")
+
+            time.sleep(0.5)  # gentle rate limit
+    finally:
+        if cache_name:
+            delete_gemini_cache(cache_name)
+
+    # ── Summary ───────────────────────────────────────────────────────
+    ran = [results[str(sid)] for sid in todo]
+    ok = sum(1 for e in ran if e["status"] == "ok")
+    flagged = sum(1 for e in ran if e["status"] == "ok" and e.get("intents_triggered"))
+    failed = sum(1 for e in ran if e["status"] != "ok")
+    print("\n" + "=" * 90)
+    print(f"  Done. OK: {ok} | Flagged: {flagged} | Failed: {failed}")
+    print(f"  Results: {output_path}")
+    print("=" * 90)
+
+
+if __name__ == "__main__":
+    main()
