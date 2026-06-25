@@ -35,7 +35,7 @@ from pathlib import Path
 
 from prompts import SYSTEM_INSTRUCTION, USER_MESSAGE_TMPL
 from parser import parse_llm_response
-from config import MODEL_ID, API_KEY_ENV, SUPPORTS_CACHE, MAX_RETRIES
+from config import MODEL_ID, API_KEY_ENV, MAX_RETRIES
 from gemini_api import call_gemini_model
 from caching import create_gemini_cache, delete_gemini_cache
 
@@ -172,7 +172,7 @@ def moderate_session(
         start = time.perf_counter()
         try:
             raw_response, in_tok, out_tok, cache_tok = call_gemini_model(
-                SYSTEM_INSTRUCTION, user_prompt, cache_name
+                user_prompt, cache_name
             )
             latency = time.perf_counter() - start
             input_tokens, output_tokens, cached_tokens = in_tok, out_tok, cache_tok
@@ -296,12 +296,14 @@ def main():
         print("\n  Nothing to do — all requested sessions already in results.")
         return
 
-    # ── Create server-side cache for the system prompt ────────────────
-    cache_name = None
-    if SUPPORTS_CACHE:
-        print("  Creating cache...", end=" ", flush=True)
-        cache_name = create_gemini_cache(SYSTEM_INSTRUCTION)
-        print("OK" if cache_name else "FAILED (running without cache)")
+    # ── Create server-side cache for the system prompt (required) ─────
+    print("  Creating cache...", end=" ", flush=True)
+    cache_name = create_gemini_cache(SYSTEM_INSTRUCTION)
+    if not cache_name:
+        print("FAILED")
+        print("  [X] Cache creation failed — caching is required, aborting.")
+        sys.exit(1)
+    print("OK")
 
     # ── Run ───────────────────────────────────────────────────────────
     try:

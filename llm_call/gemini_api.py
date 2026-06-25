@@ -18,14 +18,13 @@ from config import MODEL_ID, API_KEY_ENV, MAX_OUTPUT_TOKENS
 
 
 def call_gemini_model(
-    system_prompt: str,
     user_prompt: str,
-    cache_name: str | None = None,
+    cache_name: str,
 ) -> tuple[str, int, int, int]:
-    """Call Gemini via google-genai SDK.
+    """Call Gemini using the cached system prompt.
 
-    When `cache_name` is given the cached system prompt is used; otherwise the
-    system prompt is sent inline. Returns:
+    The system instruction is supplied via the required server-side cache
+    (`cache_name`, created by `caching.create_gemini_cache`). Returns:
         (response_text, input_tokens, output_tokens, cached_tokens)
     """
     from google import genai
@@ -33,18 +32,11 @@ def call_gemini_model(
 
     client = genai.Client(api_key=os.environ.get(API_KEY_ENV))
 
-    if cache_name:
-        gen_config = types.GenerateContentConfig(
-            cached_content=cache_name,
-            temperature=0,
-            max_output_tokens=MAX_OUTPUT_TOKENS,
-        )
-    else:
-        gen_config = types.GenerateContentConfig(
-            system_instruction=system_prompt,
-            temperature=0,
-            max_output_tokens=MAX_OUTPUT_TOKENS,
-        )
+    gen_config = types.GenerateContentConfig(
+        cached_content=cache_name,
+        temperature=0,
+        max_output_tokens=MAX_OUTPUT_TOKENS,
+    )
 
     response = client.models.generate_content(
         model=MODEL_ID,
