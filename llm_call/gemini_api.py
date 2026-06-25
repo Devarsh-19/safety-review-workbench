@@ -3,8 +3,8 @@ gemini_api.py
 =============
 Gemini API caller for the content-moderation runner.
 
-Holds ONLY the per-request model call (and its safety settings). Server-side
-prompt caching lives separately in `caching.py`.
+Holds ONLY the per-request model call. Server-side prompt caching lives
+separately in `caching.py`.
 
 Usage:
     from gemini_api import call_gemini_model
@@ -15,21 +15,6 @@ from __future__ import annotations
 import os
 
 from config import MODEL_ID, API_KEY_ENV, MAX_OUTPUT_TOKENS
-
-
-def _gemini_safety_settings():
-    """Return safety settings that disable all content filtering."""
-    from google.genai import types
-    return [
-        types.SafetySetting(category=cat, threshold="OFF")
-        for cat in [
-            "HARM_CATEGORY_HARASSMENT",
-            "HARM_CATEGORY_HATE_SPEECH",
-            "HARM_CATEGORY_SEXUALLY_EXPLICIT",
-            "HARM_CATEGORY_DANGEROUS_CONTENT",
-            "HARM_CATEGORY_CIVIC_INTEGRITY",
-        ]
-    ]
 
 
 def call_gemini_model(
@@ -47,21 +32,18 @@ def call_gemini_model(
     from google.genai import types
 
     client = genai.Client(api_key=os.environ.get(API_KEY_ENV))
-    safety = _gemini_safety_settings()
 
     if cache_name:
         gen_config = types.GenerateContentConfig(
             cached_content=cache_name,
             temperature=0,
             max_output_tokens=MAX_OUTPUT_TOKENS,
-            safety_settings=safety,
         )
     else:
         gen_config = types.GenerateContentConfig(
             system_instruction=system_prompt,
             temperature=0,
             max_output_tokens=MAX_OUTPUT_TOKENS,
-            safety_settings=safety,
         )
 
     response = client.models.generate_content(
