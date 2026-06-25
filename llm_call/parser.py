@@ -23,7 +23,8 @@ def _normalize_compact_format(parsed: dict) -> dict:
 
     Compact:   {"id": 123, "s": "Red", "f": [[12, "NSFW", 0.95], ...]}
     Standard:  {"session_id": 123, "session_severity": "Red",
-                "intents_triggered": [{"turn_id": 12, ...}, ...]}
+                "intents_triggered": [
+                    {"turn_id": 12, "llm_flag": "NSFW", "confidence_score": 0.95}, ...]}
     """
     if "intents_triggered" in parsed:
         return parsed
@@ -40,8 +41,8 @@ def _normalize_compact_format(parsed: dict) -> dict:
             raw_conf = flag[2] if len(flag) > 2 else 1.0
             intents.append({
                 "turn_id": flag[0],
-                "intent_id": str(flag[1]),
-                "confidence": raw_conf,
+                "llm_flag": str(flag[1]),
+                "confidence_score": raw_conf,
             })
         elif isinstance(flag, dict):
             intents.append(flag)
