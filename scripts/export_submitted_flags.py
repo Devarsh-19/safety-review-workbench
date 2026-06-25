@@ -12,6 +12,7 @@ Output columns (one row per turn / turn-flag):
     session_id
     verdict          - the session's overall_verdict (CLEAN / FLAGGED / SEVERE)
     reviewed_by      - the reviewer who submitted the session for review
+    astrotalk_flagged - the session's astrotalk_flagged value (platform's own flag)
     turn_id
     turn_text        - the message_text of that turn
     severity         - the flag's severity (blank if turn not flagged)
@@ -41,9 +42,9 @@ load_dotenv()
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from store.db import get_connection  # noqa: E402
 
-CSV_COLUMNS = ["session_id", "verdict", "reviewed_by", "turn_id", "turn_text",
-               "severity", "flag_type", "detection_layer", "status", "speaker",
-               "is_automated_message"]
+CSV_COLUMNS = ["session_id", "verdict", "reviewed_by", "astrotalk_flagged", "turn_id",
+               "turn_text", "severity", "flag_type", "detection_layer", "status",
+               "speaker", "is_automated_message"]
 
 
 def _active_flag_ids(conn, session_ids: set[str]) -> set[int]:
@@ -71,7 +72,7 @@ def export(out_path: Path) -> None:
     # 1) Submitted + locked sessions + verdict + who reviewed (submitted_by, fallback reviewer_id)
     #    UNPROCESSED sessions are excluded — only properly reviewed verdicts.
     sessions = conn.execute(
-        """SELECT session_id, overall_verdict, submitted_by, reviewer_id
+        """SELECT session_id, overall_verdict, submitted_by, reviewer_id, astrotalk_flagged
            FROM sessions
            WHERE review_status IN ('SUBMITTED_FOR_REVIEW', 'LOCKED')
              AND overall_verdict IS NOT NULL
@@ -83,6 +84,7 @@ def export(out_path: Path) -> None:
         s["session_id"]: (s["submitted_by"] or s["reviewer_id"] or "")
         for s in sessions
     }
+    astrotalk_flagged_by_session = {s["session_id"]: s["astrotalk_flagged"] for s in sessions}
     session_ids = set(verdict_by_session)
 
     # 2) Active flags grouped by (session_id, turn_id)
@@ -137,6 +139,7 @@ def export(out_path: Path) -> None:
                     "session_id":            sid,
                     "verdict":               verdict_by_session.get(sid, ""),
                     "reviewed_by":           reviewer_by_session.get(sid, ""),
+                    "astrotalk_flagged":     astrotalk_flagged_by_session.get(sid, ""),
                     "turn_id":               t["turn_id"],
                     "turn_text":             t["message_text"],
                     "speaker":               t["speaker"],
