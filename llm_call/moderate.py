@@ -18,7 +18,8 @@ Usage:
     python moderate.py --input to_check.csv --session-ids SESS_1001,SESS_1003
     python moderate.py --input to_check.csv --output results.json
 
-The model ID and GOOGLE_API_KEY are hardcoded in config.py.
+The model ID and GOOGLE_API_KEY are hardcoded in each module
+(gemini_api.py, caching.py, moderate.py).
 """
 
 from __future__ import annotations
@@ -34,9 +35,14 @@ from pathlib import Path
 
 from prompts import SYSTEM_INSTRUCTION, USER_MESSAGE_TMPL
 from parser import parse_llm_response
-from config import MODEL_ID, GOOGLE_API_KEY, MAX_RETRIES
 from gemini_api import call_gemini_model
 from caching import create_gemini_cache, delete_gemini_cache
+
+# Hardcoded model + key (no config module).
+# WARNING: do not commit a real key — this file is tracked in git.
+MODEL_ID = "gemini-3-flash-preview"
+GOOGLE_API_KEY = "PASTE_YOUR_GOOGLE_API_KEY_HERE"
+MAX_RETRIES = 2
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -255,9 +261,9 @@ def main():
         print(f"  [X] Input CSV not found: {input_path}")
         sys.exit(1)
 
-    # API key check (hardcoded in config.py)
+    # API key check (hardcoded at the top of this module / gemini_api.py / caching.py)
     if not GOOGLE_API_KEY or GOOGLE_API_KEY.startswith("PASTE_"):
-        print("  [X] GOOGLE_API_KEY not set in config.py.")
+        print("  [X] GOOGLE_API_KEY not set (edit gemini_api.py, caching.py, moderate.py).")
         sys.exit(1)
 
     # ── Load sessions ─────────────────────────────────────────────────

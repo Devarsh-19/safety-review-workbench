@@ -12,7 +12,10 @@ Usage:
 
 from __future__ import annotations
 
-from config import MODEL_ID, GOOGLE_API_KEY
+# Hardcoded model + key (no config module).
+# WARNING: do not commit a real key — this file is tracked in git.
+MODEL_ID = "gemini-3-flash-preview"
+GOOGLE_API_KEY = "PASTE_YOUR_GOOGLE_API_KEY_HERE"
 
 
 def create_gemini_cache(system_prompt: str) -> str | None:
