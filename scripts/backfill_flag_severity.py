@@ -83,7 +83,7 @@ def main() -> None:
     args = p.parse_args()
     print("=" * 55)
     print("  Backfill flag severity from category")
-    print(f"  DB: {os.getenv('DB_PATH', 'store/results.db')}")
+    print(f"  DB: {os.getenv('DB_PATH', 'store/astrotalk.db')}")
     print("=" * 55)
     backfill(dry_run=args.dry_run)
 
