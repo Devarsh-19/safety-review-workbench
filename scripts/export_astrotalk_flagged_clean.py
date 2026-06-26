@@ -11,11 +11,16 @@ Same output columns as export_submitted_flags.py (one row per turn; a turn with
 multiple active flags yields multiple rows — though CLEAN sessions normally have
 none, so flag columns are blank). The astrotalk_flagged column is included.
 
+Only sessions VERIFIED BY one of the given reviewers (COALESCE(submitted_by,
+reviewer_id)) are exported. Defaults to Divyansh, Nikhil, Vineet, Yusuf — which
+also excludes LLM-auto-submitted sessions (verifier 'LLM').
+
 Read-only — never modifies the database.
 
 Usage:
   python scripts/export_astrotalk_flagged_clean.py
   python scripts/export_astrotalk_flagged_clean.py --out C:/path/to/file.csv
+  python scripts/export_astrotalk_flagged_clean.py --reviewers "Nikhil,Yusuf"
 """
 
 import argparse
@@ -56,18 +61,24 @@ def _active_flag_ids(conn, session_ids: set[str]) -> set[int]:
     return active
 
 
-def export(out_path: Path) -> None:
+def export(out_path: Path, reviewers: list[str]) -> None:
     conn = get_connection()
 
     # 1) AstroTalk-flagged sessions whose review verdict is CLEAN, reviewed
-    #    (LOCKED or SUBMITTED_FOR_REVIEW). This is the converted query.
+    #    (LOCKED or SUBMITTED_FOR_REVIEW), and VERIFIED BY one of the given
+    #    reviewers. The verifier is COALESCE(submitted_by, reviewer_id) — the
+    #    same value shown in the reviewed_by column (this also excludes
+    #    LLM-auto-submitted sessions, whose verifier is 'LLM').
+    reviewer_ph = ",".join("?" * len(reviewers))
     sessions = conn.execute(
-        """SELECT session_id, overall_verdict, submitted_by, reviewer_id, astrotalk_flagged
-           FROM sessions
-           WHERE astrotalk_flagged = 1
-             AND overall_verdict = 'CLEAN'
-             AND review_status IN ('LOCKED', 'SUBMITTED_FOR_REVIEW')
-           ORDER BY session_id"""
+        f"""SELECT session_id, overall_verdict, submitted_by, reviewer_id, astrotalk_flagged
+            FROM sessions
+            WHERE astrotalk_flagged = 1
+              AND overall_verdict = 'CLEAN'
+              AND review_status IN ('LOCKED', 'SUBMITTED_FOR_REVIEW')
+              AND COALESCE(submitted_by, reviewer_id) IN ({reviewer_ph})
+            ORDER BY session_id""",
+        tuple(reviewers),
     ).fetchall()
     verdict_by_session = {s["session_id"]: s["overall_verdict"] for s in sessions}
     reviewer_by_session = {
@@ -138,6 +149,7 @@ def export(out_path: Path) -> None:
                         n_rows += 1
 
     conn.close()
+    print(f"  Reviewers (verified by)                     : {', '.join(reviewers)}")
     print(f"  AstroTalk-flagged + reviewer-clean sessions : {len(session_ids)}")
     print(f"  Turns (full chat)                           : {n_turns}")
     print(f"  CSV rows written                            : {n_rows}")
@@ -149,7 +161,17 @@ def main() -> None:
         description="Export full chats for AstroTalk-flagged but reviewed-CLEAN sessions"
     )
     p.add_argument("--out", default=None, help="Output CSV path")
+    p.add_argument(
+        "--reviewers", default="Divyansh,Nikhil,Vineet,Yusuf",
+        help="Comma-separated reviewer names; only sessions verified by these "
+             "(submitted_by / reviewer_id) are exported.",
+    )
     args = p.parse_args()
+
+    reviewers = [r.strip() for r in args.reviewers.split(",") if r.strip()]
+    if not reviewers:
+        print("ERROR: no reviewers given via --reviewers")
+        sys.exit(1)
 
     if args.out:
         out_path = Path(args.out)
@@ -160,8 +182,9 @@ def main() -> None:
     print("=" * 60)
     print("  Export AstroTalk-flagged + reviewer-clean sessions")
     print(f"  DB: {os.getenv('DB_PATH', 'store/results.db')}")
+    print(f"  Reviewers: {', '.join(reviewers)}")
     print("=" * 60)
-    export(out_path)
+    export(out_path, reviewers)
 
 
 if __name__ == "__main__":
