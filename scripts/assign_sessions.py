@@ -48,6 +48,12 @@ def assign_sessions(dry_run: bool = False) -> dict:
     cursor = conn.execute(
         """SELECT session_id FROM sessions
            WHERE assigned_to IS NULL
+             -- Skip CLEAN sessions auto-submitted by the LLM ingest: they are
+             -- already SUBMITTED_FOR_REVIEW (reviewer 'LLM') and get auto-locked
+             -- by auto_lock_clean_submitted.py, so they need no manual L1 review.
+             -- COALESCE keeps rows with submitted_by IS NULL (3-valued logic
+             -- would otherwise drop every non-LLM session too).
+             AND NOT (COALESCE(submitted_by, '') = 'LLM' AND overall_verdict = 'CLEAN')
            ORDER BY session_id ASC"""
     )
     session_ids = [row[0] for row in cursor.fetchall()]
