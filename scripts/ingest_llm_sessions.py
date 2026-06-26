@@ -28,6 +28,7 @@ from collections import defaultdict
 from pathlib import Path
 
 from dotenv import load_dotenv
+from tqdm import tqdm
 load_dotenv()
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -166,7 +167,7 @@ def ingest(input_path: Path, dry_run: bool = False, auto_submit: bool = True) ->
 
     sessions_written = turns_written = flags_written = auto_submitted = 0
 
-    for session in sessions:
+    for session in tqdm(sessions, desc="Ingesting", unit="session"):
         sid = str(session["session_id"])
 
         session_data = {
