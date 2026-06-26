@@ -32,7 +32,9 @@ load_dotenv()
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from store.db import get_connection, recompute_session_verdict  # noqa: E402
+from store.db import (                                          # noqa: E402
+    get_connection, recompute_session_verdict, submit_session_for_review,
+)
 from store.writer import write_session_complete                  # noqa: E402
 from engine.data_loader import DataLoader                        # noqa: E402
 from engine.verdict_rules import to_canonical_flag, get_db_verdict_for_flags  # noqa: E402
@@ -91,16 +93,23 @@ def _parse_llm_flags(input_path: Path) -> dict[tuple, list[dict]]:
             # accept both llm_flag and llm_flags
             llm_raw = row.get("llm_flag") or row.get("llm_flags") or ""
             llm_raw = llm_raw.strip()
-            conf    = _float_or_none(row.get("confidence_score"))
 
             if not llm_raw:
                 continue
 
-            for raw_code in llm_raw.split("|"):
-                raw_code = raw_code.strip()
-                if not raw_code:
-                    continue
+            # A turn can carry MULTIPLE flags, pipe-separated, with a matching
+            # pipe-separated confidence list, e.g.
+            #   llm_flag         = "NSFW|ABUSIVE_LANGUAGE"
+            #   confidence_score = "0.9|0.7"
+            # Split both and pair positionally so each flag keeps its own score.
+            # (Parsing the whole cell as one float would drop the score to None
+            #  for every multi-flag turn.)
+            codes = [c.strip() for c in llm_raw.split("|") if c.strip()]
+            confs = [c.strip() for c in (row.get("confidence_score") or "").split("|")]
+
+            for i, raw_code in enumerate(codes):
                 canonical = to_canonical_flag(raw_code)
+                conf = _float_or_none(confs[i]) if i < len(confs) else None
                 flags_by_turn[(sid, int(turn_id))].append({
                     "turn_id":          int(turn_id),
                     "category_code":    canonical,
@@ -117,7 +126,7 @@ def _parse_llm_flags(input_path: Path) -> dict[tuple, list[dict]]:
 # ---------------------------------------------------------------------------
 # Main ingestion
 # ---------------------------------------------------------------------------
-def ingest(input_path: Path, dry_run: bool = False) -> None:
+def ingest(input_path: Path, dry_run: bool = False, auto_submit: bool = True) -> None:
     processed_ids = load_checkpoint()
 
     # ── Step 1: parse sessions+turns via DataLoader (handles all mapping) ──
@@ -139,6 +148,12 @@ def ingest(input_path: Path, dry_run: bool = False) -> None:
         flags_by_session[sid].extend(flist)
 
     if dry_run:
+        if auto_submit:
+            n_clean = sum(
+                1 for s in sessions
+                if not flags_by_session.get(str(s["session_id"]))
+            )
+            print(f"  Would auto-submit CLEAN (reviewer=LLM): {n_clean}")
         print("\nDRY RUN — no changes written.")
         return
 
@@ -149,7 +164,7 @@ def ingest(input_path: Path, dry_run: bool = False) -> None:
     }
     conn.close()
 
-    sessions_written = turns_written = flags_written = 0
+    sessions_written = turns_written = flags_written = auto_submitted = 0
 
     for session in sessions:
         sid = str(session["session_id"])
@@ -228,9 +243,25 @@ def ingest(input_path: Path, dry_run: bool = False) -> None:
             )
 
         # ── Step 6: recompute verdict from all active flags ────────────────
-        recompute_session_verdict(sid, conn)
+        verdict = recompute_session_verdict(sid, conn)
+        status_row = conn.execute(
+            "SELECT review_status FROM sessions WHERE session_id = ?", (sid,)
+        ).fetchone()
+        review_status = status_row[0] if status_row else None
         conn.commit()
         conn.close()
+
+        # ── Step 7: auto-submit no-flag sessions as CLEAN for L2 review ────
+        # A session with no active flags (verdict CLEAN) is submitted for L2
+        # review under reviewer 'LLM'. Only PENDING sessions are touched, so
+        # re-ingesting never clobbers already-submitted/reviewed/locked ones.
+        if auto_submit and verdict == "CLEAN" and review_status == "PENDING":
+            submit_session_for_review(
+                sid,
+                reviewer_id="LLM",
+                note="Auto-submitted by LLM ingest: no flags",
+            )
+            auto_submitted += 1
 
         processed_ids.add(sid)
 
@@ -241,6 +272,7 @@ def ingest(input_path: Path, dry_run: bool = False) -> None:
           f"(skipped existing: {len(sessions) - sessions_written})")
     print(f"  Turns written        : {turns_written}")
     print(f"  LLM flags written    : {flags_written}")
+    print(f"  CLEAN auto-submitted : {auto_submitted}  (reviewer=LLM, SUBMITTED_FOR_REVIEW)")
     print(f"  Checkpoint updated   : {len(processed_ids)} total sessions logged.")
     print(f"\nDone. Verdict recomputed for all {len(sessions)} sessions.")
 
@@ -252,6 +284,9 @@ def main() -> None:
     p.add_argument("--input",   required=True, help="Path to input CSV file")
     p.add_argument("--dry-run", action="store_true",
                    help="Parse and count without writing to DB")
+    p.add_argument("--no-auto-submit", action="store_true",
+                   help="Do NOT auto-submit no-flag (CLEAN) sessions for L2 "
+                        "review as reviewer 'LLM'.")
     args = p.parse_args()
 
     input_path = Path(args.input)
@@ -264,9 +299,10 @@ def main() -> None:
     print(f"  Input : {input_path}")
     print(f"  DB    : {os.getenv('DB_PATH', 'store/astrotalk.db')}")
     print(f"  Mode  : {'DRY-RUN' if args.dry_run else 'COMMIT'}")
+    print(f"  Auto-submit CLEAN (reviewer=LLM): {'OFF' if args.no_auto_submit else 'ON'}")
     print("=" * 60)
 
-    ingest(input_path, dry_run=args.dry_run)
+    ingest(input_path, dry_run=args.dry_run, auto_submit=not args.no_auto_submit)
 
 
 if __name__ == "__main__":
