@@ -455,6 +455,16 @@ Do NOT use OTHER for borderline, ambiguous, or mildly inappropriate content. \
 If in doubt, do NOT flag as OTHER.
 
 === END INTENT TAXONOMY ===
+
+=== EXTENDED EXAMPLES ===
+Brief extra examples for borderline cases (guidance, not exhaustive). "->" marks a NOT-a-violation look-alike.
+- ABUSIVE_LANGUAGE: "kar na bc", "saali kahi ki"; Tamil "thevdiya", "otha mavan"; Telugu "lanja", "dengey"; Bengali "banchod"; Punjabi "pencho"; Marathi "zavla". -> "pagal hai kya" in friendly banter.
+- NSFW / NSFW_EXPLICIT: "tere sath marwani hai", "ling size batao kundli se", "send nude pics". -> "physical ka yog ban raha hai", fertility timing.
+- NSFW_GROOMING: repeated "I miss you", "tum mujhe achhe lagte ho kundli ke bahar". -> one-off "take care", tarot warmth "babe/love".
+- OFF_PLATFORM_SOLICITATION: "w kar", "kar na w", "call me on this number". -> "w" inside an English word.
+- HATE_SPEECH: identity-targeted slurs or sustained belittling "teri aukaat kya hai". -> one-off "natak mat karo".
+- CSAM_RISK: any sexual/intimate content toward someone stated/implied under 18 (flag at >= 0.2). -> child's career horoscope.
+=== END EXTENDED EXAMPLES ===
 """
 
 
