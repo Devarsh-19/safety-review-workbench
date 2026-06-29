@@ -3,10 +3,11 @@ moderate.py
 ===========
 Single-model content-moderation runner for AstroTalk sessions.
 
-Calls Gemini 3 Flash on every session in an input CSV and writes the parsed
-moderation result to a JSON file. The JSON is saved after EVERY session
-(atomic write) so an API failure or crash never loses earlier work, and a
-re-run resumes by skipping sessions already present in the file.
+Calls Gemini 3 Flash on every session in an input CSV and writes the RAW model
+response to a JSON file (parsing is a separate step — parser.py / merge.py).
+The JSON is saved after EVERY session (atomic write) so an API failure or crash
+never loses earlier work, and a re-run resumes by skipping sessions already
+present in the file.
 
 There is NO benchmarking and NO CSV merge here — merging the JSON back onto
 the source rows is a separate, manually triggered step.
@@ -27,14 +28,16 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import logging
 import os
 import re
 import sys
 import time
 from pathlib import Path
 
+logger = logging.getLogger("moderate")
+
 from prompts import SYSTEM_INSTRUCTION, USER_MESSAGE_TMPL
-from parser import parse_llm_response
 # MODEL_ID + GOOGLE_API_KEY come from gemini_api so the key lives in ONE place
 # (gemini_api.py / caching.py) — no third hardcoded copy to keep in sync.
 from gemini_api import call_gemini_model, MODEL_ID, GOOGLE_API_KEY
@@ -154,11 +157,10 @@ def moderate_session(
     session: dict,
     cache_name: str | None,
 ) -> dict:
-    """Call Gemini on one session and return a result entry.
+    """Call Gemini on one session and return a RAW result entry.
 
     The entry always carries a `status`:
-      - "ok"          parsed successfully
-      - "parse_error" got a response but JSON parsing failed
+      - "raw"         the call succeeded; raw_response holds the model output
       - "api_error"   the API call failed after retries
     """
     messages = session.get("messages", [])
@@ -191,7 +193,8 @@ def moderate_session(
             if attempt < MAX_RETRIES:
                 time.sleep(2.0)
 
-    entry: dict = {
+    # Raw-only output — parsing is a separate step (parser.py / merge.py).
+    return {
         "session_id": sid,
         "num_messages": len(messages),
         "input_tokens": input_tokens,
@@ -200,28 +203,10 @@ def moderate_session(
         "thinking_tokens": thinking_tokens,
         "cache_id": cache_name,
         "latency_s": round(latency, 2),
+        "status": "api_error" if api_error else "raw",
+        "error": api_error,
         "raw_response": raw_response,
     }
-
-    if api_error:
-        entry["status"] = "api_error"
-        entry["error"] = api_error
-        entry["session_severity"] = ""
-        entry["intents_triggered"] = []
-        return entry
-
-    try:
-        parsed = parse_llm_response(raw_response)
-        entry["status"] = "ok"
-        entry["session_severity"] = parsed.get("session_severity", "")
-        entry["intents_triggered"] = parsed.get("intents_triggered", [])
-    except Exception as exc:
-        entry["status"] = "parse_error"
-        entry["error"] = f"{type(exc).__name__}: {exc}"
-        entry["session_severity"] = ""
-        entry["intents_triggered"] = []
-
-    return entry
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -230,6 +215,9 @@ def moderate_session(
 
 def main():
     sys.stdout.reconfigure(encoding="utf-8")
+    logging.basicConfig(level=logging.INFO,
+                        format="%(asctime)s | %(levelname)s | %(message)s")
+    run_start = time.perf_counter()
 
     parser = argparse.ArgumentParser(
         description="Gemini 3 Flash content-moderation runner (JSON output)"
@@ -323,12 +311,10 @@ def main():
             results[str(sid)] = entry
             save_results(output_path, results)
 
-            n_flags = len(entry.get("intents_triggered", []))
             cache_str = (f"cache={entry['cached_tokens']}"
                          if entry.get("cached_tokens") else "no-cache")
-            if entry["status"] == "ok":
-                print(f"{entry['session_severity'] or 'Green'} | {n_flags} flags | "
-                      f"{entry['latency_s']}s | {cache_str}")
+            if entry["status"] == "raw":
+                print(f"{entry['output_tokens']} out tok | {entry['latency_s']}s | {cache_str}")
             else:
                 print(f"{entry['status'].upper()}: {entry.get('error', '')[:60]}")
 
@@ -339,13 +325,15 @@ def main():
 
     # ── Summary ───────────────────────────────────────────────────────
     ran = [results[str(sid)] for sid in todo]
-    ok = sum(1 for e in ran if e["status"] == "ok")
-    flagged = sum(1 for e in ran if e["status"] == "ok" and e.get("intents_triggered"))
-    failed = sum(1 for e in ran if e["status"] != "ok")
+    ok = sum(1 for e in ran if e["status"] == "raw")
+    failed = sum(1 for e in ran if e["status"] != "raw")
+    elapsed = time.perf_counter() - run_start
     print("\n" + "=" * 90)
-    print(f"  Done. OK: {ok} | Flagged: {flagged} | Failed: {failed}")
+    print(f"  Done. raw: {ok} | failed: {failed}")
     print(f"  Results: {output_path}")
     print("=" * 90)
+    logger.info("Total run time: %.1fs (%.2f min) for %d session(s) — avg %.2fs/session",
+                elapsed, elapsed / 60, len(todo), elapsed / max(len(todo), 1))
 
 
 if __name__ == "__main__":

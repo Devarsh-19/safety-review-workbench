@@ -29,10 +29,13 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import logging
 import random
 import sys
 import time
 from pathlib import Path
+
+logger = logging.getLogger("batch")
 
 from prompts import SYSTEM_INSTRUCTION, USER_MESSAGE_TMPL
 from gemini_api import call_gemini_model_async, GOOGLE_API_KEY
@@ -144,6 +147,7 @@ async def run_batch(
     concurrency: int = CONCURRENCY,
 ) -> dict:
     """Run the async batch. Returns the full results dict (raw responses)."""
+    run_start = time.perf_counter()
     all_sessions = build_sessions_from_csv(input_path)
     ids = session_ids if session_ids else list(all_sessions.keys())
     ids = [sid for sid in ids if sid in all_sessions]
@@ -186,17 +190,22 @@ async def run_batch(
     finally:
         await manager.cleanup()
 
+    elapsed = time.perf_counter() - run_start
     ok = sum(1 for sid in todo if results.get(str(sid), {}).get("status") == "raw")
     failed = len(todo) - ok
     print("\n" + "=" * 90)
     print(f"  Done. raw: {ok} | failed: {failed} | cache refreshes: {manager.refresh_count}")
     print(f"  Results: {output_path}")
     print("=" * 90)
+    logger.info("Total run time: %.1fs (%.2f min) for %d session(s) — avg %.2fs/session",
+                elapsed, elapsed / 60, len(todo), elapsed / max(len(todo), 1))
     return results
 
 
 def main():
     sys.stdout.reconfigure(encoding="utf-8")
+    logging.basicConfig(level=logging.INFO,
+                        format="%(asctime)s | %(levelname)s | %(message)s")
 
     parser = argparse.ArgumentParser(
         description="Async batched Gemini 3 Flash moderation (raw output)"
