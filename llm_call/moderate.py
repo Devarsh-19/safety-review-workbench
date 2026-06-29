@@ -230,8 +230,10 @@ def main():
         help="Path to the input CSV of session messages.",
     )
     parser.add_argument(
-        "--output", type=str, default="moderation_sequential.json",
-        help="Path to the JSON results file (default: moderation_sequential.json).",
+        "--output", type=str, default=None,
+        help="Path to the JSON results file "
+             "(default: <input>_moderation.json next to the input CSV; reused "
+             "across runs so a stopped/re-run job resumes).",
     )
     parser.add_argument(
         "--session-id", type=str, default=None,
@@ -246,9 +248,16 @@ def main():
     input_path = Path(args.input)
     if not input_path.is_absolute():
         input_path = Path(__file__).parent / input_path
-    output_path = Path(args.output)
-    if not output_path.is_absolute():
-        output_path = Path(__file__).parent / output_path
+
+    # Default output is derived from the input filename and placed next to it,
+    # e.g. to_check.csv -> to_check_moderation.json. Stable across runs, so a
+    # job that stops midway (or is re-run) resumes into the SAME file.
+    if args.output:
+        output_path = Path(args.output)
+        if not output_path.is_absolute():
+            output_path = Path(__file__).parent / output_path
+    else:
+        output_path = input_path.with_name(input_path.stem + "_moderation.json")
 
     if not input_path.exists():
         print(f"  [X] Input CSV not found: {input_path}")
