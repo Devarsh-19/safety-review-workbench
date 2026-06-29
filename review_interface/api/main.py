@@ -688,6 +688,58 @@ def confirm_flag_endpoint(flag_id: int, body: LockRequest):
         raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/sessions/{session_id}/confirm-all-flags")
+def confirm_all_flags_endpoint(session_id: str, body: LockRequest):
+    """
+    Confirm ALL active, not-yet-confirmed flags for a session in one request.
+
+    Batched equivalent of /flags/{flag_id}/confirm: resolves each active row
+    (amendment if present, else original), sets status='CONFIRMED', logs a
+    CONFIRM_FLAG action per flag, and recomputes the session verdict ONCE.
+    Idempotent — already-confirmed flags are skipped.
+    """
+    conn = get_connection()
+    try:
+        with conn:
+            rows = conn.execute(
+                "SELECT flag_id, parent_flag_id, status FROM flags WHERE session_id = ?",
+                (session_id,),
+            ).fetchall()
+
+            # Active = amendment rows + original rows that have no amendment.
+            amended_parents = {
+                r["parent_flag_id"] for r in rows if r["parent_flag_id"] is not None
+            }
+            status_by_id = {r["flag_id"]: r["status"] for r in rows}
+            active_ids = [
+                r["flag_id"] for r in rows
+                if (r["parent_flag_id"] is not None)
+                or (r["flag_id"] not in amended_parents)
+            ]
+            to_confirm = [
+                fid for fid in active_ids if status_by_id.get(fid) != "CONFIRMED"
+            ]
+
+            for fid in to_confirm:
+                conn.execute(
+                    "UPDATE flags SET status = 'CONFIRMED' WHERE flag_id = ?",
+                    (fid,),
+                )
+                conn.execute(
+                    """INSERT INTO review_log (session_id, flag_id, action, reviewer_id, note)
+                       VALUES (?, ?, 'CONFIRM_FLAG', ?, '')""",
+                    (session_id, fid, body.reviewer_id),
+                )
+
+            recompute_session_verdict(session_id, conn)
+
+        return {"success": True, "confirmed_count": len(to_confirm)}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
     finally:
         conn.close()
 

@@ -4,7 +4,7 @@ import VerdictBadge from './VerdictBadge';
 import {
   getSessionDetail, getSessionFlags, submitReview,
   manualFlag, saveSessionNote,
-  confirmFlag, submitSession, markNeedsFinalReview,
+  confirmFlag, confirmAllFlags, submitSession, markNeedsFinalReview,
 } from '../api';
 
 // ---------------------------------------------------------------------------
@@ -256,6 +256,7 @@ export default function SessionViewer({ sessionId, sessionList, reviewerName, re
   const [dismissingFlagId,   setDismissingFlagId]   = useState(null);
   const [dismissSaving,      setDismissSaving]      = useState(false);
   const [confirmingFlagId,   setConfirmingFlagId]   = useState(null);
+  const [confirmingAll,      setConfirmingAll]      = useState(false);
   const [flagCardHoverId,    setFlagCardHoverId]    = useState(null);
 
   // Workflow state
@@ -467,6 +468,23 @@ export default function SessionViewer({ sessionId, sessionList, reviewerName, re
     } catch (_) {
     } finally {
       setConfirmingFlagId(null);
+    }
+  };
+
+  // ── Confirm-all handler: confirm every unconfirmed active flag at once ──────
+  const handleConfirmAll = async (count) => {
+    if (confirmingAll) return;
+    // eslint-disable-next-line no-alert
+    if (!window.confirm(`Confirm all ${count} flag${count === 1 ? '' : 's'} for this session?`)) return;
+    setConfirmingAll(true);
+    try {
+      const res = await confirmAllFlags(sessionId, reviewerName);
+      await refreshSessionAndFlags();
+      setToast(`Confirmed ${res?.confirmed_count ?? count} flags`);
+      setTimeout(() => setToast(null), 2000);
+    } catch (_) {
+    } finally {
+      setConfirmingAll(false);
     }
   };
 
@@ -1000,6 +1018,25 @@ export default function SessionViewer({ sessionId, sessionList, reviewerName, re
                     User: {userFlagCount}
                   </span>
                 )}
+              </div>
+            )}
+
+            {/* Confirm-all: one click confirms every unconfirmed active flag */}
+            {!loading && unactionedFlagCount >= 2 && (
+              <div style={{ marginBottom: 14 }}>
+                <button
+                  onClick={() => handleConfirmAll(unactionedFlagCount)}
+                  disabled={confirmingAll}
+                  style={{
+                    fontSize: 12, fontFamily: MONO, fontWeight: 600,
+                    padding: '6px 14px', borderRadius: 4,
+                    cursor: confirmingAll ? 'default' : 'pointer',
+                    background: C.accent, color: '#FFFFFF',
+                    border: `1px solid ${C.accent}`, opacity: confirmingAll ? 0.6 : 1,
+                  }}
+                >
+                  {confirmingAll ? 'Confirming…' : `Confirm All (${unactionedFlagCount})`}
+                </button>
               </div>
             )}
 

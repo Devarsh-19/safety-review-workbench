@@ -40,13 +40,19 @@ def _gemini_safety_settings():
 
 
 def _gen_config(cache_name: str):
-    """Build the GenerateContentConfig for a cached, safety-off call."""
+    """Build the GenerateContentConfig for a cached, safety-off call.
+
+    thinking_budget=0 disables the model's internal "thinking" — this is a
+    structured classification task that needs no reasoning, and thinking tokens
+    are billed at the output rate (~1000+ tokens/call otherwise, all wasted).
+    """
     from google.genai import types
     return types.GenerateContentConfig(
         cached_content=cache_name,
         temperature=0,
         max_output_tokens=MAX_OUTPUT_TOKENS,
         safety_settings=_gemini_safety_settings(),
+        thinking_config=types.ThinkingConfig(thinking_budget=0),
     )
 
 
