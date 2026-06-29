@@ -401,6 +401,7 @@ export default function SessionQueue({ reviewerName, reviewerRole, onSelectSessi
               <option value="Vineet">Vineet</option>
               <option value="Gaurav">Gaurav</option>
               <option value="Divyansh">Divyansh</option>
+              <option value="Devarsh">Devarsh</option>
             </select>
           )}
 

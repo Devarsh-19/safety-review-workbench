@@ -127,8 +127,14 @@ def _parse_llm_flags(input_path: Path) -> dict[tuple, list[dict]]:
 # ---------------------------------------------------------------------------
 # Main ingestion
 # ---------------------------------------------------------------------------
-def ingest(input_path: Path, dry_run: bool = False, auto_submit: bool = True) -> None:
+def ingest(input_path: Path, dry_run: bool = False, auto_submit: bool = True,
+           assign_to: str | None = None) -> None:
     processed_ids = load_checkpoint()
+
+    # Assigning to a reviewer must NOT lock or submit — disable auto-submit so
+    # the sessions stay PENDING and simply become visible in the reviewer queue.
+    if assign_to:
+        auto_submit = False
 
     # ── Step 1: parse sessions+turns via DataLoader (handles all mapping) ──
     print("  Loading sessions via DataLoader...")
@@ -149,7 +155,10 @@ def ingest(input_path: Path, dry_run: bool = False, auto_submit: bool = True) ->
         flags_by_session[sid].extend(flist)
 
     if dry_run:
-        if auto_submit:
+        if assign_to:
+            print(f"  Would assign to {assign_to}: {len(sessions)} "
+                  f"(review_status stays PENDING — no submit/lock)")
+        elif auto_submit:
             n_clean = sum(
                 1 for s in sessions
                 if not flags_by_session.get(str(s["session_id"]))
@@ -165,7 +174,7 @@ def ingest(input_path: Path, dry_run: bool = False, auto_submit: bool = True) ->
     }
     conn.close()
 
-    sessions_written = turns_written = flags_written = auto_submitted = 0
+    sessions_written = turns_written = flags_written = auto_submitted = assigned = 0
 
     for session in tqdm(sessions, desc="Ingesting", unit="session"):
         sid = str(session["session_id"])
@@ -264,6 +273,21 @@ def ingest(input_path: Path, dry_run: bool = False, auto_submit: bool = True) ->
             )
             auto_submitted += 1
 
+        # ── Step 8: assign to a reviewer (sets assigned_to ONLY) ──────────
+        # Makes the session visible in that reviewer's queue without touching
+        # review_status — no lock, no submit. assigned_to is overwritten.
+        if assign_to:
+            aconn = get_connection()
+            try:
+                with aconn:
+                    aconn.execute(
+                        "UPDATE sessions SET assigned_to = ? WHERE session_id = ?",
+                        (assign_to, sid),
+                    )
+            finally:
+                aconn.close()
+            assigned += 1
+
         processed_ids.add(sid)
 
     # ── Step 6: save checkpoint ────────────────────────────────────────────
@@ -273,7 +297,10 @@ def ingest(input_path: Path, dry_run: bool = False, auto_submit: bool = True) ->
           f"(skipped existing: {len(sessions) - sessions_written})")
     print(f"  Turns written        : {turns_written}")
     print(f"  LLM flags written    : {flags_written}")
-    print(f"  CLEAN auto-submitted : {auto_submitted}  (reviewer=LLM, SUBMITTED_FOR_REVIEW)")
+    if assign_to:
+        print(f"  Assigned to {assign_to:<8}: {assigned}  (review_status=PENDING — not submitted/locked)")
+    else:
+        print(f"  CLEAN auto-submitted : {auto_submitted}  (reviewer=LLM, SUBMITTED_FOR_REVIEW)")
     print(f"  Checkpoint updated   : {len(processed_ids)} total sessions logged.")
     print(f"\nDone. Verdict recomputed for all {len(sessions)} sessions.")
 
@@ -288,6 +315,10 @@ def main() -> None:
     p.add_argument("--no-auto-submit", action="store_true",
                    help="Do NOT auto-submit no-flag (CLEAN) sessions for L2 "
                         "review as reviewer 'LLM'.")
+    p.add_argument("--assign-to", default=None, metavar="REVIEWER",
+                   help="Assign every ingested session to this reviewer "
+                        "(sets assigned_to; stays PENDING — no submit/lock). "
+                        "Implies --no-auto-submit for the run.")
     args = p.parse_args()
 
     input_path = Path(args.input)
@@ -300,10 +331,14 @@ def main() -> None:
     print(f"  Input : {input_path}")
     print(f"  DB    : {os.getenv('DB_PATH', 'store/astrotalk.db')}")
     print(f"  Mode  : {'DRY-RUN' if args.dry_run else 'COMMIT'}")
-    print(f"  Auto-submit CLEAN (reviewer=LLM): {'OFF' if args.no_auto_submit else 'ON'}")
+    auto_submit_on = not args.no_auto_submit and not args.assign_to
+    print(f"  Auto-submit CLEAN (reviewer=LLM): {'ON' if auto_submit_on else 'OFF'}")
+    if args.assign_to:
+        print(f"  Assign ingested sessions to     : {args.assign_to} (PENDING, no submit/lock)")
     print("=" * 60)
 
-    ingest(input_path, dry_run=args.dry_run, auto_submit=not args.no_auto_submit)
+    ingest(input_path, dry_run=args.dry_run, auto_submit=not args.no_auto_submit,
+           assign_to=args.assign_to)
 
 
 if __name__ == "__main__":
