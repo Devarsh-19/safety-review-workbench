@@ -30,6 +30,11 @@ DB_PATH = os.getenv("DB_PATH", "store/astrotalk.db")
 # Modify this list to change who gets sessions and in what rotation order
 REVIEWERS = ["Nikhil", "Vineet", "Divyansh"]
 
+# Reviewers whose existing assignments are never touched — not part of the
+# round-robin pool, and preserved across --reset (e.g. sessions hand-assigned
+# via `ingest_llm_sessions.py --assign-to Devarsh`).
+PROTECTED_REVIEWERS = ["Devarsh"]
+
 
 def get_connection() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH)
@@ -121,9 +126,15 @@ def assign_sessions(dry_run: bool = False) -> dict:
 
 
 def reset_assignments() -> None:
-    """Clears all session assignments after confirmation."""
+    """Clears session assignments after confirmation.
+
+    Assignments for PROTECTED_REVIEWERS (e.g. Devarsh) are preserved — they are
+    hand-assigned and must survive a reset.
+    """
+    protected_msg = (f" (keeping {', '.join(PROTECTED_REVIEWERS)})"
+                     if PROTECTED_REVIEWERS else "")
     confirm = input(
-        "WARNING: This will clear ALL session assignments. "
+        f"WARNING: This will clear session assignments{protected_msg}. "
         "Type 'yes' to confirm: "
     ).strip().lower()
 
@@ -132,11 +143,20 @@ def reset_assignments() -> None:
         return
 
     conn = get_connection()
-    conn.execute("UPDATE sessions SET assigned_to = NULL")
+    if PROTECTED_REVIEWERS:
+        ph = ",".join("?" * len(PROTECTED_REVIEWERS))
+        cur = conn.execute(
+            f"UPDATE sessions SET assigned_to = NULL "
+            f"WHERE assigned_to IS NOT NULL AND assigned_to NOT IN ({ph})",
+            tuple(PROTECTED_REVIEWERS),
+        )
+    else:
+        cur = conn.execute(
+            "UPDATE sessions SET assigned_to = NULL WHERE assigned_to IS NOT NULL"
+        )
     conn.commit()
-
-    count = conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
-    print(f"Cleared assignments for {count:,} sessions.")
+    print(f"Cleared assignments for {cur.rowcount:,} sessions"
+          f"{' (protected reviewers kept)' if PROTECTED_REVIEWERS else ''}.")
     conn.close()
 
 
