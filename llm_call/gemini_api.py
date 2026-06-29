@@ -56,12 +56,18 @@ def _gen_config(cache_name: str):
     )
 
 
-def _extract(response) -> tuple[str, int, int, int]:
-    """Pull text + token usage out of a generate_content response."""
+def _extract(response) -> tuple[str, int, int, int, int]:
+    """Pull text + token usage out of a generate_content response.
+
+    Returns (text, input_tokens, output_tokens, cached_tokens, thinking_tokens).
+    thinking_tokens should be 0 while thinking_budget=0 — surfaced so it can be
+    monitored in the JSON output.
+    """
     usage = response.usage_metadata
     input_tokens = getattr(usage, "prompt_token_count", 0) or 0
     output_tokens = getattr(usage, "candidates_token_count", 0) or 0
     cached_tokens = getattr(usage, "cached_content_token_count", 0) or 0
+    thinking_tokens = getattr(usage, "thoughts_token_count", 0) or 0
 
     text = ""
     if response.candidates:
@@ -76,18 +82,18 @@ def _extract(response) -> tuple[str, int, int, int]:
         except (ValueError, TypeError, AttributeError):
             text = ""
 
-    return text, input_tokens, output_tokens, cached_tokens
+    return text, input_tokens, output_tokens, cached_tokens, thinking_tokens
 
 
 def call_gemini_model(
     user_prompt: str,
     cache_name: str,
-) -> tuple[str, int, int, int]:
+) -> tuple[str, int, int, int, int]:
     """Call Gemini (synchronous) using the cached system prompt.
 
     The system instruction is supplied via the required server-side cache
     (`cache_name`, created by `caching.create_gemini_cache`). Returns:
-        (response_text, input_tokens, output_tokens, cached_tokens)
+        (response_text, input_tokens, output_tokens, cached_tokens, thinking_tokens)
     """
     from google import genai
 
@@ -103,12 +109,12 @@ def call_gemini_model(
 async def call_gemini_model_async(
     user_prompt: str,
     cache_name: str,
-) -> tuple[str, int, int, int]:
+) -> tuple[str, int, int, int, int]:
     """Call Gemini (asynchronous) using the cached system prompt.
 
     Same contract as `call_gemini_model`, but awaitable — used by the async
     batch runner in `batch.py`. Returns:
-        (response_text, input_tokens, output_tokens, cached_tokens)
+        (response_text, input_tokens, output_tokens, cached_tokens, thinking_tokens)
     """
     from google import genai
 

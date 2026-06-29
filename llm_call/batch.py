@@ -69,17 +69,18 @@ async def _moderate_one(
         )
 
         raw_text = ""
-        in_tok = out_tok = cache_tok = 0
+        in_tok = out_tok = cache_tok = think_tok = 0
         latency = 0.0
         err = ""
         transient = 0
         cache_retries = 0
+        cache_name = None
 
         while True:
             cache_name = await manager.get_cache()
             start = time.perf_counter()
             try:
-                raw_text, in_tok, out_tok, cache_tok = await call_gemini_model_async(
+                raw_text, in_tok, out_tok, cache_tok, think_tok = await call_gemini_model_async(
                     user_prompt, cache_name
                 )
                 latency = time.perf_counter() - start
@@ -114,6 +115,8 @@ async def _moderate_one(
             "input_tokens": in_tok,
             "output_tokens": out_tok,
             "cached_tokens": cache_tok,
+            "thinking_tokens": think_tok,
+            "cache_id": cache_name,
             "latency_s": round(latency, 2),
             "status": "api_error" if err else "raw",
             "error": err,

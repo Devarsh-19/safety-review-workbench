@@ -35,14 +35,12 @@ from pathlib import Path
 
 from prompts import SYSTEM_INSTRUCTION, USER_MESSAGE_TMPL
 from parser import parse_llm_response
-from gemini_api import call_gemini_model
+# MODEL_ID + GOOGLE_API_KEY come from gemini_api so the key lives in ONE place
+# (gemini_api.py / caching.py) — no third hardcoded copy to keep in sync.
+from gemini_api import call_gemini_model, MODEL_ID, GOOGLE_API_KEY
 from caching import create_gemini_cache, delete_gemini_cache
 
-# Hardcoded model + key (no config module).
-# WARNING: do not commit a real key — this file is tracked in git.
-MODEL_ID = "gemini-3-flash-preview"
-GOOGLE_API_KEY = "PASTE_YOUR_GOOGLE_API_KEY_HERE"
-MAX_RETRIES = 2
+MAX_RETRIES = 2  # API call retries per session
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -171,18 +169,20 @@ def moderate_session(
     )
 
     raw_response = ""
-    input_tokens = output_tokens = cached_tokens = 0
+    input_tokens = output_tokens = cached_tokens = thinking_tokens = 0
     latency = 0.0
     api_error = ""
 
     for attempt in range(1, MAX_RETRIES + 1):
         start = time.perf_counter()
         try:
-            raw_response, in_tok, out_tok, cache_tok = call_gemini_model(
+            raw_response, in_tok, out_tok, cache_tok, think_tok = call_gemini_model(
                 user_prompt, cache_name
             )
             latency = time.perf_counter() - start
-            input_tokens, output_tokens, cached_tokens = in_tok, out_tok, cache_tok
+            input_tokens, output_tokens, cached_tokens, thinking_tokens = (
+                in_tok, out_tok, cache_tok, think_tok
+            )
             api_error = ""
             break
         except Exception as exc:
@@ -197,6 +197,8 @@ def moderate_session(
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
         "cached_tokens": cached_tokens,
+        "thinking_tokens": thinking_tokens,
+        "cache_id": cache_name,
         "latency_s": round(latency, 2),
         "raw_response": raw_response,
     }
@@ -237,8 +239,8 @@ def main():
         help="Path to the input CSV of session messages.",
     )
     parser.add_argument(
-        "--output", type=str, default="moderation_results.json",
-        help="Path to the JSON results file (default: moderation_results.json).",
+        "--output", type=str, default="moderation_sequential.json",
+        help="Path to the JSON results file (default: moderation_sequential.json).",
     )
     parser.add_argument(
         "--session-id", type=str, default=None,
@@ -261,9 +263,9 @@ def main():
         print(f"  [X] Input CSV not found: {input_path}")
         sys.exit(1)
 
-    # API key check (hardcoded at the top of this module / gemini_api.py / caching.py)
+    # API key check (key is hardcoded in gemini_api.py / caching.py)
     if not GOOGLE_API_KEY or GOOGLE_API_KEY.startswith("PASTE_"):
-        print("  [X] GOOGLE_API_KEY not set (edit gemini_api.py, caching.py, moderate.py).")
+        print("  [X] GOOGLE_API_KEY not set (edit gemini_api.py and caching.py).")
         sys.exit(1)
 
     # ── Load sessions ─────────────────────────────────────────────────
