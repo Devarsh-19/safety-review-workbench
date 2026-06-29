@@ -74,7 +74,8 @@ def auto_lock(commit: bool = False) -> int:
         print()
 
         if not commit:
-            print("DRY RUN — no changes written. Re-run with --commit to lock these.")
+            print(f"DRY RUN — {total:,} session(s) would be locked. "
+                  f"No changes written. Re-run with --commit to apply.")
             return total
 
         conn.executemany(
