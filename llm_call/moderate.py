@@ -217,6 +217,9 @@ def main():
     sys.stdout.reconfigure(encoding="utf-8")
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s | %(levelname)s | %(message)s")
+    # Silence noisy third-party HTTP/SDK logs (else they bury per-session output).
+    for _noisy in ("google_genai", "google", "httpx", "httpcore", "urllib3"):
+        logging.getLogger(_noisy).setLevel(logging.WARNING)
     run_start = time.perf_counter()
 
     parser = argparse.ArgumentParser(

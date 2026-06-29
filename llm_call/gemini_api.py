@@ -53,6 +53,9 @@ def _gen_config(cache_name: str):
         max_output_tokens=MAX_OUTPUT_TOKENS,
         safety_settings=_gemini_safety_settings(),
         thinking_config=types.ThinkingConfig(thinking_budget=0),
+        # No tools/functions are used — disable Automatic Function Calling
+        # (removes the "AFC is enabled" overhead/log line).
+        automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
     )
 
 
