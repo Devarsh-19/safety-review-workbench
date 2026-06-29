@@ -1,11 +1,15 @@
 """
 auto_lock_clean_submitted.py
 
-Auto-locks sessions that were submitted for L2 review but whose verdict is CLEAN,
+Auto-locks sessions that are clean by BOTH signals and submitted for L2 review,
 so they bypass manual L2 review. A session is locked when:
 
-    review_status  = 'SUBMITTED_FOR_REVIEW'   (submitted for L2 review)
-    overall_verdict = 'CLEAN'                  (nothing flagged)
+    review_status   = 'SUBMITTED_FOR_REVIEW'   (submitted for L2 review)
+    overall_verdict = 'CLEAN'                  (reviewer/manual clean)
+    astrotalk_flagged = 0                      (AstroTalk also did not flag it)
+
+Sessions AstroTalk flagged (astrotalk_flagged = 1) that a reviewer cleared are
+NOT auto-locked — they stay submitted for manual L2.
 
 Locking sets (same effect as the UI Lock button):
     review_status = 'LOCKED'
@@ -32,12 +36,14 @@ from store.db import get_connection, DB_PATH  # noqa: E402
 
 LOCKED_BY = "AUTO_LOCK"
 
-# Sessions submitted for L2 review whose verdict is CLEAN.
+# Sessions submitted for L2 review that are CLEAN by BOTH signals:
+# reviewer verdict CLEAN AND AstroTalk not flagged (astrotalk_flagged = 0).
 SELECT_TARGETS = """
     SELECT session_id, assigned_to, submitted_by
     FROM sessions
     WHERE review_status = 'SUBMITTED_FOR_REVIEW'
       AND overall_verdict = 'CLEAN'
+      AND astrotalk_flagged = 0
     ORDER BY session_id ASC
 """
 
@@ -78,7 +84,8 @@ def auto_lock(commit: bool = False) -> int:
                       locked_at     = datetime('now')
                 WHERE session_id = ?
                   AND review_status = 'SUBMITTED_FOR_REVIEW'
-                  AND overall_verdict = 'CLEAN'""",
+                  AND overall_verdict = 'CLEAN'
+                  AND astrotalk_flagged = 0""",
             [(LOCKED_BY, r["session_id"]) for r in rows],
         )
         conn.commit()
