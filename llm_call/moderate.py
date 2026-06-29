@@ -30,6 +30,7 @@ import csv
 import json
 import logging
 import os
+import random
 import re
 import sys
 import time
@@ -41,9 +42,11 @@ from prompts import SYSTEM_INSTRUCTION, USER_MESSAGE_TMPL
 # MODEL_ID + GOOGLE_API_KEY come from gemini_api so the key lives in ONE place
 # (gemini_api.py / caching.py) — no third hardcoded copy to keep in sync.
 from gemini_api import call_gemini_model, MODEL_ID, GOOGLE_API_KEY
-from caching import create_gemini_cache, delete_gemini_cache
+from caching import SyncCacheManager, is_cache_expired_error
 
-MAX_RETRIES = 2  # API call retries per session
+# Two independent per-session retry budgets, mirroring the async batch runner:
+MAX_TRANSIENT_ATTEMPTS = 4   # retries for 429 / 5xx (exponential backoff)
+MAX_CACHE_RETRIES = 6        # cache-expiry recreations (separate budget)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -155,9 +158,13 @@ def save_results(output_path: Path, results: dict[str, dict]):
 def moderate_session(
     sid: int,
     session: dict,
-    cache_name: str | None,
+    cm: SyncCacheManager,
 ) -> dict:
     """Call Gemini on one session and return a RAW result entry.
+
+    The cache is recreated automatically if it ages out: proactively (when
+    `cm.get_cache()` sees it is near TTL) before the call, and reactively (when
+    a call fails with a cache-expiry error) by refreshing and retrying.
 
     The entry always carries a `status`:
       - "raw"         the call succeeded; raw_response holds the model output
@@ -174,8 +181,16 @@ def moderate_session(
     input_tokens = output_tokens = cached_tokens = thinking_tokens = 0
     latency = 0.0
     api_error = ""
+    cache_name = None
+    transient = 0
+    cache_retries = 0
 
-    for attempt in range(1, MAX_RETRIES + 1):
+    # Same loop shape as the async batch runner (batch._moderate_one): a single
+    # while-loop with two independent retry budgets, recreating the cache as it
+    # ages out (proactively via get_cache, reactively on an expiry error).
+    while True:
+        # Proactive refresh: hand out a cache, recreating it first if near TTL.
+        cache_name = cm.get_cache()
         start = time.perf_counter()
         try:
             raw_response, in_tok, out_tok, cache_tok, think_tok = call_gemini_model(
@@ -185,13 +200,30 @@ def moderate_session(
             input_tokens, output_tokens, cached_tokens, thinking_tokens = (
                 in_tok, out_tok, cache_tok, think_tok
             )
+            cm.note_success()
             api_error = ""
             break
         except Exception as exc:
             latency = time.perf_counter() - start
             api_error = f"{type(exc).__name__}: {exc}"
-            if attempt < MAX_RETRIES:
-                time.sleep(2.0)
+
+            # 1) Cache expired -> recreate and retry (own budget).
+            if is_cache_expired_error(exc):
+                cache_retries += 1
+                if cache_retries > MAX_CACHE_RETRIES:
+                    break
+                try:
+                    cm.refresh()
+                except Exception as refresh_exc:
+                    api_error = f"CacheRefreshFailed: {refresh_exc}"
+                    break
+                continue
+
+            # 2) Transient (rate-limit / 5xx) -> backoff and retry.
+            transient += 1
+            if transient >= MAX_TRANSIENT_ATTEMPTS:
+                break
+            time.sleep(min(2 ** transient, 30) + random.random())
 
     # Raw-only output — parsing is a separate step (parser.py / merge.py).
     return {
@@ -286,9 +318,11 @@ def main():
         print("  [X] No valid session IDs found in the CSV!")
         sys.exit(1)
 
-    # ── Resume: skip sessions already in the results file ─────────────
+    # ── Resume: a session is done only if its stored call succeeded ───
+    # ("raw"); api_error sessions are retried on re-run (matches batch.py).
     results = load_results(output_path)
-    todo = [sid for sid in session_ids if str(sid) not in results]
+    todo = [sid for sid in session_ids
+            if results.get(str(sid), {}).get("status") != "raw"]
     skipped = len(session_ids) - len(todo)
 
     print("=" * 90)
@@ -304,11 +338,15 @@ def main():
         return
 
     # ── Create server-side cache for the system prompt (required) ─────
+    # SyncCacheManager owns the cache lifecycle and recreates it automatically
+    # if it ages out mid-run (TTL is finite — long runs would otherwise fail).
     print("  Creating cache...", end=" ", flush=True)
-    cache_name = create_gemini_cache(SYSTEM_INSTRUCTION)
-    if not cache_name:
+    cm = SyncCacheManager(SYSTEM_INSTRUCTION)
+    try:
+        cm.get_cache()  # initial creation
+    except Exception as exc:
         print("FAILED")
-        print("  [X] Cache creation failed — caching is required, aborting.")
+        print(f"  [X] Cache creation failed — caching is required, aborting. ({exc})")
         sys.exit(1)
     print("OK")
 
@@ -317,7 +355,7 @@ def main():
         for i, sid in enumerate(todo, 1):
             print(f"  [{i}/{len(todo)}] Session {sid}...", end=" ", flush=True)
 
-            entry = moderate_session(sid, all_sessions[sid], cache_name)
+            entry = moderate_session(sid, all_sessions[sid], cm)
 
             # Persist immediately after every single session (crash-safe).
             results[str(sid)] = entry
@@ -332,8 +370,7 @@ def main():
 
             time.sleep(0.5)  # gentle rate limit
     finally:
-        if cache_name:
-            delete_gemini_cache(cache_name)
+        cm.cleanup()  # delete every cache created during the run
 
     # ── Summary ───────────────────────────────────────────────────────
     ran = [results[str(sid)] for sid in todo]
@@ -341,7 +378,7 @@ def main():
     failed = sum(1 for e in ran if e["status"] != "raw")
     elapsed = time.perf_counter() - run_start
     print("\n" + "=" * 90)
-    print(f"  Done. raw: {ok} | failed: {failed}")
+    print(f"  Done. raw: {ok} | failed: {failed} | cache refreshes: {cm.refresh_count}")
     print(f"  Results: {output_path}")
     print("=" * 90)
     logger.info("Total run time: %.1fs (%.2f min) for %d session(s) — avg %.2fs/session",
