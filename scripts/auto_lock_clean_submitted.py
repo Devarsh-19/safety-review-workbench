@@ -30,6 +30,7 @@ Usage:
 
 import argparse
 import sys
+from collections import Counter
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -78,6 +79,13 @@ def auto_lock(commit: bool = False) -> int:
                 f"{str(r['assigned_to'] or '—'):<14} "
                 f"{str(r['submitted_by'] or '—'):<14}"
             )
+        print()
+
+        # Breakdown of the eligible sessions by review_status.
+        status_counts = Counter(str(r["review_status"] or "—") for r in rows)
+        print("  Breakdown by current review_status:")
+        for status, count in sorted(status_counts.items()):
+            print(f"    {status:<22} {count:>6,}")
         print()
 
         if not commit:
