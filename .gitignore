@@ -46,3 +46,10 @@ Thumbs.db
 logs/
 
 outputs/
+*.mp3
+*.wav
+*.txt
+
+*.jsonl
+*.docx
+*.ipynb
