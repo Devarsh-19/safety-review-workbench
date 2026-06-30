@@ -1,19 +1,19 @@
 """
 auto_lock_clean_submitted.py
 
-Auto-locks sessions that are clean by BOTH automated signals, so they bypass
-manual L2 review. A session is locked when:
+Auto-locks sessions that are clean by BOTH automated signals AND have been
+submitted for L2 review, so they bypass manual L2 review. A session is locked
+when ALL of these hold:
 
+    review_status   = 'SUBMITTED_FOR_REVIEW'   (an L1 submitted it for L2)
     overall_verdict = 'CLEAN'                  (LLM/reviewer verdict is clean)
     astrotalk_flagged = 0                      (AstroTalk also did not flag it)
-    review_status != 'LOCKED'                  (not already locked)
 
-This no longer requires a human to have submitted the session for review — any
-session clean by both signals is locked, whether it is still PENDING, was
-SUBMITTED_FOR_REVIEW, or reviewed. Sessions AstroTalk flagged
-(astrotalk_flagged = 1) are NOT auto-locked even if the verdict is CLEAN.
-Already-LOCKED sessions are skipped so an existing manual lock's locked_by /
-locked_at is never overwritten.
+The script still SCANS the whole clean + AstroTalk-clean population and prints a
+breakdown by review_status (PENDING, SUBMITTED_FOR_REVIEW, etc.), but it only
+LOCKS the SUBMITTED_FOR_REVIEW ones. PENDING and other not-yet-submitted clean
+sessions are shown for visibility but are NOT locked. Sessions AstroTalk flagged
+(astrotalk_flagged = 1) are never auto-locked even if the verdict is CLEAN.
 
 Locking sets (same effect as the UI Lock button):
     review_status = 'LOCKED'
@@ -41,9 +41,13 @@ from store.db import get_connection, DB_PATH  # noqa: E402
 
 LOCKED_BY = "AUTO_LOCK"
 
-# Sessions CLEAN by BOTH automated signals: verdict CLEAN AND AstroTalk not
-# flagged (astrotalk_flagged = 0). No submission gate — any status except
-# already-LOCKED is eligible.
+# Only sessions in this status are actually locked.
+LOCK_STATUS = "SUBMITTED_FOR_REVIEW"
+
+# All sessions CLEAN by BOTH automated signals: verdict CLEAN AND AstroTalk not
+# flagged (astrotalk_flagged = 0), excluding ones already LOCKED. This is the
+# full scanned population shown in the breakdown; only the SUBMITTED_FOR_REVIEW
+# subset is locked.
 SELECT_TARGETS = """
     SELECT session_id, review_status, assigned_to, submitted_by
     FROM sessions
@@ -56,9 +60,10 @@ SELECT_TARGETS = """
 
 def auto_lock(commit: bool = False) -> int:
     """
-    Locks every session that is CLEAN by both signals (overall_verdict = CLEAN
-    AND astrotalk_flagged = 0) and not already LOCKED. Returns the number of
-    matching sessions. When commit is False, nothing is written.
+    Scans all CLEAN + AstroTalk-clean sessions (not already LOCKED) and prints a
+    breakdown by review_status, but only LOCKS the SUBMITTED_FOR_REVIEW subset.
+    Returns the number of sessions actually eligible to be locked (i.e. the
+    SUBMITTED_FOR_REVIEW count). When commit is False, nothing is written.
     """
     conn = get_connection()
     try:
@@ -69,7 +74,10 @@ def auto_lock(commit: bool = False) -> int:
             print("No CLEAN + AstroTalk-clean sessions found. Nothing to lock.")
             return 0
 
-        print(f"Found {total:,} CLEAN session(s) eligible for auto-lock:\n")
+        lock_rows = [r for r in rows if r["review_status"] == LOCK_STATUS]
+        lock_total = len(lock_rows)
+
+        print(f"Found {total:,} CLEAN + AstroTalk-clean session(s):\n")
         print(f"  {'SESSION ID':<28} {'STATUS':<22} {'ASSIGNED TO':<14} {'SUBMITTED BY':<14}")
         print(f"  {'-'*28} {'-'*22} {'-'*14} {'-'*14}")
         for r in rows:
@@ -81,17 +89,25 @@ def auto_lock(commit: bool = False) -> int:
             )
         print()
 
-        # Breakdown of the eligible sessions by review_status.
+        # Breakdown of the scanned population by review_status.
         status_counts = Counter(str(r["review_status"] or "—") for r in rows)
         print("  Breakdown by current review_status:")
         for status, count in sorted(status_counts.items()):
-            print(f"    {status:<22} {count:>6,}")
+            tag = "  -> will be locked" if status == LOCK_STATUS else ""
+            print(f"    {status:<22} {count:>6,}{tag}")
+        print()
+        print(f"  Only '{LOCK_STATUS}' sessions are locked; "
+              f"{total - lock_total:,} other clean session(s) are left untouched.")
         print()
 
+        if lock_total == 0:
+            print(f"No '{LOCK_STATUS}' sessions to lock. Nothing to do.")
+            return 0
+
         if not commit:
-            print(f"DRY RUN — {total:,} session(s) would be locked. "
-                  f"No changes written. Re-run with --commit to apply.")
-            return total
+            print(f"DRY RUN — {lock_total:,} '{LOCK_STATUS}' session(s) would be "
+                  f"locked. No changes written. Re-run with --commit to apply.")
+            return lock_total
 
         conn.executemany(
             """UPDATE sessions
@@ -101,12 +117,12 @@ def auto_lock(commit: bool = False) -> int:
                 WHERE session_id = ?
                   AND overall_verdict = 'CLEAN'
                   AND astrotalk_flagged = 0
-                  AND review_status != 'LOCKED'""",
-            [(LOCKED_BY, r["session_id"]) for r in rows],
+                  AND review_status = ?""",
+            [(LOCKED_BY, r["session_id"], LOCK_STATUS) for r in lock_rows],
         )
         conn.commit()
-        print(f"Done. Locked {total:,} session(s) as '{LOCKED_BY}'.")
-        return total
+        print(f"Done. Locked {lock_total:,} '{LOCK_STATUS}' session(s) as '{LOCKED_BY}'.")
+        return lock_total
     finally:
         conn.close()
 
