@@ -81,18 +81,25 @@ def _scalar(conn, sql, params=()) -> int:
 def _sec_top_summary(conn, rep: Report) -> None:
     """
     Headline split by flag source, broken out by verdict (CLEAN/FLAGGED/SEVERE).
-    Split by ingestion path, recorded in reviewer_id, broken out by
-    overall_verdict (CLEAN/FLAGGED/SEVERE) as children. Mutually exclusive; sum to ALL:
-      LLM review    = reviewer_id = 'LLM'   (ingested via ingest_llm_sessions.py)
-      Manual review = everything else       (data_loader path / human reviewer)
+    Split by ingestion path, broken out by overall_verdict (CLEAN/FLAGGED/SEVERE)
+    as children. Mutually exclusive; sum to ALL:
+      LLM review    = has an LLM-source flag OR reviewer_id='LLM'
+                      (ingested via ingest_llm_sessions.py — only that path writes
+                       source='LLM' flags, and it stamps reviewer_id='LLM' on
+                       clean auto-submitted sessions that have no flags)
+      Manual review = everything else (data_loader path)
     """
     rep.heading("Summary — manual vs LLM by verdict")
 
     verdict_by_sid = {r[0]: (r[1] or "(null)") for r in conn.execute(
         "SELECT session_id, overall_verdict FROM rep_sessions").fetchall()}
+    # LLM-ingested: flagged ones carry source='LLM' flags; clean auto-submitted
+    # ones carry reviewer_id='LLM' (no flags). Union covers both.
     llm_sids = {r[0] for r in conn.execute(
         "SELECT session_id FROM rep_sessions WHERE reviewer_id = 'LLM'").fetchall()}
-    # Manual review = every in-scope session not reviewed by the LLM.
+    llm_sids |= {r[0] for r in conn.execute(
+        "SELECT DISTINCT session_id FROM rep_flags WHERE source = 'LLM'").fetchall()}
+    # Manual review = every in-scope session not from the LLM path.
     manual_sids = {s for s in verdict_by_sid if s not in llm_sids}
 
     # Always show the three standard verdicts as children, then any others present.
@@ -105,14 +112,14 @@ def _sec_top_summary(conn, rep: Report) -> None:
 
     pairs = []
     for label, sids in (("Manual review (data_loader)", manual_sids),
-                        ("LLM review (reviewer_id=LLM)", llm_sids)):
+                        ("LLM review (LLM flag or reviewer_id=LLM)", llm_sids)):
         pairs.append((label, _num(len(sids))))
         for v in verdicts:
             pairs.append((f"    {v}", _num(vcnt(sids, v))))
     pairs.append(("ALL sessions", _num(len(verdict_by_sid))))
     rep.kv(pairs)
-    rep.note("LLM review = reviewer_id 'LLM' (ingest_llm); Manual review = all others "
-             "(data_loader). Mutually exclusive; sum to ALL.")
+    rep.note("LLM review = has LLM-source flag OR reviewer_id 'LLM' (ingest_llm); "
+             "Manual review = all others (data_loader). Mutually exclusive; sum to ALL.")
 
 
 def _sec_signal_agreement(conn, rep: Report) -> None:
