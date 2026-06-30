@@ -19,7 +19,6 @@ Read-only summary report over the results database. Prints, count-wise:
   * Flags per session — distribution of flag counts across sessions
   * Flag author       — flagged sessions by turn speaker (astrologer vs user)
   * Language          — volume and flag rate per language
-  * Time trend        — volume and flag rate per month
   * Anomalies         — null / unprocessed / lowercase data-quality counts
 
 The whole report is scoped to SCOPE_STATUSES and excludes EXCLUDED_FLAG_CATEGORIES.
@@ -87,27 +86,43 @@ def _pct(part: int, whole: int) -> str:
 # ---------------------------------------------------------------------------
 def _sec_top_summary(conn, rep: Report) -> None:
     """
-    Headline split: manually reviewed vs LLM-processed sessions, each broken
-    into submitted-for-review and locked. The two categories can overlap (a
-    session is usually both reviewed by a human and processed by the LLM).
-      Manually reviewed = reviewer_id IS NOT NULL
-      LLM-processed     = overall_verdict NOT IN (NULL, 'UNPROCESSED')
+    Headline split by flag source, each broken into submitted-for-review and
+    locked. Classification (mutually exclusive; clean sessions are in neither):
+      LLM    = session has >=1 LLM-source flag (may also have manual flags)
+      Manual = session has flags and ALL of them are MANUAL-source (no LLM flag)
+    (Re-engagement flags are excluded, like everywhere else in the report.)
     """
     rep.heading("Summary — manual vs LLM (submitted / locked)")
 
-    def cnt(who, status):
-        return _scalar(conn, f"SELECT COUNT(*) FROM rep_sessions WHERE review_status=? AND {who}", (status,))
+    llm_sids = {r[0] for r in conn.execute(
+        "SELECT DISTINCT session_id FROM rep_flags WHERE source='LLM'").fetchall()}
+    manual_sids = {r[0] for r in conn.execute(
+        "SELECT session_id FROM rep_flags GROUP BY session_id "
+        "HAVING COUNT(*) = SUM(CASE WHEN source='MANUAL' THEN 1 ELSE 0 END)").fetchall()}
+    flagged_sids = {r[0] for r in conn.execute(
+        "SELECT DISTINCT session_id FROM rep_flags").fetchall()}
+    status_by_sid = {r[0]: r[1] for r in conn.execute(
+        "SELECT session_id, review_status FROM rep_sessions").fetchall()}
+    # Clean = in-scope session with no (non-re-engagement) flags.
+    clean_sids = {s for s in status_by_sid if s not in flagged_sids}
 
-    manual = "reviewer_id IS NOT NULL"
-    llm    = "overall_verdict IS NOT NULL AND overall_verdict != 'UNPROCESSED'"
+    def cnt(sids, status):
+        return sum(1 for s in sids if status_by_sid.get(s) == status)
 
     rows = []
-    for label, who in (("Manually reviewed", manual), ("LLM-processed", llm)):
-        sub = cnt(who, "SUBMITTED_FOR_REVIEW")
-        lock = cnt(who, "LOCKED")
+    for label, sids in (("Clean (no flags)", clean_sids),
+                        ("Manual (manual flags only)", manual_sids),
+                        ("LLM (has LLM flag)", llm_sids)):
+        sub = cnt(sids, "SUBMITTED_FOR_REVIEW")
+        lock = cnt(sids, "LOCKED")
         rows.append([label, _num(sub), _num(lock), _num(sub + lock)])
+    # All-categories total row.
+    all_sub = cnt(status_by_sid, "SUBMITTED_FOR_REVIEW")
+    all_lock = cnt(status_by_sid, "LOCKED")
+    rows.append(["ALL sessions", _num(all_sub), _num(all_lock), _num(all_sub + all_lock)])
     rep.table(["CATEGORY", "SUBMITTED_FOR_REVIEW", "LOCKED", "TOTAL"], rows)
-    rep.note("Manually reviewed = reviewer_id set; LLM-processed = verdict not UNPROCESSED. They overlap.")
+    rep.note("Clean = no flags; Manual = all flags MANUAL; LLM = has >=1 LLM flag. "
+             "Clean/Manual/LLM are mutually exclusive and sum to ALL.")
 
 
 def _sec_signal_agreement(conn, rep: Report) -> None:
@@ -420,7 +435,6 @@ def build_report() -> Report:
         _sec_flags_per_session(conn, rep, total_sessions, total_flags)
         _sec_flag_author(conn, rep)
         _sec_rate_table(conn, rep, "Language (volume + flag rate)", "language_code", "LANGUAGE")
-        _sec_rate_table(conn, rep, "Time trend (by month)", "month", "MONTH")
         _sec_anomalies(conn, rep)
 
         return rep
