@@ -81,20 +81,20 @@ def _scalar(conn, sql, params=()) -> int:
 def _sec_top_summary(conn, rep: Report) -> None:
     """
     Headline split by flag source, broken out by verdict (CLEAN/FLAGGED/SEVERE).
-    Classification (mutually exclusive; sum to ALL):
-      LLM review    = session has >=1 LLM-source flag (may also have manual flags)
-      Manual review = every other in-scope session (clean OR manual-only flags)
-    Each session's overall_verdict (CLEAN/FLAGGED/SEVERE) is shown as a child.
-    (Re-engagement flags are excluded, like everywhere else in the report.)
+    Two INDEPENDENT groupings (a session can be in both), each broken out by
+    overall_verdict (CLEAN/FLAGGED/SEVERE) as children:
+      Manual review = submitted_by IS NOT NULL          (an L1 reviewed & submitted)
+      LLM review    = overall_verdict NOT IN (NULL, 'UNPROCESSED')  (LLM ran on it)
     """
     rep.heading("Summary — manual vs LLM by verdict")
 
     verdict_by_sid = {r[0]: (r[1] or "(null)") for r in conn.execute(
         "SELECT session_id, overall_verdict FROM rep_sessions").fetchall()}
+    manual_sids = {r[0] for r in conn.execute(
+        "SELECT session_id FROM rep_sessions WHERE submitted_by IS NOT NULL").fetchall()}
     llm_sids = {r[0] for r in conn.execute(
-        "SELECT DISTINCT session_id FROM rep_flags WHERE source='LLM'").fetchall()}
-    # Manual review = everything that is not LLM-flagged (includes clean sessions).
-    manual_sids = {s for s in verdict_by_sid if s not in llm_sids}
+        "SELECT session_id FROM rep_sessions "
+        "WHERE overall_verdict IS NOT NULL AND overall_verdict != 'UNPROCESSED'").fetchall()}
 
     # Always show the three standard verdicts as children, then any others present.
     present = set(verdict_by_sid.values())
@@ -105,15 +105,15 @@ def _sec_top_summary(conn, rep: Report) -> None:
         return sum(1 for s in sids if verdict_by_sid.get(s) == v)
 
     pairs = []
-    for label, sids in (("Manual review (no LLM flag)", manual_sids),
-                        ("LLM review (has LLM flag)", llm_sids)):
+    for label, sids in (("Manual review (L1 submitted)", manual_sids),
+                        ("LLM review (LLM-processed)", llm_sids)):
         pairs.append((label, _num(len(sids))))
         for v in verdicts:
             pairs.append((f"    {v}", _num(vcnt(sids, v))))
     pairs.append(("ALL sessions", _num(len(verdict_by_sid))))
     rep.kv(pairs)
-    rep.note("LLM review = has >=1 LLM flag; Manual review = everything else "
-             "(clean or manual-only flags). Mutually exclusive; sum to ALL.")
+    rep.note("Manual review = submitted_by set (L1 submitted); LLM review = verdict "
+             "not UNPROCESSED. These overlap — a session can be counted in both.")
 
 
 def _sec_signal_agreement(conn, rep: Report) -> None:
