@@ -18,8 +18,6 @@ Read-only summary report over the results database. Prints, count-wise:
   * Flags             — flag counts by category, source, status, severity
   * Flags per session — distribution of flag counts across sessions
   * Flag author       — flagged sessions by turn speaker (astrologer vs user)
-  * Language          — volume and flag rate per language
-  * Anomalies         — null / unprocessed / lowercase data-quality counts
 
 The whole report is scoped to SCOPE_STATUSES and excludes EXCLUDED_FLAG_CATEGORIES.
 Read-only: never writes to the database.
@@ -77,22 +75,19 @@ def _scalar(conn, sql, params=()) -> int:
     return conn.execute(sql, params).fetchone()[0]
 
 
-def _pct(part: int, whole: int) -> str:
-    return f"{(100.0 * part / whole):.1f}%" if whole else "—"
-
-
 # ---------------------------------------------------------------------------
 # Sections
 # ---------------------------------------------------------------------------
 def _sec_top_summary(conn, rep: Report) -> None:
     """
-    Headline split by flag source, each broken into submitted-for-review and
-    locked. Classification (mutually exclusive; clean sessions are in neither):
-      LLM    = session has >=1 LLM-source flag (may also have manual flags)
+    Headline split by flag source, broken out by verdict (CLEAN/FLAGGED/SEVERE).
+    Classification (mutually exclusive; sum to ALL):
+      Clean  = session has no flags
       Manual = session has flags and ALL of them are MANUAL-source (no LLM flag)
+      LLM    = session has >=1 LLM-source flag (may also have manual flags)
     (Re-engagement flags are excluded, like everywhere else in the report.)
     """
-    rep.heading("Summary — manual vs LLM (submitted / locked)")
+    rep.heading("Summary — manual vs LLM by verdict")
 
     llm_sids = {r[0] for r in conn.execute(
         "SELECT DISTINCT session_id FROM rep_flags WHERE source='LLM'").fetchall()}
@@ -101,28 +96,32 @@ def _sec_top_summary(conn, rep: Report) -> None:
         "HAVING COUNT(*) = SUM(CASE WHEN source='MANUAL' THEN 1 ELSE 0 END)").fetchall()}
     flagged_sids = {r[0] for r in conn.execute(
         "SELECT DISTINCT session_id FROM rep_flags").fetchall()}
-    status_by_sid = {r[0]: r[1] for r in conn.execute(
-        "SELECT session_id, review_status FROM rep_sessions").fetchall()}
+    verdict_by_sid = {r[0]: (r[1] or "(null)") for r in conn.execute(
+        "SELECT session_id, overall_verdict FROM rep_sessions").fetchall()}
     # Clean = in-scope session with no (non-re-engagement) flags.
-    clean_sids = {s for s in status_by_sid if s not in flagged_sids}
+    clean_sids = {s for s in verdict_by_sid if s not in flagged_sids}
 
-    def cnt(sids, status):
-        return sum(1 for s in sids if status_by_sid.get(s) == status)
+    # Always show the three standard verdicts as children, then any others present.
+    present = set(verdict_by_sid.values())
+    preferred = ["CLEAN", "FLAGGED", "SEVERE"]
+    verdicts = preferred + sorted(present - set(preferred))
 
-    rows = []
-    for label, sids in (("Clean (no flags)", clean_sids),
-                        ("Manual (manual flags only)", manual_sids),
-                        ("LLM (has LLM flag)", llm_sids)):
-        sub = cnt(sids, "SUBMITTED_FOR_REVIEW")
-        lock = cnt(sids, "LOCKED")
-        rows.append([label, _num(sub), _num(lock), _num(sub + lock)])
-    # All-categories total row.
-    all_sub = cnt(status_by_sid, "SUBMITTED_FOR_REVIEW")
-    all_lock = cnt(status_by_sid, "LOCKED")
-    rows.append(["ALL sessions", _num(all_sub), _num(all_lock), _num(all_sub + all_lock)])
-    rep.table(["CATEGORY", "SUBMITTED_FOR_REVIEW", "LOCKED", "TOTAL"], rows)
-    rep.note("Clean = no flags; Manual = all flags MANUAL; LLM = has >=1 LLM flag. "
-             "Clean/Manual/LLM are mutually exclusive and sum to ALL.")
+    def vcnt(sids, v):
+        return sum(1 for s in sids if verdict_by_sid.get(s) == v)
+
+    # Parent rows (Manual review, LLM review) with verdict children indented
+    # beneath each; Clean and ALL kept as flat rows.
+    pairs = []
+    for label, sids in (("Manual review (manual flags only)", manual_sids),
+                        ("LLM review (has LLM flag)", llm_sids)):
+        pairs.append((label, _num(len(sids))))
+        for v in verdicts:
+            pairs.append((f"    {v}", _num(vcnt(sids, v))))
+    pairs.append(("Clean (no flags)", _num(len(clean_sids))))
+    pairs.append(("ALL sessions", _num(len(verdict_by_sid))))
+    rep.kv(pairs)
+    rep.note("Manual review = all flags MANUAL; LLM review = has >=1 LLM flag; "
+             "Clean = no flags. Categories are mutually exclusive and sum to ALL.")
 
 
 def _sec_signal_agreement(conn, rep: Report) -> None:
@@ -296,35 +295,6 @@ def _sec_flag_author(conn, rep: Report) -> None:
     ])
 
 
-def _sec_rate_table(conn, rep: Report, title: str, col: str, label: str) -> None:
-    rep.heading(title)
-    rows = conn.execute(
-        f"""SELECT COALESCE({col}, '(null)') AS k,
-                   COUNT(*) AS total,
-                   SUM(CASE WHEN overall_verdict IN {FLAGGED_VERDICTS} THEN 1 ELSE 0 END) AS flagged
-            FROM rep_sessions GROUP BY k ORDER BY total DESC"""
-    ).fetchall()
-    if not rows:
-        rep.note("(none)")
-        return
-    out = [[r["k"], _num(r["total"]), _num(r["flagged"]), _pct(r["flagged"], r["total"])] for r in rows]
-    rep.table([label, "TOTAL", "FLAGGED", "RATE"], out)
-
-
-def _sec_anomalies(conn, rep: Report) -> None:
-    rep.heading("Anomalies / data quality")
-    checks = [
-        ("astrotalk_flagged IS NULL", "SELECT COUNT(*) FROM rep_sessions WHERE astrotalk_flagged IS NULL"),
-        ("verdict UNPROCESSED/null", "SELECT COUNT(*) FROM rep_sessions WHERE overall_verdict IS NULL OR overall_verdict='UNPROCESSED'"),
-        ("LOCKED with locked_by null", "SELECT COUNT(*) FROM rep_sessions WHERE review_status='LOCKED' AND locked_by IS NULL"),
-        ("flags with source null", "SELECT COUNT(*) FROM rep_flags WHERE source IS NULL"),
-        ("flags with status null", "SELECT COUNT(*) FROM rep_flags WHERE status IS NULL"),
-        ("flags category_code lowercase", "SELECT COUNT(*) FROM rep_flags WHERE category_code GLOB '*[a-z]*'"),
-        ("sessions verdict lowercase", "SELECT COUNT(*) FROM rep_sessions WHERE overall_verdict GLOB '*[a-z]*'"),
-    ]
-    rep.kv([(label, _num(_scalar(conn, sql))) for label, sql in checks])
-
-
 # ---------------------------------------------------------------------------
 # Build
 # ---------------------------------------------------------------------------
@@ -434,8 +404,6 @@ def build_report() -> Report:
 
         _sec_flags_per_session(conn, rep, total_sessions, total_flags)
         _sec_flag_author(conn, rep)
-        _sec_rate_table(conn, rep, "Language (volume + flag rate)", "language_code", "LANGUAGE")
-        _sec_anomalies(conn, rep)
 
         return rep
     finally:
