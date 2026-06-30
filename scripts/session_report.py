@@ -75,6 +75,20 @@ def _scalar(conn, sql, params=()) -> int:
     return conn.execute(sql, params).fetchone()[0]
 
 
+def _llm_session_ids(conn) -> set:
+    """
+    In-scope session_ids that came through the LLM ingest path:
+      * have an LLM-source flag (flagged LLM sessions), OR
+      * reviewer_id = 'LLM' (clean, no-flag sessions auto-submitted by the ingest)
+    Only ingest_llm_sessions.py produces either marker; data_loader does not.
+    """
+    ids = {r[0] for r in conn.execute(
+        "SELECT session_id FROM rep_sessions WHERE reviewer_id = 'LLM'").fetchall()}
+    ids |= {r[0] for r in conn.execute(
+        "SELECT DISTINCT session_id FROM rep_flags WHERE source = 'LLM'").fetchall()}
+    return ids
+
+
 # ---------------------------------------------------------------------------
 # Sections
 # ---------------------------------------------------------------------------
@@ -93,12 +107,7 @@ def _sec_top_summary(conn, rep: Report) -> None:
 
     verdict_by_sid = {r[0]: (r[1] or "(null)") for r in conn.execute(
         "SELECT session_id, overall_verdict FROM rep_sessions").fetchall()}
-    # LLM-ingested: flagged ones carry source='LLM' flags; clean auto-submitted
-    # ones carry reviewer_id='LLM' (no flags). Union covers both.
-    llm_sids = {r[0] for r in conn.execute(
-        "SELECT session_id FROM rep_sessions WHERE reviewer_id = 'LLM'").fetchall()}
-    llm_sids |= {r[0] for r in conn.execute(
-        "SELECT DISTINCT session_id FROM rep_flags WHERE source = 'LLM'").fetchall()}
+    llm_sids = _llm_session_ids(conn)
     # Manual review = every in-scope session not from the LLM path.
     manual_sids = {s for s in verdict_by_sid if s not in llm_sids}
 
@@ -153,30 +162,81 @@ def _sec_signal_agreement(conn, rep: Report) -> None:
     rep.note(f"AstroTalk clean but verdict FLAGGED/SEVERE (misses): {miss:,}")
 
 
-def _sec_confusion(conn, rep: Report) -> None:
-    rep.heading("AstroTalk accuracy (vs reviewed verdict)")
-    pos = "('FLAGGED','SEVERE')"
+def _sec_astro_fp_fn(conn, rep: Report) -> None:
+    """
+    AstroTalk false positives / negatives vs our review (active flags only,
+    re-engagement excluded; all scoped to SUBMITTED_FOR_REVIEW + LOCKED):
 
-    def n(where):
+      FALSE NEGATIVE = AstroTalk clean (astrotalk_flagged=0) but WE flagged it,
+                       i.e. the session has an active flag. Split by flag source
+                       (MANUAL = us, LLM = the model). The two can overlap.
+      FALSE POSITIVE = AstroTalk flagged (astrotalk_flagged=1) but our verdict is
+                       CLEAN. Split by who cleared it (reviewer_id='LLM' vs human).
+      Clean by both  = AstroTalk clean AND our verdict CLEAN.
+    """
+    rep.heading("AstroTalk false positives / negatives")
+
+    # FALSE NEGATIVE — astro clean, we flagged (has an active flag).
+    def fn_by(src_clause: str) -> int:
         return _scalar(
             conn,
-            f"SELECT COUNT(*) FROM rep_sessions "
-            f"WHERE astrotalk_flagged IN (0,1) AND overall_verdict IN ('CLEAN','FLAGGED','SEVERE') "
-            f"AND {where}",
+            "SELECT COUNT(DISTINCT f.session_id) FROM rep_flags f "
+            "JOIN rep_sessions s ON s.session_id = f.session_id "
+            "WHERE s.astrotalk_flagged = 0" + src_clause,
         )
 
-    tp = n(f"astrotalk_flagged=1 AND overall_verdict IN {pos}")
-    fp = n("astrotalk_flagged=1 AND overall_verdict = 'CLEAN'")
-    fn = n(f"astrotalk_flagged=0 AND overall_verdict IN {pos}")
-    tn = n("astrotalk_flagged=0 AND overall_verdict = 'CLEAN'")
+    fn_total  = fn_by("")
+    fn_manual = fn_by(" AND f.source = 'MANUAL'")
+    fn_llm    = fn_by(" AND f.source = 'LLM'")
+
+    # FALSE POSITIVE — astro flagged, our verdict CLEAN.
+    fp_total = _scalar(conn, "SELECT COUNT(*) FROM rep_sessions WHERE astrotalk_flagged=1 AND overall_verdict='CLEAN'")
+    fp_llm   = _scalar(conn, "SELECT COUNT(*) FROM rep_sessions WHERE astrotalk_flagged=1 AND overall_verdict='CLEAN' AND reviewer_id='LLM'")
+    fp_manual = fp_total - fp_llm
+
+    both = _scalar(conn, "SELECT COUNT(*) FROM rep_sessions WHERE astrotalk_flagged=0 AND overall_verdict='CLEAN'")
+
+    rep.kv([
+        ("FALSE NEGATIVE — AstroTalk clean, we flagged", _num(fn_total)),
+        ("    by Manual flag (source=MANUAL)", _num(fn_manual)),
+        ("    by LLM flag (source=LLM)", _num(fn_llm)),
+        ("FALSE POSITIVE — AstroTalk flagged, verdict CLEAN", _num(fp_total)),
+        ("    cleared by Manual review", _num(fp_manual)),
+        ("    cleared by LLM review (reviewer_id=LLM)", _num(fp_llm)),
+        ("Clean by both (AstroTalk clean + verdict CLEAN)", _num(both)),
+    ])
+    rep.note("FN by source may overlap (a session can have both MANUAL and LLM flags). "
+             "Active flags only; re-engagement excluded.")
+
+
+def _sec_confusion(conn, rep: Report) -> None:
+    rep.heading("AstroTalk accuracy (vs our review)")
+    # Same definitions as the FP/FN section, so the two never disagree:
+    #   we_flagged = session has an active (non-re-engagement) flag
+    #   FP / clean-by-both keyed on overall_verdict = 'CLEAN'
+    flagged_by_us = {r[0] for r in conn.execute(
+        "SELECT DISTINCT session_id FROM rep_flags").fetchall()}
+
+    tp = fp = fn = tn = 0
+    for r in conn.execute(
+        "SELECT session_id, astrotalk_flagged, overall_verdict FROM rep_sessions"
+    ).fetchall():
+        af = r["astrotalk_flagged"]
+        if af not in (0, 1):
+            continue
+        we_flagged = r["session_id"] in flagged_by_us
+        if   af == 1 and we_flagged:                    tp += 1
+        elif af == 1 and r["overall_verdict"] == "CLEAN": fp += 1
+        elif af == 0 and we_flagged:                    fn += 1
+        elif af == 0 and r["overall_verdict"] == "CLEAN": tn += 1
     scored = tp + fp + fn + tn
 
     rep.kv([
-        ("Scored sessions (excl. UNPROCESSED/null)", _num(scored)),
-        ("True  Positive (TP) — flagged & bad", _num(tp)),
-        ("False Positive (FP) — flagged & CLEAN", _num(fp)),
-        ("False Negative (FN) — clean & bad (missed)", _num(fn)),
-        ("True  Negative (TN) — clean & CLEAN", _num(tn)),
+        ("Scored sessions", _num(scored)),
+        ("True  Positive (TP) — astro flagged & we flagged", _num(tp)),
+        ("False Positive (FP) — astro flagged & verdict CLEAN", _num(fp)),
+        ("False Negative (FN) — astro clean & we flagged", _num(fn)),
+        ("True  Negative (TN) — astro clean & verdict CLEAN", _num(tn)),
     ])
 
     precision = tp / (tp + fp) if (tp + fp) else None
@@ -218,9 +278,10 @@ def _sec_reviewer_workload(conn, rep: Report) -> None:
     def to_map(sql):
         return {r[0]: r[1] for r in conn.execute(sql).fetchall() if r[0] is not None}
 
-    assigned  = to_map("SELECT assigned_to, COUNT(*) FROM rep_sessions WHERE assigned_to IS NOT NULL GROUP BY assigned_to")
-    submitted = to_map("SELECT submitted_by, COUNT(*) FROM rep_sessions WHERE submitted_by IS NOT NULL GROUP BY submitted_by")
-    locked    = to_map("SELECT locked_by, COUNT(*) FROM rep_sessions WHERE review_status='LOCKED' AND locked_by IS NOT NULL GROUP BY locked_by")
+    # 'LLM' and 'AUTO_LOCK' are non-human actors — excluded from reviewer workload.
+    assigned  = to_map("SELECT assigned_to, COUNT(*) FROM rep_sessions WHERE assigned_to IS NOT NULL AND assigned_to != 'LLM' GROUP BY assigned_to")
+    submitted = to_map("SELECT submitted_by, COUNT(*) FROM rep_sessions WHERE submitted_by IS NOT NULL AND submitted_by != 'LLM' GROUP BY submitted_by")
+    locked    = to_map("SELECT locked_by, COUNT(*) FROM rep_sessions WHERE review_status='LOCKED' AND locked_by IS NOT NULL AND locked_by != 'AUTO_LOCK' GROUP BY locked_by")
 
     names = sorted(set(assigned) | set(submitted) | set(locked))
     if not names:
@@ -301,7 +362,15 @@ def build_report() -> Report:
     rep = Report()
     try:
         scope_sql = ", ".join(f"'{s}'" for s in SCOPE_STATUSES)
-        excl_sql = ", ".join(f"'{c.upper()}'" for c in EXCLUDED_FLAG_CATEGORIES)
+        excl_sql  = ", ".join(f"'{c.upper()}'" for c in EXCLUDED_FLAG_CATEGORIES)
+        # Normalised form for matching: lower-case, '-'/space -> '_'.
+        excl_norm = ", ".join(
+            "'" + c.lower().replace('-', '_').replace(' ', '_') + "'"
+            for c in EXCLUDED_FLAG_CATEGORIES
+        )
+        # rep_flags = ACTIVE, non-excluded flags for in-scope sessions:
+        #   * active  -> drop amended-original rows (flag_id referenced as a parent)
+        #   * exclude -> re-engagement etc., matched on a normalised category_code
         conn.executescript(
             f"""
             DROP VIEW IF EXISTS rep_sessions;
@@ -311,7 +380,8 @@ def build_report() -> Report:
             CREATE TEMP VIEW rep_flags AS
                 SELECT f.* FROM flags f
                 WHERE f.session_id IN (SELECT session_id FROM rep_sessions)
-                  AND UPPER(f.category_code) NOT IN ({excl_sql});
+                  AND LOWER(REPLACE(REPLACE(f.category_code,'-','_'),' ','_')) NOT IN ({excl_norm})
+                  AND f.flag_id NOT IN (SELECT parent_flag_id FROM flags WHERE parent_flag_id IS NOT NULL);
             """
         )
 
@@ -331,8 +401,9 @@ def build_report() -> Report:
 
         rep.heading("Submission")
         rep.kv([
-            ("Manually submitted (ever)", _num(_scalar(conn, "SELECT COUNT(*) FROM rep_sessions WHERE submitted_by IS NOT NULL"))),
-            ("Currently submitted", _num(_scalar(conn, "SELECT COUNT(*) FROM rep_sessions WHERE review_status='SUBMITTED_FOR_REVIEW'"))),
+            ("Manually submitted (L1, ever)", _num(_scalar(conn, "SELECT COUNT(*) FROM rep_sessions WHERE submitted_by IS NOT NULL AND submitted_by != 'LLM'"))),
+            ("LLM auto-submitted (ever)", _num(_scalar(conn, "SELECT COUNT(*) FROM rep_sessions WHERE submitted_by = 'LLM'"))),
+            ("Currently SUBMITTED_FOR_REVIEW", _num(_scalar(conn, "SELECT COUNT(*) FROM rep_sessions WHERE review_status='SUBMITTED_FOR_REVIEW'"))),
         ])
 
         rep.heading("Verdict (overall_verdict)")
@@ -361,13 +432,14 @@ def build_report() -> Report:
         ).fetchall()))
 
         _sec_signal_agreement(conn, rep)
+        _sec_astro_fp_fn(conn, rep)
         _sec_confusion(conn, rep)
 
         rep.heading("LLM run")
         rep.kv([
-            ("Sessions processed by LLM", _num(_scalar(conn, "SELECT COUNT(*) FROM rep_sessions WHERE overall_verdict IS NOT NULL AND overall_verdict!='UNPROCESSED'"))),
-            ("Sessions not yet processed", _num(_scalar(conn, "SELECT COUNT(*) FROM rep_sessions WHERE overall_verdict IS NULL OR overall_verdict='UNPROCESSED'"))),
-            ("Sessions with LLM flags", _num(_scalar(conn, "SELECT COUNT(DISTINCT session_id) FROM rep_flags WHERE source='LLM'"))),
+            ("LLM-ingested sessions", _num(len(_llm_session_ids(conn)))),
+            ("  - with an LLM-source flag", _num(_scalar(conn, "SELECT COUNT(DISTINCT session_id) FROM rep_flags WHERE source='LLM'"))),
+            ("  - clean auto-submit (reviewer_id=LLM)", _num(_scalar(conn, "SELECT COUNT(*) FROM rep_sessions WHERE reviewer_id='LLM'"))),
         ])
 
         _sec_queue(conn, rep)
