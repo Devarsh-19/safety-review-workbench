@@ -17,7 +17,6 @@ Read-only summary report over the results database. Prints, count-wise:
   * Auto-lock impact  — auto vs manual locks, and unlocked candidates
   * Flags             — flag counts by category, source, status, severity
   * Flags per session — distribution of flag counts across sessions
-  * Flag author       — flagged sessions by turn speaker (astrologer vs user)
 
 The whole report is scoped to SCOPE_STATUSES and excludes EXCLUDED_FLAG_CATEGORIES.
 Read-only: never writes to the database.
@@ -328,32 +327,6 @@ def _sec_flags_per_session(conn, rep: Report, total_sessions: int, total_flags: 
     ])
 
 
-def _sec_flag_author(conn, rep: Report) -> None:
-    rep.heading("Flagged sessions by flag author (turn speaker)")
-
-    def sids(speaker):
-        return {
-            r[0] for r in conn.execute(
-                "SELECT DISTINCT f.session_id FROM rep_flags f "
-                "JOIN turns t ON f.session_id = t.session_id AND f.turn_id = t.turn_id "
-                "WHERE t.speaker = ?",
-                (speaker,),
-            ).fetchall()
-        }
-
-    astro = sids("ASTROLOGER")
-    user  = sids("USER")
-    flagged_total = _scalar(conn, "SELECT COUNT(DISTINCT session_id) FROM rep_flags")
-    rep.kv([
-        ("Flagged sessions (have >=1 flag)", _num(flagged_total)),
-        ("- with an ASTROLOGER-turn flag", _num(len(astro))),
-        ("- with a USER-turn flag", _num(len(user))),
-        ("- mixed (both speakers flagged)", _num(len(astro & user))),
-        ("- ONLY astrologer-turn flags", _num(len(astro - user))),
-        ("- ONLY user-turn flags", _num(len(user - astro))),
-    ])
-
-
 # ---------------------------------------------------------------------------
 # Build
 # ---------------------------------------------------------------------------
@@ -473,7 +446,6 @@ def build_report() -> Report:
         rep.kv(_kv_from_rows(conn.execute("SELECT severity, COUNT(*) FROM rep_flags GROUP BY severity ORDER BY COUNT(*) DESC").fetchall()))
 
         _sec_flags_per_session(conn, rep, total_sessions, total_flags)
-        _sec_flag_author(conn, rep)
 
         return rep
     finally:
