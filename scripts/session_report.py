@@ -82,24 +82,19 @@ def _sec_top_summary(conn, rep: Report) -> None:
     """
     Headline split by flag source, broken out by verdict (CLEAN/FLAGGED/SEVERE).
     Classification (mutually exclusive; sum to ALL):
-      Clean  = session has no flags
-      Manual = session has flags and ALL of them are MANUAL-source (no LLM flag)
-      LLM    = session has >=1 LLM-source flag (may also have manual flags)
+      LLM review    = session has >=1 LLM-source flag (may also have manual flags)
+      Manual review = every other in-scope session (clean OR manual-only flags)
+    Each session's overall_verdict (CLEAN/FLAGGED/SEVERE) is shown as a child.
     (Re-engagement flags are excluded, like everywhere else in the report.)
     """
     rep.heading("Summary — manual vs LLM by verdict")
 
-    llm_sids = {r[0] for r in conn.execute(
-        "SELECT DISTINCT session_id FROM rep_flags WHERE source='LLM'").fetchall()}
-    manual_sids = {r[0] for r in conn.execute(
-        "SELECT session_id FROM rep_flags GROUP BY session_id "
-        "HAVING COUNT(*) = SUM(CASE WHEN source='MANUAL' THEN 1 ELSE 0 END)").fetchall()}
-    flagged_sids = {r[0] for r in conn.execute(
-        "SELECT DISTINCT session_id FROM rep_flags").fetchall()}
     verdict_by_sid = {r[0]: (r[1] or "(null)") for r in conn.execute(
         "SELECT session_id, overall_verdict FROM rep_sessions").fetchall()}
-    # Clean = in-scope session with no (non-re-engagement) flags.
-    clean_sids = {s for s in verdict_by_sid if s not in flagged_sids}
+    llm_sids = {r[0] for r in conn.execute(
+        "SELECT DISTINCT session_id FROM rep_flags WHERE source='LLM'").fetchall()}
+    # Manual review = everything that is not LLM-flagged (includes clean sessions).
+    manual_sids = {s for s in verdict_by_sid if s not in llm_sids}
 
     # Always show the three standard verdicts as children, then any others present.
     present = set(verdict_by_sid.values())
@@ -109,19 +104,16 @@ def _sec_top_summary(conn, rep: Report) -> None:
     def vcnt(sids, v):
         return sum(1 for s in sids if verdict_by_sid.get(s) == v)
 
-    # Parent rows (Manual review, LLM review) with verdict children indented
-    # beneath each; Clean and ALL kept as flat rows.
     pairs = []
-    for label, sids in (("Manual review (manual flags only)", manual_sids),
+    for label, sids in (("Manual review (no LLM flag)", manual_sids),
                         ("LLM review (has LLM flag)", llm_sids)):
         pairs.append((label, _num(len(sids))))
         for v in verdicts:
             pairs.append((f"    {v}", _num(vcnt(sids, v))))
-    pairs.append(("Clean (no flags)", _num(len(clean_sids))))
     pairs.append(("ALL sessions", _num(len(verdict_by_sid))))
     rep.kv(pairs)
-    rep.note("Manual review = all flags MANUAL; LLM review = has >=1 LLM flag; "
-             "Clean = no flags. Categories are mutually exclusive and sum to ALL.")
+    rep.note("LLM review = has >=1 LLM flag; Manual review = everything else "
+             "(clean or manual-only flags). Mutually exclusive; sum to ALL.")
 
 
 def _sec_signal_agreement(conn, rep: Report) -> None:
