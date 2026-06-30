@@ -81,20 +81,19 @@ def _scalar(conn, sql, params=()) -> int:
 def _sec_top_summary(conn, rep: Report) -> None:
     """
     Headline split by flag source, broken out by verdict (CLEAN/FLAGGED/SEVERE).
-    Two INDEPENDENT groupings (a session can be in both), each broken out by
-    overall_verdict (CLEAN/FLAGGED/SEVERE) as children:
-      Manual review = submitted_by IS NOT NULL          (an L1 reviewed & submitted)
-      LLM review    = overall_verdict NOT IN (NULL, 'UNPROCESSED')  (LLM ran on it)
+    Split by ingestion path, recorded in reviewer_id, broken out by
+    overall_verdict (CLEAN/FLAGGED/SEVERE) as children. Mutually exclusive; sum to ALL:
+      LLM review    = reviewer_id = 'LLM'   (ingested via ingest_llm_sessions.py)
+      Manual review = everything else       (data_loader path / human reviewer)
     """
     rep.heading("Summary — manual vs LLM by verdict")
 
     verdict_by_sid = {r[0]: (r[1] or "(null)") for r in conn.execute(
         "SELECT session_id, overall_verdict FROM rep_sessions").fetchall()}
-    manual_sids = {r[0] for r in conn.execute(
-        "SELECT session_id FROM rep_sessions WHERE submitted_by IS NOT NULL").fetchall()}
     llm_sids = {r[0] for r in conn.execute(
-        "SELECT session_id FROM rep_sessions "
-        "WHERE overall_verdict IS NOT NULL AND overall_verdict != 'UNPROCESSED'").fetchall()}
+        "SELECT session_id FROM rep_sessions WHERE reviewer_id = 'LLM'").fetchall()}
+    # Manual review = every in-scope session not reviewed by the LLM.
+    manual_sids = {s for s in verdict_by_sid if s not in llm_sids}
 
     # Always show the three standard verdicts as children, then any others present.
     present = set(verdict_by_sid.values())
@@ -105,15 +104,15 @@ def _sec_top_summary(conn, rep: Report) -> None:
         return sum(1 for s in sids if verdict_by_sid.get(s) == v)
 
     pairs = []
-    for label, sids in (("Manual review (L1 submitted)", manual_sids),
-                        ("LLM review (LLM-processed)", llm_sids)):
+    for label, sids in (("Manual review (data_loader)", manual_sids),
+                        ("LLM review (reviewer_id=LLM)", llm_sids)):
         pairs.append((label, _num(len(sids))))
         for v in verdicts:
             pairs.append((f"    {v}", _num(vcnt(sids, v))))
     pairs.append(("ALL sessions", _num(len(verdict_by_sid))))
     rep.kv(pairs)
-    rep.note("Manual review = submitted_by set (L1 submitted); LLM review = verdict "
-             "not UNPROCESSED. These overlap — a session can be counted in both.")
+    rep.note("LLM review = reviewer_id 'LLM' (ingest_llm); Manual review = all others "
+             "(data_loader). Mutually exclusive; sum to ALL.")
 
 
 def _sec_signal_agreement(conn, rep: Report) -> None:
