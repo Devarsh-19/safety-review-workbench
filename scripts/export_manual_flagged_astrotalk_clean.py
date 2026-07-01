@@ -10,8 +10,8 @@ session selection and from the exported flag rows).
 
 Low-signal sessions are dropped: if a session's ENTIRE active flag set falls within
 {FAKE_REMEDIES, PERSONAL_DATA_COLLECTION, INSTIGATION, FEAR_MANIPULATION,
-FINANCIAL_SOLICITATION}, it is skipped. A session is kept when it mixes one of those
-with any other category (e.g. NSFW).
+FINANCIAL_SOLICITATION, OFF_PLATFORM_SOLICITATION}, it is skipped. A session is kept
+when it mixes one of those with any other category (e.g. NSFW).
 
 Unlike export_astrotalk_flagged_clean.py, these sessions DO carry flags, so the flag
 columns are populated on flagged turns. Turns with no active flag still emit one
@@ -59,6 +59,7 @@ DROP_ONLY_CATEGORIES = {
     "instigation",
     "fear_manipulation",
     "financial_solicitation",
+    "off_platform_solicitation",
 }
 
 
