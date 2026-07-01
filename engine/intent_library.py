@@ -242,40 +242,6 @@ class IntentLibrary:
             ),
         ),
 
-        Intent(
-            intent_id="RE_ENGAGEMENT_SOLICITATION",
-            name="Post-Session Re-Engagement Solicitation",
-            description=(
-                "Astrologer sends unsolicited messages after the session has formally "
-                "ended — indicated by an automated system message about session end, "
-                "low balance, or chat termination. These follow-up messages are designed "
-                "to re-engage the user and encourage wallet recharge or continued paid "
-                "interaction."
-            ),
-            severity="Red",
-            examples=[
-                "Any ASTROLOGER message sent after an automated message containing: "
-                "'chat ended', 'low balance', 'recharge', 'automated message', "
-                "'session ended', 'contact customer support'",
-                "Soch rahi thi tumhare baare mein (unsolicited emotional appeal after session end)",
-                "Tumhara dard mehsoos ho raha hai (empathy bait after session close)",
-                "Aapke baare mein kuch important dikh raha hai (urgency hook after termination)",
-            ],
-            counter_examples=[
-                "System automated messages themselves",
-                "Astrologer messages sent before the session-end automated message",
-                "User-initiated messages after recharge",
-            ],
-            annexure_category="Category C — Platform Policy Violation",
-            detection_notes=(
-                "This intent is detected exclusively by the REGEX layer "
-                "(ConsultantAnalyser.detect_post_session_messages) — do NOT attempt "
-                "LLM classification for this category. Detection is deterministic: "
-                "any non-automated ASTROLOGER message after the last session-end "
-                "automated message is a violation, regardless of message content."
-            ),
-        ),
-
         # ------------------------------------------------------------------
         # NSFW sub-category split — catch-all + four specific intents
         # ------------------------------------------------------------------

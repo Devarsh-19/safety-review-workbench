@@ -44,7 +44,7 @@ FLAGGED_VERDICTS = ("FLAGGED", "SEVERE")
 SCOPE_STATUSES = ("SUBMITTED_FOR_REVIEW", "LOCKED")
 
 # Flag categories excluded from every flag-based count (matched case-insensitively).
-EXCLUDED_FLAG_CATEGORIES = ("RE_ENGAGEMENT_SOLICITATION",)
+EXCLUDED_FLAG_CATEGORIES = ()
 
 
 # ---------------------------------------------------------------------------
@@ -163,8 +163,8 @@ def _sec_signal_agreement(conn, rep: Report) -> None:
 
 def _sec_astro_fp_fn(conn, rep: Report) -> None:
     """
-    AstroTalk false positives / negatives vs our review (active flags only,
-    re-engagement excluded; all scoped to SUBMITTED_FOR_REVIEW + LOCKED):
+    AstroTalk false positives / negatives vs our review (active flags only;
+    all scoped to SUBMITTED_FOR_REVIEW + LOCKED):
 
       FALSE NEGATIVE = AstroTalk clean (astrotalk_flagged=0) but WE flagged it,
                        i.e. the session has an active flag. Split by flag source
@@ -205,13 +205,13 @@ def _sec_astro_fp_fn(conn, rep: Report) -> None:
         ("Clean by both (AstroTalk clean + verdict CLEAN)", _num(both)),
     ])
     rep.note("FN by source may overlap (a session can have both MANUAL and LLM flags). "
-             "Active flags only; re-engagement excluded.")
+             "Active flags only.")
 
 
 def _sec_confusion(conn, rep: Report) -> None:
     rep.heading("AstroTalk accuracy (vs our review)")
     # Same definitions as the FP/FN section, so the two never disagree:
-    #   we_flagged = session has an active (non-re-engagement) flag
+    #   we_flagged = session has an active flag
     #   FP / clean-by-both keyed on overall_verdict = 'CLEAN'
     flagged_by_us = {r[0] for r in conn.execute(
         "SELECT DISTINCT session_id FROM rep_flags").fetchall()}
@@ -335,15 +335,21 @@ def build_report() -> Report:
     rep = Report()
     try:
         scope_sql = ", ".join(f"'{s}'" for s in SCOPE_STATUSES)
-        excl_sql  = ", ".join(f"'{c.upper()}'" for c in EXCLUDED_FLAG_CATEGORIES)
+        excl_sql  = ", ".join(f"'{c.upper()}'" for c in EXCLUDED_FLAG_CATEGORIES) or "(none)"
         # Normalised form for matching: lower-case, '-'/space -> '_'.
         excl_norm = ", ".join(
             "'" + c.lower().replace('-', '_').replace(' ', '_') + "'"
             for c in EXCLUDED_FLAG_CATEGORIES
         )
+        # Only emit a NOT IN filter when there are categories to exclude —
+        # an empty EXCLUDED_FLAG_CATEGORIES would otherwise produce `NOT IN ()`.
+        excl_clause = (
+            f"AND LOWER(REPLACE(REPLACE(f.category_code,'-','_'),' ','_')) "
+            f"NOT IN ({excl_norm})" if excl_norm else ""
+        )
         # rep_flags = ACTIVE, non-excluded flags for in-scope sessions:
         #   * active  -> drop amended-original rows (flag_id referenced as a parent)
-        #   * exclude -> re-engagement etc., matched on a normalised category_code
+        #   * exclude -> matched on a normalised category_code (empty = exclude none)
         conn.executescript(
             f"""
             DROP VIEW IF EXISTS rep_sessions;
@@ -353,7 +359,7 @@ def build_report() -> Report:
             CREATE TEMP VIEW rep_flags AS
                 SELECT f.* FROM flags f
                 WHERE f.session_id IN (SELECT session_id FROM rep_sessions)
-                  AND LOWER(REPLACE(REPLACE(f.category_code,'-','_'),' ','_')) NOT IN ({excl_norm})
+                  {excl_clause}
                   AND f.flag_id NOT IN (SELECT parent_flag_id FROM flags WHERE parent_flag_id IS NOT NULL);
             """
         )

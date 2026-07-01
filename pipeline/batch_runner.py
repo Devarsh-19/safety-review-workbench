@@ -361,7 +361,6 @@ def ingest_only(data_path: str) -> None:
         f"to_ingest={len(pending)}"
     )
 
-    analyser  = ConsultantAnalyser()
     n_written = 0
 
     try:
@@ -402,9 +401,6 @@ def ingest_only(data_path: str) -> None:
 
             write_session_complete(session_id, session_data, turns, [])
 
-            re_engage_flags = analyser.detect_post_session_messages(
-                session.get('messages', [])
-            )
             link_flags = [
                 {
                     'category_code':       'EXTERNAL_MEDIA_CONTENT',
@@ -422,7 +418,7 @@ def ingest_only(data_path: str) -> None:
                 if turn.get('has_link') == 1
             ]
 
-            all_auto_flags = re_engage_flags + link_flags
+            all_auto_flags = link_flags
             if all_auto_flags:
                 from store.writer import write_flags
                 write_flags(session_id, all_auto_flags)

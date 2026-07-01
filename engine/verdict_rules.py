@@ -47,7 +47,6 @@ SEVERE_FLAGS = {
 # ---------------------------------------------------------------------------
 FLAGGED_FLAGS = {
     "off_platform_solicitation",
-    "re_engagement_solicitation",
     "personal_data_collection",
     "fear_manipulation",
     "competitor_promotion",
@@ -62,8 +61,6 @@ SEVERE_COMBINATIONS = [
     {"off_platform_solicitation",  "personal_data_collection"},
     {"off_platform_solicitation",  "fear_manipulation"},
     {"personal_data_collection",   "fear_manipulation"},
-    {"re_engagement_solicitation", "personal_data_collection"},
-    {"re_engagement_solicitation", "fear_manipulation"},
     {"external_media_content",     "personal_data_collection"},
 ]
 
@@ -107,7 +104,6 @@ FLAG_CODE_MAP = {
     "continued_after_violation": "other",
 
     # Legacy aliases
-    "re_engagement":    "re_engagement_solicitation",
     "external_media":   "external_media_content",
     "csam":             "csam_risk",
     "financial":        "financial_solicitation",

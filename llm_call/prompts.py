@@ -18,7 +18,6 @@ Usage:
 # ---------------------------------------------------------------------------
 ALL_INTENT_IDS = {
     # ── RED severity (immediate action required) ──
-    "RE_ENGAGEMENT_SOLICITATION",    # Astrologer messages user after session ended (regex-only)
     "NSFW",                          # Sexually inappropriate content (general, catch-all)
     "NSFW_EXPLICIT",                 # Explicit sexual acts/descriptions in consultation
     "NSFW_GROOMING",                 # Romantic solicitation, grooming pattern across messages
@@ -46,7 +45,7 @@ ALL_INTENT_IDS = {
 }
 
 # Flags excluded from LLM evaluation (detected by regex layer)
-EXCLUDED_FLAGS = {"RE_ENGAGEMENT_SOLICITATION", "EXTERNAL_MEDIA_CONTENT"}
+EXCLUDED_FLAGS = {"EXTERNAL_MEDIA_CONTENT"}
 
 
 # ---------------------------------------------------------------------------

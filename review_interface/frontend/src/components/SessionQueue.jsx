@@ -281,7 +281,6 @@ export default function SessionQueue({ reviewerName, reviewerRole, onSelectSessi
     VIOLENCE:                    '#A32D2D',
     INSTIGATION:                 '#8A2BE2',
     COMPETITOR_PROMOTION:        '#6B6860',
-    RE_ENGAGEMENT_SOLICITATION:  '#0F6E56',
     EXTERNAL_MEDIA_CONTENT:      '#185FA5',
     OTHER:                       '#6B6860',
   };
