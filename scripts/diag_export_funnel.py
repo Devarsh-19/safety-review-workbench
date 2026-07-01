@@ -40,28 +40,28 @@ def _scalar(conn, sql, params=()):
     return conn.execute(sql, params).fetchone()[0]
 
 
-def main():
-    conn = get_connection()
-
+def _funnel(conn, astro_val):
+    """Run the export funnel for a given astrotalk_flagged value. Returns a dict of
+    stage counts + the low-signal category breakdown among dropped sessions."""
     scope = "review_status IN ('LOCKED','SUBMITTED_FOR_REVIEW')"
-
-    n_submitted = _scalar(conn, "SELECT COUNT(*) FROM sessions WHERE review_status='SUBMITTED_FOR_REVIEW'")
-    n_locked    = _scalar(conn, "SELECT COUNT(*) FROM sessions WHERE review_status='LOCKED'")
-    n_scope     = _scalar(conn, f"SELECT COUNT(*) FROM sessions WHERE {scope}")
-    n_astro0    = _scalar(conn, f"SELECT COUNT(*) FROM sessions WHERE {scope} AND astrotalk_flagged=0")
-
-    # Stage C: sessions with an active, non-re-engagement MANUAL/LLM flag (pre-drop).
     active_not_parent = ("f.flag_id NOT IN "
                          "(SELECT parent_flag_id FROM flags WHERE parent_flag_id IS NOT NULL)")
+
+    n_astro = _scalar(
+        conn, f"SELECT COUNT(*) FROM sessions WHERE {scope} AND astrotalk_flagged=?",
+        (astro_val,),
+    )
+
+    # Stage: sessions with an active, non-re-engagement MANUAL/LLM flag (pre-drop).
     pre_drop = conn.execute(
         f"""SELECT DISTINCT s.session_id FROM sessions s
             JOIN flags f ON f.session_id = s.session_id
             WHERE f.source IN ('MANUAL','LLM')
-              AND s.astrotalk_flagged = 0
+              AND s.astrotalk_flagged = ?
               AND s.{scope}
               AND LOWER(REPLACE(REPLACE(f.category_code,'-','_'),' ','_')) != ?
               AND {active_not_parent}""",
-        (EXCLUDED_CATEGORY,),
+        (astro_val, EXCLUDED_CATEGORY),
     ).fetchall()
     pre_drop_ids = {r["session_id"] for r in pre_drop}
 
@@ -91,23 +91,53 @@ def main():
             else:
                 kept.add(sid)
 
+    return {
+        "n_astro":       n_astro,
+        "pre_drop":      len(pre_drop_ids),
+        "dropped":       len(dropped),
+        "kept":          len(kept),
+        "drop_counter":  drop_cat_counter,
+    }
+
+
+def _print_funnel(title, astro_label, f):
+    print("-" * 64)
+    print(f"  {title}")
+    print("-" * 64)
+    print(f"  {astro_label:<44} : {f['n_astro']:>8,}")
+    print(f"  + has active MANUAL/LLM non-reeng flag       : {f['pre_drop']:>8,}")
+    print(f"  - dropped (flags ALL low-signal)             : {f['dropped']:>8,}")
+    print(f"  = FINAL EXPORT COUNT                         : {f['kept']:>8,}")
+    if f["drop_counter"]:
+        print("  Categories among dropped sessions (low-signal only):")
+        for cat, n in f["drop_counter"].most_common():
+            print(f"    {cat:<30} {n:>8,}")
+    print()
+
+
+def main():
+    conn = get_connection()
+
+    scope = "review_status IN ('LOCKED','SUBMITTED_FOR_REVIEW')"
+    n_submitted = _scalar(conn, "SELECT COUNT(*) FROM sessions WHERE review_status='SUBMITTED_FOR_REVIEW'")
+    n_locked    = _scalar(conn, "SELECT COUNT(*) FROM sessions WHERE review_status='LOCKED'")
+    n_scope     = _scalar(conn, f"SELECT COUNT(*) FROM sessions WHERE {scope}")
+
+    clean   = _funnel(conn, 0)   # AstroTalk did NOT flag  (the actual export set)
+    flagged = _funnel(conn, 1)   # AstroTalk DID flag      (comparison)
     conn.close()
 
     print("=" * 64)
-    print("  Export funnel - manual/LLM-flagged + astrotalk-clean")
+    print("  Export funnel - manual/LLM-flagged, by astrotalk_flagged")
     print("=" * 64)
     print(f"  SUBMITTED_FOR_REVIEW                         : {n_submitted:>8,}")
     print(f"  LOCKED                                       : {n_locked:>8,}")
     print(f"  Scope (submitted + locked)                   : {n_scope:>8,}")
-    print(f"  + astrotalk_flagged = 0                      : {n_astro0:>8,}")
-    print(f"  + has active MANUAL/LLM non-reeng flag       : {len(pre_drop_ids):>8,}")
-    print(f"  - dropped (flags ALL low-signal)             : {len(dropped):>8,}")
-    print(f"  = FINAL EXPORT COUNT                         : {len(kept):>8,}")
     print()
-    if drop_cat_counter:
-        print("  Categories among dropped sessions (low-signal only):")
-        for cat, n in drop_cat_counter.most_common():
-            print(f"    {cat:<30} {n:>8,}")
+    _print_funnel("astrotalk_flagged = 0  (EXPORTED: AstroTalk missed it)",
+                  "Scope + astrotalk_flagged = 0", clean)
+    _print_funnel("astrotalk_flagged = 1  (comparison: AstroTalk flagged it)",
+                  "Scope + astrotalk_flagged = 1", flagged)
 
 
 if __name__ == "__main__":
