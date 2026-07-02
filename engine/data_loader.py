@@ -118,8 +118,8 @@ class DataLoader:
         self._sessions: list[dict[str, Any]] = []
         self._loaded = False
         self._duplicates_removed = 0
-        from engine.language_detector import LanguageDetector
-        self.language_detector = LanguageDetector()
+        # Language comes from the 1-24 code in the CSV, mapped via LANGUAGE_MAP
+        # (see _parse_language) — no runtime language detection is needed.
 
     # ------------------------------------------------------------------
     # Public API
@@ -240,15 +240,11 @@ class DataLoader:
                 month_name = str(month_val) if month_val else None
 
             # ── Language code → name mapping ───────────────────────────
+            # Session language = the PRIMARY (first) code mapped via LANGUAGE_MAP.
+            # For a multilingual field like "1,2,3", _parse_language uses code 1.
             language_code, language_detected = self._parse_language(
                 first_val("language")
             )
-
-            # ── Multilingual session check ─────────────────────────────
-            raw_lang        = first_val("language")
-            lang_str        = str(raw_lang).strip() if raw_lang else ''
-            lang_codes      = [c.strip() for c in lang_str.split(',') if c.strip()]
-            is_multilingual = len(lang_codes) > 1
 
             # ── Turn list ──────────────────────────────────────────────
             messages: list[dict[str, Any]] = []
@@ -256,19 +252,9 @@ class DataLoader:
                 turn_id = self._parse_turn_id(
                     row.get("message_seq", ""), len(messages) + 1
                 )
-                # Per-turn language: run detector on multilingual sessions;
-                # inherit session language otherwise.
-                # detect() returns LanguageResult — use .primary_language for name.
-                if is_multilingual:
-                    try:
-                        result        = self.language_detector.detect(
-                                            str(row.get("message_text", ""))
-                                        )
-                        turn_language = result.primary_language if result else language_detected
-                    except Exception:
-                        turn_language = language_detected
-                else:
-                    turn_language = language_detected
+                # Every turn inherits the session's mapped language — no per-turn
+                # detection (the 1-24 code mapping is authoritative).
+                turn_language = language_detected
 
                 messages.append({
                     "turn_id":           turn_id,
