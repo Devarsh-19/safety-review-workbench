@@ -607,7 +607,8 @@ export default function SessionQueue({ reviewerName, reviewerRole, onSelectSessi
               No violation data yet.
             </div>
           ) : (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 4,
+              maxHeight: '45vh', overflowY: 'auto' }}>
               {heatmapData.map((item) => (
                 <div key={item.category_code} style={{ display: 'flex', alignItems: 'center', height: 32 }}>
                   <span style={{
