@@ -105,6 +105,10 @@ export default function SessionQueue({ reviewerName, reviewerRole, onSelectSessi
   // ── Assignee filter (L2 only) ──────────────────────────────────────────
   const [assigneeFilter,  setAssigneeFilter]  = useState('');
 
+  // ── Pagination — client-side, 50 rows per page (applied after filter+sort) ──
+  const PAGE_SIZE = 50;
+  const [page, setPage] = useState(0);
+
   // ── Dynamic column list — L2 gets an 'Assigned To' column after Session ID
   const COLS = reviewerRole === 'L2'
     ? ['Session ID', 'Assigned To', 'Verdict', 'AstroTalk', 'Flags', 'LLM Flags', 'Manual Flags', 'Language', 'Type', 'Duration', 'Turns', 'Status', 'Reviewer', 'Action']
@@ -137,6 +141,15 @@ export default function SessionQueue({ reviewerName, reviewerRole, onSelectSessi
     const id = setInterval(fetchAll, 30_000);
     return () => clearInterval(id);
   }, [fetchAll]);
+
+  // Reset to the first page whenever a filter / sort / search input changes.
+  // (Intentionally excludes `sessions` so the 30s auto-refresh doesn't reset the page.)
+  useEffect(() => { setPage(0); }, [
+    verdictFilter, statusFilter, assigneeFilter, searchQuery, minConfidence,
+    colFilterId, colFilterAstro, colFilterLang, colFilterType,
+    colFilterMinDur, colFilterMaxDur, colFilterMinTurns, colFilterMaxTurns,
+    sortCol, sortDir,
+  ]);
 
   // ── Derived values ─────────────────────────────────────────────────────
 
@@ -217,6 +230,13 @@ export default function SessionQueue({ reviewerName, reviewerRole, onSelectSessi
       return sortDir === 'asc' ? cmp : -cmp;
     });
   }
+
+  // Paginate the fully-filtered + sorted list. safePage clamps the page in case
+  // the result set shrank (filters/auto-refresh) so we never slice out of range.
+  const totalPages    = Math.max(1, Math.ceil(displayedSessions.length / PAGE_SIZE));
+  const safePage      = Math.min(page, totalPages - 1);
+  const pageStart     = safePage * PAGE_SIZE;
+  const pagedSessions = displayedSessions.slice(pageStart, pageStart + PAGE_SIZE);
 
   const noResults     = displayedSessions.length === 0;
   const emptyMessage  = sessions.length === 0
@@ -677,6 +697,7 @@ export default function SessionQueue({ reviewerName, reviewerRole, onSelectSessi
             <LoadingSpinner /> Loading sessions…
           </div>
         ) : (
+          <>
           <div style={{ border: `1px solid ${C.border}`, borderRadius: 6, overflow: 'hidden' }}>
             <table style={{ width: '100%', borderCollapse: 'collapse', background: C.bgSurface }}>
               <thead>
@@ -763,8 +784,8 @@ export default function SessionQueue({ reviewerName, reviewerRole, onSelectSessi
                 </tr>
               </thead>
               <tbody>
-                {displayedSessions.length > 0 ? displayedSessions.map((s, idx) => {
-                  const isLast     = idx === displayedSessions.length - 1;
+                {pagedSessions.length > 0 ? pagedSessions.map((s, idx) => {
+                  const isLast     = idx === pagedSessions.length - 1;
                   const isHovered  = hoveredRow === s.session_id;
                   const isClearing = clearingSession === s.session_id;
                   const isNFR      = s.review_status === 'NEEDS_FINAL_REVIEW';
@@ -968,6 +989,47 @@ export default function SessionQueue({ reviewerName, reviewerRole, onSelectSessi
               </tbody>
             </table>
           </div>
+
+          {/* Pagination bar — 50 rows/page, over the filtered+sorted result */}
+          {displayedSessions.length > 0 && (
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+              marginTop: 12, fontSize: 13, color: C.textSecondary }}>
+              <span>
+                Showing {pageStart + 1}–{Math.min(pageStart + PAGE_SIZE, displayedSessions.length)}
+                {' '}of {displayedSessions.length}
+              </span>
+              <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <button
+                  onClick={() => setPage((p) => Math.max(0, p - 1))}
+                  disabled={safePage <= 0}
+                  style={{
+                    padding: '5px 12px', fontSize: 12, borderRadius: 4,
+                    border: `1px solid ${C.border}`,
+                    background: safePage <= 0 ? C.bgStatsrow : C.bgSurface,
+                    color: safePage <= 0 ? C.textMuted : C.textPrimary,
+                    cursor: safePage <= 0 ? 'default' : 'pointer',
+                  }}
+                >
+                  ← Prev
+                </button>
+                <span style={{ fontFamily: MONO }}>Page {safePage + 1} of {totalPages}</span>
+                <button
+                  onClick={() => setPage((p) => Math.min(totalPages - 1, p + 1))}
+                  disabled={safePage >= totalPages - 1}
+                  style={{
+                    padding: '5px 12px', fontSize: 12, borderRadius: 4,
+                    border: `1px solid ${C.border}`,
+                    background: safePage >= totalPages - 1 ? C.bgStatsrow : C.bgSurface,
+                    color: safePage >= totalPages - 1 ? C.textMuted : C.textPrimary,
+                    cursor: safePage >= totalPages - 1 ? 'default' : 'pointer',
+                  }}
+                >
+                  Next →
+                </button>
+              </span>
+            </div>
+          )}
+          </>
         )}
       </div>
 
