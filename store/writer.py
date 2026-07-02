@@ -1,5 +1,6 @@
 """Writes engine output to the results store"""
 
+import contextlib
 import logging
 import sqlite3
 
@@ -86,12 +87,20 @@ def write_session_complete(
     session_data: dict,
     turns: list[dict],
     flags: list[dict] = None,
+    conn=None,
 ) -> None:
     if flags is None:
         flags = []
-    conn = get_connection()
+    # If a connection is supplied, the CALLER owns the transaction + lifecycle
+    # (used by batched ingestion — no per-session commit/close). Otherwise open
+    # our own connection and commit/close it here, as before.
+    own_conn = conn is None
+    if own_conn:
+        conn = get_connection()
+    # `with conn:` commits on success; nullcontext() leaves the txn to the caller.
+    ctx = conn if own_conn else contextlib.nullcontext()
     try:
-        with conn:
+        with ctx:
             # write session
             s_cols = ", ".join(session_data.keys())
             s_placeholders = ", ".join("?" * len(session_data))
@@ -153,4 +162,5 @@ def write_session_complete(
         logger.error("write_session_complete failed for session %s: %s", session_id, exc)
         raise
     finally:
-        conn.close()
+        if own_conn:
+            conn.close()

@@ -34,7 +34,7 @@ load_dotenv()
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from store.db import (                                          # noqa: E402
-    get_connection, recompute_session_verdict, submit_session_for_review,
+    get_connection, recompute_session_verdict,
 )
 from store.writer import write_session_complete                  # noqa: E402
 from engine.data_loader import DataLoader                        # noqa: E402
@@ -167,130 +167,165 @@ def ingest(input_path: Path, dry_run: bool = False, auto_submit: bool = True,
         print("\nDRY RUN — no changes written.")
         return
 
-    # ── Step 3: write sessions + turns (skip existing) ────────────────────
+    # ── Step 3: open ONE connection for the whole ingest ──────────────────
+    # A single reused connection + WAL + batched commits is the entire speed
+    # win: the old code opened 2-3 connections and committed 2-3 times PER
+    # session (each commit forces an fsync). journal_mode=WAL is persistent —
+    # the DB stays WAL afterwards, which also lets the live dashboard read
+    # while ingestion writes.
     conn = get_connection()
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA synchronous  = NORMAL")
+    conn.execute("PRAGMA temp_store   = MEMORY")
+
     existing_sessions = {
         r[0] for r in conn.execute("SELECT session_id FROM sessions").fetchall()
     }
-    conn.close()
+    # Preload existing LLM flag keys ONCE — replaces the per-flag SELECT.
+    existing_flag_keys = {
+        (r[0], r[1], r[2])
+        for r in conn.execute(
+            "SELECT session_id, turn_id, category_code FROM flags WHERE source = 'LLM'"
+        ).fetchall()
+    }
+    # Preload review_status for every session — avoids a per-session SELECT.
+    review_status_by_sid = {
+        r[0]: r[1]
+        for r in conn.execute("SELECT session_id, review_status FROM sessions").fetchall()
+    }
 
     sessions_written = turns_written = flags_written = auto_submitted = assigned = 0
+    to_submit: list[str] = []   # CLEAN + PENDING sessions to auto-submit
+    to_assign: list[str] = []   # sessions to assign
+    COMMIT_EVERY = 500
 
-    for session in tqdm(sessions, desc="Ingesting", unit="session"):
-        sid = str(session["session_id"])
+    try:
+        for n, session in enumerate(tqdm(sessions, desc="Ingesting", unit="session"), start=1):
+            sid = str(session["session_id"])
 
-        session_data = {
-            "session_id":              sid,
-            "astrologer_id":           session.get("astrologer_id"),
-            "user_id":                 session.get("user_id"),
-            "session_start":           session.get("session_start"),
-            "session_end":             session.get("session_end"),
-            "duration_minutes":        session.get("duration_minutes"),
-            "session_type":            session.get("session_type", "chat"),
-            "session_date":            session.get("session_date"),
-            "month":                   session.get("month"),
-            "language_code":           session.get("language_code"),
-            "language_detected":       session.get("language_detected"),
-            "astrotalk_flagged":       session.get("astrotalk_flagged", 0),
-            "astrotalk_flag_category": session.get("astrotalk_flag_category"),
-            "astrotalk_severity":      session.get("astrotalk_severity"),
-            "review_status":           "PENDING",
-            "overall_verdict":         "CLEAN",
-            "confidence_score":        0.0,
-        }
-
-        turns = [
-            {
-                "turn_id":           m["turn_id"],
-                "speaker":           m["speaker"],
-                "message_text":      m["message_text"],
-                "timestamp":         m.get("timestamp"),
-                "language_detected": m.get("language_detected"),
-                "is_automated":      m.get("is_automated", 0),
-                "has_link":          m.get("has_link", 0),
+            session_data = {
+                "session_id":              sid,
+                "astrologer_id":           session.get("astrologer_id"),
+                "user_id":                 session.get("user_id"),
+                "session_start":           session.get("session_start"),
+                "session_end":             session.get("session_end"),
+                "duration_minutes":        session.get("duration_minutes"),
+                "session_type":            session.get("session_type", "chat"),
+                "session_date":            session.get("session_date"),
+                "month":                   session.get("month"),
+                "language_code":           session.get("language_code"),
+                "language_detected":       session.get("language_detected"),
+                "astrotalk_flagged":       session.get("astrotalk_flagged", 0),
+                "astrotalk_flag_category": session.get("astrotalk_flag_category"),
+                "astrotalk_severity":      session.get("astrotalk_severity"),
+                "review_status":           "PENDING",
+                "overall_verdict":         "CLEAN",
+                "confidence_score":        0.0,
             }
-            for m in session.get("messages", [])
-        ]
 
-        if sid not in existing_sessions:
-            write_session_complete(sid, session_data, turns, [])
-            sessions_written += 1
-            turns_written    += len(turns)
+            turns = [
+                {
+                    "turn_id":           m["turn_id"],
+                    "speaker":           m["speaker"],
+                    "message_text":      m["message_text"],
+                    "timestamp":         m.get("timestamp"),
+                    "language_detected": m.get("language_detected"),
+                    "is_automated":      m.get("is_automated", 0),
+                    "has_link":          m.get("has_link", 0),
+                }
+                for m in session.get("messages", [])
+            ]
 
-        # ── Step 4: insert LLM flags (de-duped) ───────────────────────────
-        conn = get_connection()
-        for f in flags_by_session.get(sid, []):
-            exists = conn.execute(
-                """SELECT 1 FROM flags
-                   WHERE session_id = ? AND turn_id = ?
-                     AND category_code = ? AND source = 'LLM'""",
-                (sid, f["turn_id"], f["category_code"]),
-            ).fetchone()
-            if exists:
-                continue
-            conn.execute(
-                """INSERT INTO flags
-                       (session_id, turn_id, category_code, detection_layer,
-                        source, status, severity, confidence_score)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                (sid, f["turn_id"], f["category_code"], f["detection_layer"],
-                 f["source"], f["status"], f["severity"], f["confidence_score"]),
-            )
-            flags_written += 1
+            # ── Step 4a: write session + turns (skip existing), shared conn ──
+            if sid not in existing_sessions:
+                write_session_complete(sid, session_data, turns, [], conn=conn)
+                sessions_written += 1
+                turns_written    += len(turns)
+                review_status_by_sid[sid] = "PENDING"
 
-        # ── Step 5: fix existing LLM flags with null turn_id ─────────────
-        # batch_runner writes LLM flags with turn_id=None; update them
-        # using category_code + session_id match from CSV flag data.
-        for f in flags_by_session.get(sid, []):
-            conn.execute(
-                """UPDATE flags
-                      SET turn_id = ?
-                    WHERE session_id = ?
-                      AND category_code = ?
-                      AND source = 'LLM'
-                      AND turn_id IS NULL""",
-                (f["turn_id"], sid, f["category_code"]),
-            )
+            # ── Step 4b: insert LLM flags (de-duped via preloaded key set) ──
+            new_flag_rows = []
+            for f in flags_by_session.get(sid, []):
+                key = (sid, f["turn_id"], f["category_code"])
+                if key in existing_flag_keys:
+                    continue
+                existing_flag_keys.add(key)
+                new_flag_rows.append((
+                    sid, f["turn_id"], f["category_code"], f["detection_layer"],
+                    f["source"], f["status"], f["severity"], f["confidence_score"],
+                ))
+            if new_flag_rows:
+                conn.executemany(
+                    """INSERT INTO flags
+                           (session_id, turn_id, category_code, detection_layer,
+                            source, status, severity, confidence_score)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    new_flag_rows,
+                )
+                flags_written += len(new_flag_rows)
 
-        # ── Step 6: recompute verdict from all active flags ────────────────
-        verdict = recompute_session_verdict(sid, conn)
-        status_row = conn.execute(
-            "SELECT review_status FROM sessions WHERE session_id = ?", (sid,)
-        ).fetchone()
-        review_status = status_row[0] if status_row else None
+            # ── Step 5: fix existing LLM flags with null turn_id ────────────
+            # batch_runner writes LLM flags with turn_id=None; update them
+            # using category_code + session_id match from CSV flag data.
+            for f in flags_by_session.get(sid, []):
+                conn.execute(
+                    """UPDATE flags
+                          SET turn_id = ?
+                        WHERE session_id = ?
+                          AND category_code = ?
+                          AND source = 'LLM'
+                          AND turn_id IS NULL""",
+                    (f["turn_id"], sid, f["category_code"]),
+                )
+
+            # ── Step 6: recompute verdict from all active flags ─────────────
+            verdict = recompute_session_verdict(sid, conn)
+            review_status = review_status_by_sid.get(sid)
+
+            # ── Step 7/8: queue auto-submit / assign for a batched pass ─────
+            # A session with no active flags (verdict CLEAN) is submitted for
+            # L2 review under reviewer 'LLM'. Only PENDING sessions are touched,
+            # so re-ingesting never clobbers submitted/reviewed/locked ones.
+            if auto_submit and verdict == "CLEAN" and review_status == "PENDING":
+                to_submit.append(sid)
+            if assign_to:
+                to_assign.append(sid)
+
+            processed_ids.add(sid)
+
+            if n % COMMIT_EVERY == 0:
+                conn.commit()
+
         conn.commit()
+
+        # ── Step 7: batched auto-submit (same fields as submit_session_for_review) ──
+        if to_submit:
+            conn.executemany(
+                """UPDATE sessions
+                      SET review_status = 'SUBMITTED_FOR_REVIEW',
+                          submitted_by  = 'LLM',
+                          submitted_at  = datetime('now'),
+                          reviewer_id   = 'LLM',
+                          reviewer_note = ?,
+                          reviewed_at   = datetime('now')
+                    WHERE session_id = ? AND review_status = 'PENDING'""",
+                [("Auto-submitted by LLM ingest: no flags", sid) for sid in to_submit],
+            )
+            auto_submitted = len(to_submit)
+
+        # ── Step 8: batched assignment (sets assigned_to ONLY) ─────────────
+        if assign_to:
+            conn.executemany(
+                "UPDATE sessions SET assigned_to = ? WHERE session_id = ?",
+                [(assign_to, sid) for sid in to_assign],
+            )
+            assigned = len(to_assign)
+
+        conn.commit()
+    finally:
         conn.close()
 
-        # ── Step 7: auto-submit no-flag sessions as CLEAN for L2 review ────
-        # A session with no active flags (verdict CLEAN) is submitted for L2
-        # review under reviewer 'LLM'. Only PENDING sessions are touched, so
-        # re-ingesting never clobbers already-submitted/reviewed/locked ones.
-        if auto_submit and verdict == "CLEAN" and review_status == "PENDING":
-            submit_session_for_review(
-                sid,
-                reviewer_id="LLM",
-                note="Auto-submitted by LLM ingest: no flags",
-            )
-            auto_submitted += 1
-
-        # ── Step 8: assign to a reviewer (sets assigned_to ONLY) ──────────
-        # Makes the session visible in that reviewer's queue without touching
-        # review_status — no lock, no submit. assigned_to is overwritten.
-        if assign_to:
-            aconn = get_connection()
-            try:
-                with aconn:
-                    aconn.execute(
-                        "UPDATE sessions SET assigned_to = ? WHERE session_id = ?",
-                        (assign_to, sid),
-                    )
-            finally:
-                aconn.close()
-            assigned += 1
-
-        processed_ids.add(sid)
-
-    # ── Step 6: save checkpoint ────────────────────────────────────────────
+    # ── Step 9: save checkpoint ────────────────────────────────────────────
     save_checkpoint(processed_ids)
 
     print(f"\n  Sessions written     : {sessions_written}  "
