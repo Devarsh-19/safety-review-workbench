@@ -261,7 +261,7 @@ def violation_stats():
     try:
         with get_connection() as conn:
             rows = conn.execute("""
-                SELECT f.category_code, COUNT(*) AS count
+                SELECT f.category_code, COUNT(DISTINCT f.session_id) AS count
                 FROM flags f
                 JOIN sessions s ON s.session_id = f.session_id
                 WHERE s.overall_verdict != 'CLEAN'
