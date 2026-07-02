@@ -31,14 +31,31 @@ export async function getViolationStats() {
 
 // ── Session list ───────────────────────────────────────────────────────────
 
+// Returns { rows: [...page...], total: <full filtered count> }.
+// Filtering, sorting and pagination all happen server-side.
 export function getSessions(filters = {}) {
   const params = new URLSearchParams();
-  if (filters.verdict)       params.append('verdict',       filters.verdict);
-  if (filters.status)        params.append('status',        filters.status);
-  if (filters.language)      params.append('language',      filters.language);
-  if (filters.reviewer_name) params.append('reviewer_name', filters.reviewer_name);
-  if (filters.reviewer_role) params.append('reviewer_role', filters.reviewer_role);
-  if (filters.assigned_to)   params.append('assigned_to',   filters.assigned_to);
+  const add = (k, v) => {
+    if (v !== undefined && v !== null && v !== '') params.append(k, v);
+  };
+  add('verdict',        filters.verdict);
+  add('status',         filters.status);
+  add('language',       filters.language);
+  add('reviewer_name',  filters.reviewer_name);
+  add('reviewer_role',  filters.reviewer_role);
+  add('assigned_to',    filters.assigned_to);
+  add('search',         filters.search);
+  add('session_type',   filters.session_type);
+  add('astrotalk',      filters.astrotalk);
+  if (filters.min_confidence) add('min_confidence', filters.min_confidence);
+  add('min_duration',   filters.min_duration);
+  add('max_duration',   filters.max_duration);
+  add('min_turns',      filters.min_turns);
+  add('max_turns',      filters.max_turns);
+  add('sort_col',       filters.sort_col);
+  add('sort_dir',       filters.sort_dir);
+  if (filters.limit  != null) add('limit',  filters.limit);
+  if (filters.offset != null) add('offset', filters.offset);
   const qs = params.toString() ? `?${params}` : '';
   return request(`/sessions${qs}`);
 }

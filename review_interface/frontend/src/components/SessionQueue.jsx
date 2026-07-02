@@ -53,6 +53,17 @@ const SORT_KEYS = {
   'Manual Flags': 'manual_flag_count',
 };
 
+// Debounce a rapidly-changing value (text / number / slider inputs) so we don't
+// fire a server request on every keystroke.
+function useDebounced(value, delay = 300) {
+  const [v, setV] = useState(value);
+  useEffect(() => {
+    const t = setTimeout(() => setV(value), delay);
+    return () => clearTimeout(t);
+  }, [value, delay]);
+  return v;
+}
+
 // ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
@@ -105,9 +116,21 @@ export default function SessionQueue({ reviewerName, reviewerRole, onSelectSessi
   // ── Assignee filter (L2 only) ──────────────────────────────────────────
   const [assigneeFilter,  setAssigneeFilter]  = useState('');
 
-  // ── Pagination — client-side, 50 rows per page (applied after filter+sort) ──
+  // ── Pagination — SERVER-side, 50 rows per page ─────────────────────────
   const PAGE_SIZE = 50;
-  const [page, setPage] = useState(0);
+  const [page,       setPage]       = useState(0);
+  const [totalCount, setTotalCount] = useState(0);   // rows in the full filtered set
+
+  // Debounced mirrors of the free-text / numeric / slider filters so typing
+  // doesn't hit the API on every keystroke. Dropdowns/sort/page fetch instantly.
+  const dSearch    = useDebounced(searchQuery);
+  const dColId     = useDebounced(colFilterId);
+  const dColLang   = useDebounced(colFilterLang);
+  const dMinDur    = useDebounced(colFilterMinDur);
+  const dMaxDur    = useDebounced(colFilterMaxDur);
+  const dMinTurns  = useDebounced(colFilterMinTurns);
+  const dMaxTurns  = useDebounced(colFilterMaxTurns);
+  const dMinConf   = useDebounced(minConfidence);
 
   // ── Dynamic column list — L2 gets an 'Assigned To' column after Session ID
   const COLS = reviewerRole === 'L2'
@@ -119,18 +142,35 @@ export default function SessionQueue({ reviewerName, reviewerRole, onSelectSessi
   const fetchAll = useCallback(() => {
     return Promise.all([
       getSessions({
-        verdict:       verdictFilter   || undefined,
-        status:        statusFilter    || undefined,
-        reviewer_name: reviewerName    || undefined,
-        reviewer_role: reviewerRole    || undefined,
-        assigned_to:   assigneeFilter  || undefined,
+        verdict:        verdictFilter   || undefined,
+        status:         statusFilter    || undefined,
+        reviewer_name:  reviewerName    || undefined,
+        reviewer_role:  reviewerRole    || undefined,
+        assigned_to:    assigneeFilter  || undefined,
+        // Top search box and the Session-ID column filter both match session_id.
+        search:         (dSearch.trim() || dColId.trim()) || undefined,
+        language:       dColLang.trim() || undefined,
+        session_type:   colFilterType   || undefined,
+        astrotalk:      colFilterAstro  || undefined,   // '', 'flagged', 'clean'
+        min_confidence: dMinConf        || undefined,
+        min_duration:   dMinDur         || undefined,
+        max_duration:   dMaxDur         || undefined,
+        min_turns:      dMinTurns       || undefined,
+        max_turns:      dMaxTurns       || undefined,
+        sort_col:       sortCol         || undefined,
+        sort_dir:       sortDir         || undefined,
+        limit:          PAGE_SIZE,
+        offset:         page * PAGE_SIZE,
       }),
       getStats({ reviewer_name: reviewerName || undefined, reviewer_role: reviewerRole || undefined }),
     ]).then(([sess, st]) => {
-      setSessions(sess);
+      setSessions(sess.rows || []);
+      setTotalCount(sess.total || 0);
       setStats(st);
     }).catch(() => {});
-  }, [verdictFilter, statusFilter, reviewerName, reviewerRole, assigneeFilter]);
+  }, [verdictFilter, statusFilter, reviewerName, reviewerRole, assigneeFilter,
+      dSearch, dColId, dColLang, colFilterType, colFilterAstro, dMinConf,
+      dMinDur, dMaxDur, dMinTurns, dMaxTurns, sortCol, sortDir, page]);
 
   useEffect(() => {
     setLoading(true);
@@ -142,14 +182,21 @@ export default function SessionQueue({ reviewerName, reviewerRole, onSelectSessi
     return () => clearInterval(id);
   }, [fetchAll]);
 
-  // Reset to the first page whenever a filter / sort / search input changes.
-  // (Intentionally excludes `sessions` so the 30s auto-refresh doesn't reset the page.)
+  // Reset to the first page whenever an (applied) filter / sort input changes.
+  // Uses debounced mirrors so the page doesn't jump around mid-typing.
   useEffect(() => { setPage(0); }, [
-    verdictFilter, statusFilter, assigneeFilter, searchQuery, minConfidence,
-    colFilterId, colFilterAstro, colFilterLang, colFilterType,
-    colFilterMinDur, colFilterMaxDur, colFilterMinTurns, colFilterMaxTurns,
+    verdictFilter, statusFilter, assigneeFilter, dSearch, dColId, dMinConf,
+    colFilterAstro, dColLang, colFilterType,
+    dMinDur, dMaxDur, dMinTurns, dMaxTurns,
     sortCol, sortDir,
   ]);
+
+  // If the filtered total shrank below the current page (filter change or
+  // auto-refresh), clamp the page back into range.
+  useEffect(() => {
+    const tp = Math.max(1, Math.ceil(totalCount / PAGE_SIZE));
+    if (page > tp - 1) setPage(tp - 1);
+  }, [totalCount]);
 
   // ── Derived values ─────────────────────────────────────────────────────
 
@@ -187,58 +234,17 @@ export default function SessionQueue({ reviewerName, reviewerRole, onSelectSessi
     else                        { setSortCol(null); setSortDir(null); }
   };
 
-  // Role-based queue visibility: L1 should not see sessions already submitted
-  // for L2 review or already locked; L2 should not see locked (finalised)
-  // sessions. Only applies to the default/implicit queue — an explicit
-  // status filter selection overrides this.
-  const ALLOWED_LANGUAGES = ['english', 'hindi', 'hinglish'];
-  let displayedSessions = sessions
-    .filter((s) => {
-      if (statusFilter) return true;
-      if (reviewerRole === 'L1') {
-        return s.review_status !== 'SUBMITTED_FOR_REVIEW' && s.review_status !== 'LOCKED';
-      }
-      if (reviewerRole === 'L2') {
-        return s.review_status !== 'LOCKED';
-      }
-      return true;
-    })
-    .filter((s) => {
-      // Hide non-English/Hindi/Hinglish sessions for both L1 and L2.
-      // Explicit column language filter overrides this rule.
-      // Sessions with no detected language are shown (not hidden by default).
-      if (colFilterLang.trim()) return true;
-      if (!s.language_detected) return true;
-      return ALLOWED_LANGUAGES.includes(s.language_detected.toLowerCase());
-    })
-    // Client-side filters (column filters AND-ed with top-bar filters) + optional sort
-    .filter((s) => !searchQuery.trim()    || s.session_id.includes(searchQuery.trim()))
-    .filter((s) => minConfidence === 0    || ((s.confidence_score ?? 0) * 100 >= minConfidence))
-    .filter((s) => !colFilterId.trim()    || s.session_id.includes(colFilterId.trim()))
-    .filter((s) => !colFilterAstro        || (colFilterAstro === 'flagged' ? s.astrotalk_flagged === 1 : s.astrotalk_flagged !== 1))
-    .filter((s) => !colFilterLang.trim()  || (s.language_detected || '').toLowerCase().includes(colFilterLang.trim().toLowerCase()))
-    .filter((s) => !colFilterType         || s.session_type === colFilterType)
-    .filter((s) => !colFilterMinDur         || (s.duration_minutes ?? 0) >= Number(colFilterMinDur))
-    .filter((s) => !colFilterMaxDur         || (s.duration_minutes ?? 0) <= Number(colFilterMaxDur))
-    .filter((s) => !colFilterMinTurns       || (s.turn_count ?? 0) >= Number(colFilterMinTurns))
-    .filter((s) => !colFilterMaxTurns       || (s.turn_count ?? 0) <= Number(colFilterMaxTurns));
-  if (sortCol && sortDir) {
-    displayedSessions = [...displayedSessions].sort((a, b) => {
-      const va = a[sortCol] ?? -Infinity;
-      const vb = b[sortCol] ?? -Infinity;
-      const cmp = va < vb ? -1 : va > vb ? 1 : 0;
-      return sortDir === 'asc' ? cmp : -cmp;
-    });
-  }
+  // Filtering, sorting and pagination are all done SERVER-SIDE (see fetchAll):
+  // `sessions` already holds exactly the current page of the filtered + sorted
+  // set, and `totalCount` is the size of the full filtered set.
+  const displayedSessions = sessions;
+  const pagedSessions     = sessions;
 
-  // Paginate the fully-filtered + sorted list. safePage clamps the page in case
-  // the result set shrank (filters/auto-refresh) so we never slice out of range.
-  const totalPages    = Math.max(1, Math.ceil(displayedSessions.length / PAGE_SIZE));
-  const safePage      = Math.min(page, totalPages - 1);
-  const pageStart     = safePage * PAGE_SIZE;
-  const pagedSessions = displayedSessions.slice(pageStart, pageStart + PAGE_SIZE);
+  const totalPages = Math.max(1, Math.ceil(totalCount / PAGE_SIZE));
+  const safePage   = Math.min(page, totalPages - 1);
+  const pageStart  = safePage * PAGE_SIZE;
 
-  const noResults     = displayedSessions.length === 0;
+  const noResults     = totalCount === 0;
   const emptyMessage  = sessions.length === 0
     ? 'No sessions match the selected filters.'
     : 'No sessions match the search or confidence filter.';
@@ -990,13 +996,13 @@ export default function SessionQueue({ reviewerName, reviewerRole, onSelectSessi
             </table>
           </div>
 
-          {/* Pagination bar — 50 rows/page, over the filtered+sorted result */}
-          {displayedSessions.length > 0 && (
+          {/* Pagination bar — 50 rows/page, over the full server-filtered result */}
+          {totalCount > 0 && (
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between',
               marginTop: 12, fontSize: 13, color: C.textSecondary }}>
               <span>
-                Showing {pageStart + 1}–{Math.min(pageStart + PAGE_SIZE, displayedSessions.length)}
-                {' '}of {displayedSessions.length}
+                Showing {pageStart + 1}–{Math.min(pageStart + PAGE_SIZE, totalCount)}
+                {' '}of {totalCount}
               </span>
               <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                 <button

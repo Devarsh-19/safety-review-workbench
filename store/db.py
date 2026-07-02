@@ -137,6 +137,145 @@ def fetch_sessions(
     return [dict(row) for row in rows]
 
 
+# ---------------------------------------------------------------------------
+# Server-side paginated + filtered + sorted session list.
+# All filtering/sorting is done in SQL so LIMIT/OFFSET applies to the FULL
+# filtered set (not just the current page). Returns (rows, total_count).
+# ---------------------------------------------------------------------------
+
+# Whitelist of sortable columns -> SQL expression (guards against injection).
+_SORT_COLUMNS = {
+    "session_id":        "s.session_id",
+    "duration_minutes":  "COALESCE(s.duration_minutes, 0)",
+    "turn_count":        "COALESCE(tc.turn_count, 0)",
+    "flag_count":        "COALESCE(fc.flag_count, 0)",
+    "llm_flag_count":    "COALESCE(fc.llm_flag_count, 0)",
+    "manual_flag_count": "COALESCE(fc.manual_flag_count, 0)",
+}
+
+# Default language visibility (matches the previous client-side allowlist).
+_ALLOWED_LANGUAGES = ("english", "hindi", "hinglish")
+
+# Flag / turn count enrichment — one aggregated row per session. Counts mirror
+# the previous behaviour (all flags; LLM = LLM+REGEX source, MANUAL separately).
+_COUNTS_FROM = """
+    FROM sessions s
+    LEFT JOIN (
+        SELECT session_id,
+               COUNT(*) AS flag_count,
+               SUM(CASE WHEN source IN ('LLM','REGEX') THEN 1 ELSE 0 END) AS llm_flag_count,
+               SUM(CASE WHEN source = 'MANUAL'         THEN 1 ELSE 0 END) AS manual_flag_count
+        FROM flags
+        GROUP BY session_id
+    ) fc ON fc.session_id = s.session_id
+    LEFT JOIN (
+        SELECT session_id, COUNT(*) AS turn_count
+        FROM turns
+        GROUP BY session_id
+    ) tc ON tc.session_id = s.session_id
+"""
+
+
+def fetch_sessions_page(
+    *,
+    verdict: str = None,
+    status: str = None,
+    reviewer_role: str = None,
+    reviewer_name: str = None,
+    assigned_to: str = None,
+    search: str = None,
+    language: str = None,
+    session_type: str = None,
+    astrotalk: str = None,          # 'flagged' | 'clean' | None
+    min_confidence: float = 0,      # 0-100
+    min_duration=None,
+    max_duration=None,
+    min_turns=None,
+    max_turns=None,
+    sort_col: str = None,
+    sort_dir: str = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> tuple[list[dict], int]:
+    where: list[str] = ["1=1"]
+    params: list = []
+
+    if verdict:
+        where.append("s.overall_verdict = ?"); params.append(verdict)
+    if status:
+        where.append("s.review_status = ?"); params.append(status)
+
+    # Role-based default visibility — only when no explicit status filter is set.
+    if not status:
+        if reviewer_role == "L1":
+            where.append("s.review_status NOT IN ('SUBMITTED_FOR_REVIEW','LOCKED')")
+        elif reviewer_role == "L2":
+            where.append("s.review_status != 'LOCKED'")
+
+    # L1 sees only sessions assigned to them; L2 may filter by a specific assignee.
+    if reviewer_role == "L1" and reviewer_name:
+        where.append("s.assigned_to = ?"); params.append(reviewer_name)
+    elif assigned_to:
+        where.append("s.assigned_to = ?"); params.append(assigned_to)
+
+    if search:
+        where.append("s.session_id LIKE ?"); params.append(f"%{search}%")
+
+    if language:
+        where.append("LOWER(s.language_detected) LIKE ?"); params.append(f"%{language.lower()}%")
+    else:
+        # Default allowlist (unknown language is shown, not hidden).
+        where.append(
+            "(s.language_detected IS NULL OR LOWER(s.language_detected) IN (?,?,?))"
+        )
+        params.extend(_ALLOWED_LANGUAGES)
+
+    if session_type:
+        where.append("s.session_type = ?"); params.append(session_type)
+
+    if astrotalk == "flagged":
+        where.append("s.astrotalk_flagged = 1")
+    elif astrotalk == "clean":
+        where.append("(s.astrotalk_flagged IS NULL OR s.astrotalk_flagged != 1)")
+
+    if min_confidence:
+        where.append("COALESCE(s.confidence_score, 0) * 100 >= ?"); params.append(min_confidence)
+
+    if min_duration not in (None, ""):
+        where.append("COALESCE(s.duration_minutes, 0) >= ?"); params.append(min_duration)
+    if max_duration not in (None, ""):
+        where.append("COALESCE(s.duration_minutes, 0) <= ?"); params.append(max_duration)
+
+    if min_turns not in (None, ""):
+        where.append("COALESCE(tc.turn_count, 0) >= ?"); params.append(min_turns)
+    if max_turns not in (None, ""):
+        where.append("COALESCE(tc.turn_count, 0) <= ?"); params.append(max_turns)
+
+    where_sql = " AND ".join(where)
+
+    col_expr  = _SORT_COLUMNS.get(sort_col, "s.session_id")
+    direction = "DESC" if str(sort_dir).lower() == "desc" else "ASC"
+    order_sql = f"{col_expr} {direction}, s.session_id ASC"
+
+    data_sql = f"""
+        SELECT s.*,
+               COALESCE(fc.flag_count, 0)        AS flag_count,
+               COALESCE(fc.llm_flag_count, 0)    AS llm_flag_count,
+               COALESCE(fc.manual_flag_count, 0) AS manual_flag_count,
+               COALESCE(tc.turn_count, 0)        AS turn_count
+        {_COUNTS_FROM}
+        WHERE {where_sql}
+        ORDER BY {order_sql}
+        LIMIT ? OFFSET ?
+    """
+    count_sql = f"SELECT COUNT(*) {_COUNTS_FROM} WHERE {where_sql}"
+
+    with get_connection() as conn:
+        total = conn.execute(count_sql, params).fetchone()[0]
+        rows  = conn.execute(data_sql, params + [limit, offset]).fetchall()
+    return [dict(r) for r in rows], total
+
+
 def fetch_session_detail(session_id: str) -> dict:
     with get_connection() as conn:
         session = conn.execute(

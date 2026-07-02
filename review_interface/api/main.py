@@ -26,6 +26,7 @@ from store.db import (
     DB_PATH,
     get_connection,
     fetch_sessions,
+    fetch_sessions_page,
     fetch_pending_review_sessions,
     update_review_status,
     submit_session_for_review,
@@ -284,64 +285,51 @@ def pending_sessions(limit: int = Query(default=50, ge=1, le=500)):
 
 @app.get("/sessions")
 def sessions(
-    verdict:       Optional[str] = None,
-    status:        Optional[str] = None,
-    language:      Optional[str] = None,
-    reviewer_name: Optional[str] = None,
-    reviewer_role: Optional[str] = None,
-    assigned_to:   Optional[str] = None,
+    verdict:        Optional[str] = None,
+    status:         Optional[str] = None,
+    language:       Optional[str] = None,
+    reviewer_name:  Optional[str] = None,
+    reviewer_role:  Optional[str] = None,
+    assigned_to:    Optional[str] = None,
+    search:         Optional[str] = None,
+    session_type:   Optional[str] = None,
+    astrotalk:      Optional[str] = None,          # 'flagged' | 'clean'
+    min_confidence: float         = 0,
+    min_duration:   Optional[float] = None,
+    max_duration:   Optional[float] = None,
+    min_turns:      Optional[int]   = None,
+    max_turns:      Optional[int]   = None,
+    sort_col:       Optional[str] = None,
+    sort_dir:       Optional[str] = None,
+    limit:          int = Query(default=50, ge=1, le=500),
+    offset:         int = Query(default=0, ge=0),
 ):
-    rows = fetch_sessions(
-        verdict_filter=verdict,
-        status_filter=status,
-        language_filter=language,
+    """
+    Server-side paginated session list. All filtering + sorting happens in SQL,
+    so `limit`/`offset` page over the FULL filtered set. Returns
+    {"rows": [...page...], "total": <count of full filtered set>}.
+    """
+    rows, total = fetch_sessions_page(
+        verdict=verdict,
+        status=status,
+        reviewer_role=reviewer_role,
+        reviewer_name=reviewer_name,
+        assigned_to=assigned_to,
+        search=search,
+        language=language,
+        session_type=session_type,
+        astrotalk=astrotalk,
+        min_confidence=min_confidence,
+        min_duration=min_duration,
+        max_duration=max_duration,
+        min_turns=min_turns,
+        max_turns=max_turns,
+        sort_col=sort_col,
+        sort_dir=sort_dir,
+        limit=limit,
+        offset=offset,
     )
-
-    # Role-based filtering: L1 sees only their assigned sessions;
-    # L2 can optionally filter by a specific assignee.
-    if reviewer_role == 'L1' and reviewer_name:
-        rows = [r for r in rows if r.get('assigned_to') == reviewer_name]
-    elif reviewer_role == 'L2' and assigned_to:
-        rows = [r for r in rows if r.get('assigned_to') == assigned_to]
-
-    # Enrich each row with flag counts (total, LLM/REGEX, manual) — excludes DISMISSED
-    # and with turn_count from the turns table.
-    try:
-        with get_connection() as conn:
-            flag_data = {}
-            for r in conn.execute("""
-                SELECT
-                    session_id,
-                    COUNT(*) AS flag_count,
-                    SUM(CASE WHEN source IN ('LLM','REGEX') THEN 1 ELSE 0 END) AS llm_flag_count,
-                    SUM(CASE WHEN source = 'MANUAL' THEN 1 ELSE 0 END) AS manual_flag_count
-                FROM flags
-                GROUP BY session_id
-            """).fetchall():
-                flag_data[r["session_id"]] = dict(r)
-
-            turn_data = {}
-            for r in conn.execute("""
-                SELECT session_id, COUNT(*) AS turn_count
-                FROM turns
-                GROUP BY session_id
-            """).fetchall():
-                turn_data[r["session_id"]] = r["turn_count"]
-
-        for row in rows:
-            fd = flag_data.get(row["session_id"], {})
-            row["flag_count"]        = fd.get("flag_count",        0)
-            row["llm_flag_count"]    = fd.get("llm_flag_count",    0)
-            row["manual_flag_count"] = fd.get("manual_flag_count", 0)
-            row["turn_count"]        = turn_data.get(row["session_id"], 0)
-    except Exception:
-        for row in rows:
-            row["flag_count"]        = None
-            row["llm_flag_count"]    = None
-            row["manual_flag_count"] = None
-            row["turn_count"]        = None
-
-    return rows
+    return {"rows": rows, "total": total}
 
 
 # ---------------------------------------------------------------------------
