@@ -37,6 +37,16 @@ from store.db import (
     initialise_db,
     recompute_session_verdict,
 )
+from store.audio_db import (
+    get_audio_connection,
+    initialise_audio_db,
+    fetch_audio_sessions_page,
+    fetch_audio_session_detail,
+    set_speaker_roles,
+    submit_audio_session,
+    lock_audio_session,
+    unlock_audio_session,
+)
 from store.writer import write_review_action
 from engine.verdict_rules import get_db_verdict_for_flags
 
@@ -60,6 +70,10 @@ def _severity_for_category(category_code: str) -> str:
 async def lifespan(app: FastAPI):
     try:
         initialise_db()
+    except Exception:
+        pass
+    try:
+        initialise_audio_db()
     except Exception:
         pass
     yield
@@ -130,6 +144,12 @@ class LockRequest(BaseModel):
 class SubmitRequest(BaseModel):
     reviewer_id: str
     note: Optional[str] = None
+
+
+class SpeakerRolesRequest(BaseModel):
+    speaker1_role: str          # 'ASTROLOGER' | 'USER'
+    speaker2_role: str
+    reviewer_id: str
 
 
 # ---------------------------------------------------------------------------
@@ -855,6 +875,116 @@ def export_csv(
                 f"attachment; filename=gt_review_export_{date_str}.csv"
         },
     )
+
+
+# ---------------------------------------------------------------------------
+# Endpoints — audio review (separate DB: store/audio_review.db)
+# Same L1 -> L2 workflow as chat; speakers are anonymous diarization labels
+# until a reviewer assigns ASTROLOGER/USER roles on the session.
+# ---------------------------------------------------------------------------
+
+@app.get("/audio/stats")
+def audio_stats():
+    try:
+        with get_audio_connection() as conn:
+            row = conn.execute("""
+                SELECT
+                    COUNT(*) AS total_sessions,
+                    SUM(CASE WHEN review_status = 'PENDING'              THEN 1 ELSE 0 END) AS total_pending,
+                    SUM(CASE WHEN review_status = 'SUBMITTED_FOR_REVIEW' THEN 1 ELSE 0 END) AS count_submitted,
+                    SUM(CASE WHEN review_status = 'LOCKED'               THEN 1 ELSE 0 END) AS count_locked,
+                    SUM(CASE WHEN overall_verdict = 'FLAGGED'            THEN 1 ELSE 0 END) AS count_flagged,
+                    SUM(CASE WHEN overall_verdict = 'CLEAN'              THEN 1 ELSE 0 END) AS count_clean
+                FROM audio_sessions
+            """).fetchone()
+        result = {k: (row[k] or 0) for k in row.keys()}
+        result["total_reviewed"] = result["count_submitted"] + result["count_locked"]
+        return result
+    except Exception:
+        return {
+            "total_sessions": 0, "total_pending": 0, "count_submitted": 0,
+            "count_locked": 0, "count_flagged": 0, "count_clean": 0,
+            "total_reviewed": 0,
+        }
+
+
+@app.get("/audio/sessions")
+def audio_sessions(
+    status: Optional[str] = None,
+    search: Optional[str] = None,
+    limit:  int = Query(default=50, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+):
+    rows, total = fetch_audio_sessions_page(
+        status=status, search=search, limit=limit, offset=offset,
+    )
+    return {"rows": rows, "total": total}
+
+
+@app.get("/audio/sessions/{s_id}")
+def audio_session_detail(s_id: int):
+    detail = fetch_audio_session_detail(s_id)
+    if detail["session"] is None:
+        raise HTTPException(status_code=404, detail=f"Audio session {s_id} not found")
+    return detail
+
+
+@app.post("/audio/sessions/{s_id}/speaker-roles")
+def audio_speaker_roles(s_id: int, body: SpeakerRolesRequest):
+    detail = fetch_audio_session_detail(s_id)
+    if detail["session"] is None:
+        raise HTTPException(status_code=404, detail=f"Audio session {s_id} not found")
+    if detail["session"]["review_status"] == "LOCKED":
+        raise HTTPException(status_code=400, detail="Session is locked — roles can no longer be changed")
+    try:
+        set_speaker_roles(s_id, body.speaker1_role, body.speaker2_role)
+        return {"success": True, "speaker1_role": body.speaker1_role,
+                "speaker2_role": body.speaker2_role}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/audio/sessions/{s_id}/submit")
+def audio_submit(s_id: int, body: SubmitRequest):
+    detail = fetch_audio_session_detail(s_id)
+    if detail["session"] is None:
+        raise HTTPException(status_code=404, detail=f"Audio session {s_id} not found")
+    if detail["session"]["review_status"] == "LOCKED":
+        raise HTTPException(status_code=400, detail="Session is locked")
+    # Speaker roles must be assigned before an L1 can submit — otherwise the
+    # flagged timestamps can't be attributed to astrologer vs user.
+    if detail["flags"] and not (detail["session"]["speaker1_role"] and detail["session"]["speaker2_role"]):
+        raise HTTPException(status_code=400,
+                            detail="Assign speaker roles (astrologer/user) before submitting")
+    try:
+        submit_audio_session(s_id, body.reviewer_id, body.note or None)
+        return {"success": True, "s_id": s_id}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/audio/sessions/{s_id}/lock")
+def audio_lock(s_id: int, body: LockRequest):
+    if body.reviewer_id != "Amogh":
+        raise HTTPException(status_code=403, detail="Only L2 reviewer can lock sessions")
+    try:
+        lock_audio_session(s_id, body.reviewer_id)
+        return {"success": True, "locked_by": body.reviewer_id}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/audio/sessions/{s_id}/unlock")
+def audio_unlock(s_id: int, body: LockRequest):
+    if body.reviewer_id != "Amogh":
+        raise HTTPException(status_code=403, detail="Only L2 reviewer can unlock sessions")
+    try:
+        unlock_audio_session(s_id)
+        return {"success": True}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 # ---------------------------------------------------------------------------

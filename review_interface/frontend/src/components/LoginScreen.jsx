@@ -14,8 +14,14 @@ const REVIEWERS = [
   { name: 'Amogh',    role: 'L2' },
 ];
 
+const WORKSPACES = [
+  { id: 'chat',  label: 'Chat Review',  desc: 'Text chat sessions'  },
+  { id: 'audio', label: 'Audio Review', desc: 'Audio call sessions' },
+];
+
 export default function LoginScreen({ onLogin }) {
   const [name,     setName]     = useState('');
+  const [mode,     setMode]     = useState('chat');
   const [focused,  setFocused]  = useState(false);
   const [stats,    setStats]    = useState(null);
   const [btnHover, setBtnHover] = useState(false);
@@ -30,7 +36,7 @@ export default function LoginScreen({ onLogin }) {
     e.preventDefault();
     if (!disabled) {
       const reviewer = REVIEWERS.find((r) => r.name === name);
-      onLogin(name, reviewer?.role || 'L1');
+      onLogin(name, reviewer?.role || 'L1', mode);
     }
   };
 
@@ -115,6 +121,51 @@ export default function LoginScreen({ onLogin }) {
           <div style={{ borderTop: `1px solid ${C.border}`, marginBottom: 24 }} />
 
           <form onSubmit={handleSubmit}>
+            {/* Workspace picker */}
+            <div style={{
+              fontSize: 11,
+              fontFamily: MONO,
+              textTransform: 'uppercase',
+              letterSpacing: '0.05em',
+              color: C.textSecondary,
+              marginBottom: 8,
+            }}>
+              Workspace
+            </div>
+            <div style={{ display: 'flex', gap: 8, marginBottom: 20 }}>
+              {WORKSPACES.map((w) => {
+                const active = mode === w.id;
+                return (
+                  <button
+                    key={w.id}
+                    type="button"
+                    onClick={() => setMode(w.id)}
+                    style={{
+                      flex: 1,
+                      padding: '10px 12px',
+                      borderRadius: 5,
+                      border: `1px solid ${active ? C.accent : C.border}`,
+                      background: active ? C.accentLight : C.bgMuted,
+                      cursor: 'pointer',
+                      textAlign: 'left',
+                      transition: 'border-color 150ms, background 150ms',
+                    }}
+                  >
+                    <div style={{
+                      fontSize: 13,
+                      fontWeight: 600,
+                      color: active ? C.accentDark : C.textPrimary,
+                    }}>
+                      {w.label}
+                    </div>
+                    <div style={{ fontSize: 11, color: C.textSecondary, marginTop: 2 }}>
+                      {w.desc}
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+
             {/* Label */}
             <div style={{
               fontSize: 11,

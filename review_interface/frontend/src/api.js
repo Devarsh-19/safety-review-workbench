@@ -139,6 +139,62 @@ export function markNeedsFinalReview(sessionId, reviewerId) {
   });
 }
 
+// ── Audio review ───────────────────────────────────────────────────────────
+
+export function getAudioStats() {
+  return request('/audio/stats');
+}
+
+export function getAudioSessions(filters = {}) {
+  const params = new URLSearchParams();
+  if (filters.status) params.append('status', filters.status);
+  if (filters.search) params.append('search', filters.search);
+  if (filters.limit  != null) params.append('limit',  filters.limit);
+  if (filters.offset != null) params.append('offset', filters.offset);
+  const qs = params.toString() ? `?${params}` : '';
+  return request(`/audio/sessions${qs}`);
+}
+
+export function getAudioSessionDetail(sId) {
+  return request(`/audio/sessions/${sId}`);
+}
+
+export function saveSpeakerRoles(sId, speaker1Role, speaker2Role, reviewerId) {
+  return request(`/audio/sessions/${sId}/speaker-roles`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      speaker1_role: speaker1Role,
+      speaker2_role: speaker2Role,
+      reviewer_id: reviewerId,
+    }),
+  });
+}
+
+export function submitAudioSession(sId, reviewerId, note) {
+  return request(`/audio/sessions/${sId}/submit`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ reviewer_id: reviewerId, note: note || null }),
+  });
+}
+
+export function lockAudioSession(sId, reviewerId) {
+  return request(`/audio/sessions/${sId}/lock`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ reviewer_id: reviewerId }),
+  });
+}
+
+export function unlockAudioSession(sId, reviewerId) {
+  return request(`/audio/sessions/${sId}/unlock`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ reviewer_id: reviewerId }),
+  });
+}
+
 // ── Export ─────────────────────────────────────────────────────────────────
 // L1 reviewers get only their own submitted sessions; L2 gets all.
 export function exportCsv(reviewerName, reviewerRole) {
