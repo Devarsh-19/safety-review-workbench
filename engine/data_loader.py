@@ -208,14 +208,22 @@ class DataLoader:
             group, removed = self._dedup_messages(group)
             self._duplicates_removed += removed
 
-            # ── Timestamps ────────────────────────────────────────────
-            timestamps = group["sent_at_ist"].apply(self._parse_timestamp)
-            valid_ts   = [t for t in timestamps if t is not None]
-            session_start = min(valid_ts) if valid_ts else None
-            session_end   = max(valid_ts) if valid_ts else None
-            # Derive session_date from earliest timestamp — not in CSV directly
-            session_date  = session_start[:10] if session_start else None
-            duration = self._calc_duration(session_start, session_end)
+            # ── Timestamps (vectorized — parse the column ONCE) ────────
+            # pd.to_datetime over the whole Series infers the datetime format a
+            # single time. The previous per-scalar .apply() re-guessed the format
+            # for every row and dominated ingest time (~half the total runtime).
+            parsed_ts = pd.to_datetime(group["sent_at_ist"], utc=True, errors="coerce")
+            ts_iso    = [None if pd.isna(t) else t.isoformat() for t in parsed_ts]
+            valid_dt  = parsed_ts.dropna()
+            if not valid_dt.empty:
+                start_dt      = valid_dt.min()
+                end_dt        = valid_dt.max()
+                session_start = start_dt.isoformat()
+                session_end   = end_dt.isoformat()
+                session_date  = session_start[:10]   # earliest timestamp's date
+                duration      = round((end_dt - start_dt).total_seconds() / 60, 1)
+            else:
+                session_start = session_end = session_date = duration = None
 
             # ── AstroTalk flag ─────────────────────────────────────────
             astrotalk_flagged = (
@@ -248,7 +256,7 @@ class DataLoader:
 
             # ── Turn list ──────────────────────────────────────────────
             messages: list[dict[str, Any]] = []
-            for _, row in group.iterrows():
+            for pos, (_, row) in enumerate(group.iterrows()):
                 turn_id = self._parse_turn_id(
                     row.get("message_seq", ""), len(messages) + 1
                 )
@@ -265,9 +273,11 @@ class DataLoader:
                     "is_automated":      self._normalise_automated(
                                              row.get("is_automated_message", 0)
                                          ),
-                    "timestamp":         self._parse_timestamp(
-                                             row.get("sent_at_ist")
-                                             or row.get("sent_at")
+                    # Reuse the vectorized parse; fall back to sent_at/timestamp
+                    # only when sent_at_ist was missing/unparseable for this row.
+                    "timestamp":         ts_iso[pos] if ts_iso[pos] is not None
+                                         else self._parse_timestamp(
+                                             row.get("sent_at")
                                              or row.get("timestamp")
                                          ),
                     "language_detected": turn_language,
