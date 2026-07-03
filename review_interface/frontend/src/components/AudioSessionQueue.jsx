@@ -5,7 +5,7 @@ import Footer from './Footer';
 import StatusBadge from './StatusBadge';
 import VerdictBadge from './VerdictBadge';
 import LoadingSpinner from './LoadingSpinner';
-import { getAudioSessions, getAudioStats } from '../api';
+import { getAudioSessions, getAudioStats, lockAudioSession } from '../api';
 
 const PAGE_SIZE = 50;
 
@@ -57,6 +57,13 @@ export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelect
   }, [status, search, page, reviewerName, reviewerRole]);
 
   useEffect(() => { load(); }, [load]);
+
+  const handleLock = (e, sId) => {
+    e.stopPropagation();   // don't trigger the row's open-session click
+    lockAudioSession(sId, reviewerName)
+      .then(load)
+      .catch((err) => setError(String(err.message || err)));
+  };
 
   const statCells = [
     { label: 'Total',     value: stats?.total_sessions ?? 0 },
@@ -188,7 +195,7 @@ export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelect
           <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
             <thead>
               <tr style={{ background: C.bgMuted }}>
-                {['Session', 'Language', 'Duration', 'Segments', 'Flags', 'Speaker Roles', 'Assigned To', 'Reviewer', 'Verdict', 'Status'].map((h) => (
+                {['Session', 'Language', 'Duration', 'Segments', 'Flags', 'Speaker Roles', 'Assigned To', 'Reviewer', 'Verdict', 'Status', 'Action'].map((h) => (
                   <th key={h} style={{
                     textAlign: 'left', padding: '10px 14px',
                     fontSize: 11, fontFamily: MONO, textTransform: 'uppercase',
@@ -202,10 +209,10 @@ export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelect
             </thead>
             <tbody>
               {loading ? (
-                <tr><td colSpan={10} style={{ padding: 32, textAlign: 'center' }}><LoadingSpinner /></td></tr>
+                <tr><td colSpan={11} style={{ padding: 32, textAlign: 'center' }}><LoadingSpinner /></td></tr>
               ) : rows.length === 0 ? (
                 <tr>
-                  <td colSpan={10} style={{ padding: 32, textAlign: 'center', color: C.textSecondary }}>
+                  <td colSpan={11} style={{ padding: 32, textAlign: 'center', color: C.textSecondary }}>
                     No audio sessions. Ingest results with scripts/ingest_audio_results.py
                     {reviewerRole === 'L1' ? ' — or none are assigned to you yet (scripts/assign_audio_sessions.py).' : '.'}
                   </td>
@@ -242,6 +249,35 @@ export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelect
                   </td>
                   <td style={{ padding: '10px 14px' }}><VerdictBadge verdict={r.overall_verdict} /></td>
                   <td style={{ padding: '10px 14px' }}><StatusBadge status={r.review_status} /></td>
+                  <td style={{ padding: '10px 14px' }}>
+                    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'stretch', gap: 5 }}>
+                      {reviewerRole === 'L2' && ['SUBMITTED_FOR_REVIEW', 'REVIEWED'].includes(r.review_status) && (
+                        <button
+                          onClick={(e) => handleLock(e, r.s_id)}
+                          style={{
+                            padding: '5px 10px', fontSize: 11, background: C.bgSurface,
+                            border: `1px solid ${C.accent}`, borderRadius: 4,
+                            color: C.accent, cursor: 'pointer', whiteSpace: 'nowrap',
+                          }}
+                        >
+                          Lock 🔒
+                        </button>
+                      )}
+                      <button
+                        onClick={(e) => { e.stopPropagation(); onSelectSession(r.s_id); }}
+                        style={{
+                          padding: '5px 14px', fontSize: 12, fontWeight: 500,
+                          background: r.review_status === 'LOCKED' ? C.bgStatsrow : C.accent,
+                          color: r.review_status === 'LOCKED' ? C.textSecondary : '#FFFFFF',
+                          border: r.review_status === 'LOCKED' ? `1px solid ${C.border}` : 'none',
+                          borderRadius: 4, transition: 'background 150ms', whiteSpace: 'nowrap',
+                          cursor: 'pointer',
+                        }}
+                      >
+                        {r.review_status === 'LOCKED' ? 'View 🔒' : 'Review →'}
+                      </button>
+                    </div>
+                  </td>
                 </tr>
               ))}
             </tbody>
