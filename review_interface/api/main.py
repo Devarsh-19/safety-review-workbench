@@ -895,10 +895,21 @@ def export_csv(
 # ---------------------------------------------------------------------------
 
 @app.get("/audio/stats")
-def audio_stats():
+def audio_stats(
+    reviewer_name: Optional[str] = None,
+    reviewer_role: Optional[str] = None,
+):
+    # L1: scope all counts to sessions assigned to this reviewer (chat parity)
+    if reviewer_role == "L1" and reviewer_name:
+        scope  = " WHERE assigned_to = ?"
+        params = (reviewer_name,)
+    else:
+        scope  = ""
+        params = ()
+
     try:
         with get_audio_connection() as conn:
-            row = conn.execute("""
+            row = conn.execute(f"""
                 SELECT
                     COUNT(*) AS total_sessions,
                     SUM(CASE WHEN review_status = 'PENDING'              THEN 1 ELSE 0 END) AS total_pending,
@@ -907,28 +918,53 @@ def audio_stats():
                     SUM(CASE WHEN overall_verdict = 'SEVERE'             THEN 1 ELSE 0 END) AS count_severe,
                     SUM(CASE WHEN overall_verdict = 'FLAGGED'            THEN 1 ELSE 0 END) AS count_flagged,
                     SUM(CASE WHEN overall_verdict = 'CLEAN'              THEN 1 ELSE 0 END) AS count_clean
-                FROM audio_sessions
-            """).fetchone()
-        result = {k: (row[k] or 0) for k in row.keys()}
-        result["total_reviewed"] = result["total_sessions"] - result["total_pending"]
+                FROM audio_sessions{scope}
+            """, params).fetchone()
+            result = {k: (row[k] or 0) for k in row.keys()}
+            result["total_reviewed"] = result["total_sessions"] - result["total_pending"]
+
+            # L2-only: per-reviewer assignment breakdown (chat parity)
+            if reviewer_role == "L2":
+                rs_rows = conn.execute("""
+                    SELECT
+                        assigned_to AS reviewer,
+                        COUNT(*) AS total,
+                        SUM(CASE WHEN review_status = 'PENDING'              THEN 1 ELSE 0 END) AS pending,
+                        SUM(CASE WHEN review_status = 'SUBMITTED_FOR_REVIEW' THEN 1 ELSE 0 END) AS submitted,
+                        SUM(CASE WHEN review_status = 'LOCKED'               THEN 1 ELSE 0 END) AS locked
+                    FROM audio_sessions
+                    WHERE assigned_to IS NOT NULL
+                    GROUP BY assigned_to
+                    ORDER BY assigned_to
+                """).fetchall()
+                result["reviewer_stats"] = [dict(r) for r in rs_rows]
         return result
     except Exception:
-        return {
+        result = {
             "total_sessions": 0, "total_pending": 0, "count_submitted": 0,
             "count_locked": 0, "count_severe": 0, "count_flagged": 0,
             "count_clean": 0, "total_reviewed": 0,
         }
+        if reviewer_role == "L2":
+            result["reviewer_stats"] = []
+        return result
 
 
 @app.get("/audio/sessions")
 def audio_sessions(
     status: Optional[str] = None,
     search: Optional[str] = None,
+    reviewer_name: Optional[str] = None,
+    reviewer_role: Optional[str] = None,
+    assigned_to:   Optional[str] = None,
     limit:  int = Query(default=50, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
 ):
     rows, total = fetch_audio_sessions_page(
-        status=status, search=search, limit=limit, offset=offset,
+        status=status, search=search,
+        reviewer_role=reviewer_role, reviewer_name=reviewer_name,
+        assigned_to=assigned_to,
+        limit=limit, offset=offset,
     )
     return {"rows": rows, "total": total}
 
@@ -996,8 +1032,10 @@ def audio_confirm_flag(flag_id: int, body: LockRequest):
             active_flag_id = amendment["flag_id"] if amendment else original_flag_id
 
             conn.execute(
-                "UPDATE audio_flags SET status = 'CONFIRMED' WHERE flag_id = ?",
-                (active_flag_id,),
+                """UPDATE audio_flags
+                   SET status = 'CONFIRMED', confirmed_by = ?, confirmed_at = datetime('now')
+                   WHERE flag_id = ?""",
+                (body.reviewer_id, active_flag_id),
             )
             conn.execute(
                 """INSERT INTO audio_review_log (s_id, flag_id, action, reviewer_id, note)
@@ -1044,8 +1082,8 @@ def audio_amend_flag(flag_id: int, body: AmendAudioFlagRequest):
             cur = conn.execute(
                 """INSERT INTO audio_flags
                        (s_id, seg_id, intent, severity, conf, transcript,
-                        source, status, parent_flag_id, reasoning)
-                   VALUES (?, ?, ?, ?, ?, ?, 'MANUAL', 'ACTIVE', ?, ?)""",
+                        source, status, parent_flag_id, reasoning, created_by)
+                   VALUES (?, ?, ?, ?, ?, ?, 'MANUAL', 'ACTIVE', ?, ?, ?)""",
                 (
                     s_id,
                     original["seg_id"] if original else target["seg_id"],
@@ -1055,6 +1093,7 @@ def audio_amend_flag(flag_id: int, body: AmendAudioFlagRequest):
                     original["transcript"] if original else None,
                     original_flag_id,
                     body.reasoning,
+                    body.reviewer_id,
                 ),
             )
             new_flag_id = cur.lastrowid
@@ -1132,7 +1171,10 @@ def audio_confirm_all_flags(s_id: int, body: LockRequest):
             ]
             for fid in to_confirm:
                 conn.execute(
-                    "UPDATE audio_flags SET status = 'CONFIRMED' WHERE flag_id = ?", (fid,)
+                    """UPDATE audio_flags
+                       SET status = 'CONFIRMED', confirmed_by = ?, confirmed_at = datetime('now')
+                       WHERE flag_id = ?""",
+                    (body.reviewer_id, fid),
                 )
                 conn.execute(
                     """INSERT INTO audio_review_log (s_id, flag_id, action, reviewer_id, note)

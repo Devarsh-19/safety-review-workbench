@@ -45,6 +45,10 @@ export default function AudioSessionViewer({ sId, reviewerName, reviewerRole, on
   const audioRef = useRef(null);
   const hlsRef   = useRef(null);
 
+  // Refreshes after actions keep the current content (and the playing audio
+  // element!) mounted — the full-screen spinner only shows on first load.
+  // Unmounting <audio> mid-session killed playback: the HLS attach effect
+  // keys on audioUrl, which doesn't change across refreshes.
   const load = useCallback(() => {
     setLoading(true);
     setError('');
@@ -270,19 +274,25 @@ export default function AudioSessionViewer({ sId, reviewerName, reviewerRole, on
                     <span style={{ fontSize: 11, color: C.textSecondary }}>tone: {seg.tone}</span>
                   )}
                   {f.source === 'MANUAL' && (
-                    <span style={{
-                      fontSize: 10, fontFamily: MONO, padding: '1px 6px', borderRadius: 3,
-                      background: C.manualBg, border: `1px solid ${C.manualBorder}`, color: C.manualText,
-                    }}>
-                      EDITED
+                    <span
+                      title={f.created_by ? `Edited by ${f.created_by}` : 'Edited'}
+                      style={{
+                        fontSize: 10, fontFamily: MONO, padding: '1px 6px', borderRadius: 3,
+                        background: C.manualBg, border: `1px solid ${C.manualBorder}`, color: C.manualText,
+                      }}
+                    >
+                      EDITED{f.created_by ? ` · ${f.created_by}` : ''}
                     </span>
                   )}
                   {confirmed && (
-                    <span style={{
-                      fontSize: 10, fontFamily: MONO, padding: '1px 6px', borderRadius: 3,
-                      background: C.accentLight, border: '1px solid #9FE1CB', color: C.accentDark,
-                    }}>
-                      CONFIRMED
+                    <span
+                      title={f.confirmed_at ? `Confirmed at ${f.confirmed_at}` : 'Confirmed'}
+                      style={{
+                        fontSize: 10, fontFamily: MONO, padding: '1px 6px', borderRadius: 3,
+                        background: C.accentLight, border: '1px solid #9FE1CB', color: C.accentDark,
+                      }}
+                    >
+                      CONFIRMED{f.confirmed_by ? ` · ${f.confirmed_by}` : ''}
                     </span>
                   )}
                 </div>
@@ -424,7 +434,7 @@ export default function AudioSessionViewer({ sId, reviewerName, reviewerRole, on
           ← Back to queue
         </button>
 
-        {loading ? <LoadingSpinner /> : !session ? (
+        {loading && !detail ? <LoadingSpinner /> : !session ? (
           <div style={{ color: C.textSecondary }}>Session not found.</div>
         ) : (
           <>
@@ -444,9 +454,17 @@ export default function AudioSessionViewer({ sId, reviewerName, reviewerRole, on
                 {unactionedCount > 0 ? ` (${unactionedCount} unactioned)` : ''}
                 {pauses.length > 0 ? ` · ${pauses.length} pauses` : ''}
               </span>
-              {session.locked_by && (
+              {/* Review trail — who did what, when (chat parity) */}
+              {(session.submitted_by || session.reviewer_id || session.locked_by) && (
+                <span style={{ fontSize: 12, color: C.textSecondary, fontFamily: MONO }}>
+                  {session.submitted_by && `submitted by ${session.submitted_by}${session.submitted_at ? ` at ${session.submitted_at}` : ''}`}
+                  {!session.submitted_by && session.reviewer_id && `reviewed by ${session.reviewer_id}${session.reviewed_at ? ` at ${session.reviewed_at}` : ''}`}
+                  {session.locked_by && ` · locked by ${session.locked_by}${session.locked_at ? ` at ${session.locked_at}` : ''}`}
+                </span>
+              )}
+              {session.reviewer_note && (
                 <span style={{ fontSize: 12, color: C.textSecondary }}>
-                  locked by {session.locked_by}
+                  note: {session.reviewer_note}
                 </span>
               )}
             </div>

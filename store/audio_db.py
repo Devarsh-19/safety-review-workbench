@@ -36,6 +36,10 @@ def initialise_audio_db() -> None:
         "ALTER TABLE audio_sessions ADD COLUMN audio_url TEXT",         # HLS (.m3u8) recording URL
         "ALTER TABLE audio_flags ADD COLUMN reasoning TEXT",            # reviewer note on amendments
         "ALTER TABLE audio_sessions ADD COLUMN confidence_score REAL",  # verdict confidence, same scale as chat
+        # Flag-level audit trail, same as chat's flags table
+        "ALTER TABLE audio_flags ADD COLUMN confirmed_by TEXT",
+        "ALTER TABLE audio_flags ADD COLUMN confirmed_at TEXT",
+        "ALTER TABLE audio_flags ADD COLUMN created_by TEXT",           # reviewer who made an amendment
     ]
     with get_audio_connection() as conn:
         for migration in migrations:
@@ -52,13 +56,32 @@ def fetch_audio_sessions_page(
     *,
     status: str = None,
     search: str = None,
+    reviewer_role: str = None,
+    reviewer_name: str = None,
+    assigned_to: str = None,
     limit: int = 50,
     offset: int = 0,
 ) -> tuple[list[dict], int]:
-    """Paginated audio session list with per-session flag/segment counts."""
+    """Paginated audio session list with per-session flag/segment counts.
+    Role-based default visibility mirrors the chat DB (fetch_sessions_page):
+    - L1 (no explicit status filter): submitted/locked sessions hidden
+    - L2 (no explicit status filter): locked sessions hidden
+    - L1 with a name: only sessions assigned to them
+    """
     where, params = ["1=1"], []
     if status:
         where.append("s.review_status = ?"); params.append(status)
+    else:
+        if reviewer_role == "L1":
+            where.append("s.review_status NOT IN ('SUBMITTED_FOR_REVIEW','LOCKED')")
+        elif reviewer_role == "L2":
+            where.append("s.review_status != 'LOCKED'")
+
+    if reviewer_role == "L1" and reviewer_name:
+        where.append("s.assigned_to = ?"); params.append(reviewer_name)
+    elif assigned_to:
+        where.append("s.assigned_to = ?"); params.append(assigned_to)
+
     if search:
         where.append("CAST(s.s_id AS TEXT) LIKE ?"); params.append(f"%{search}%")
     where_sql = " AND ".join(where)

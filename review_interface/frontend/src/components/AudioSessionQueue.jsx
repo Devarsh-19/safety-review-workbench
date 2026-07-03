@@ -40,8 +40,12 @@ export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelect
     setLoading(true);
     setError('');
     Promise.all([
-      getAudioSessions({ status, search, limit: PAGE_SIZE, offset: page * PAGE_SIZE }),
-      getAudioStats(),
+      getAudioSessions({
+        status, search,
+        reviewer_name: reviewerName, reviewer_role: reviewerRole,
+        limit: PAGE_SIZE, offset: page * PAGE_SIZE,
+      }),
+      getAudioStats({ reviewer_name: reviewerName, reviewer_role: reviewerRole }),
     ])
       .then(([list, st]) => {
         setRows(list.rows || []);
@@ -50,7 +54,7 @@ export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelect
       })
       .catch((e) => setError(String(e.message || e)))
       .finally(() => setLoading(false));
-  }, [status, search, page]);
+  }, [status, search, page, reviewerName, reviewerRole]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -133,6 +137,47 @@ export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelect
           </div>
         )}
 
+        {/* L2-only: per-reviewer assignment progress (chat parity) */}
+        {reviewerRole === 'L2' && (stats?.reviewer_stats?.length > 0) && (
+          <div style={{
+            background: C.bgSurface, border: `1px solid ${C.border}`,
+            borderRadius: 6, padding: '12px 16px', marginBottom: 12,
+          }}>
+            <div style={{
+              fontSize: 11, fontFamily: MONO, textTransform: 'uppercase',
+              letterSpacing: '0.05em', color: C.textSecondary, marginBottom: 8,
+            }}>
+              L1 Reviewer Progress
+            </div>
+            <table style={{ borderCollapse: 'collapse', fontSize: 12 }}>
+              <thead>
+                <tr>
+                  {['Reviewer', 'Total', 'Pending', 'Submitted', 'Locked'].map((h) => (
+                    <th key={h} style={{
+                      textAlign: h === 'Reviewer' ? 'left' : 'right',
+                      padding: '2px 14px 2px 0', fontFamily: MONO, fontSize: 11,
+                      color: C.textSecondary, fontWeight: 500,
+                    }}>
+                      {h}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {stats.reviewer_stats.map((r) => (
+                  <tr key={r.reviewer}>
+                    <td style={{ padding: '2px 14px 2px 0' }}>{r.reviewer}</td>
+                    <td style={{ padding: '2px 14px 2px 0', textAlign: 'right', fontFamily: MONO }}>{r.total}</td>
+                    <td style={{ padding: '2px 14px 2px 0', textAlign: 'right', fontFamily: MONO }}>{r.pending}</td>
+                    <td style={{ padding: '2px 14px 2px 0', textAlign: 'right', fontFamily: MONO, color: C.accentDark }}>{r.submitted}</td>
+                    <td style={{ padding: '2px 14px 2px 0', textAlign: 'right', fontFamily: MONO }}>{r.locked}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+
         {/* Table */}
         <div style={{
           background: C.bgSurface,
@@ -143,7 +188,7 @@ export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelect
           <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
             <thead>
               <tr style={{ background: C.bgMuted }}>
-                {['Session', 'Language', 'Duration', 'Segments', 'Flags', 'Speaker Roles', 'Verdict', 'Status'].map((h) => (
+                {['Session', 'Language', 'Duration', 'Segments', 'Flags', 'Speaker Roles', 'Assigned To', 'Reviewer', 'Verdict', 'Status'].map((h) => (
                   <th key={h} style={{
                     textAlign: 'left', padding: '10px 14px',
                     fontSize: 11, fontFamily: MONO, textTransform: 'uppercase',
@@ -157,11 +202,12 @@ export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelect
             </thead>
             <tbody>
               {loading ? (
-                <tr><td colSpan={8} style={{ padding: 32, textAlign: 'center' }}><LoadingSpinner /></td></tr>
+                <tr><td colSpan={10} style={{ padding: 32, textAlign: 'center' }}><LoadingSpinner /></td></tr>
               ) : rows.length === 0 ? (
                 <tr>
-                  <td colSpan={8} style={{ padding: 32, textAlign: 'center', color: C.textSecondary }}>
-                    No audio sessions. Ingest results with scripts/ingest_audio_results.py.
+                  <td colSpan={10} style={{ padding: 32, textAlign: 'center', color: C.textSecondary }}>
+                    No audio sessions. Ingest results with scripts/ingest_audio_results.py
+                    {reviewerRole === 'L1' ? ' — or none are assigned to you yet (scripts/assign_audio_sessions.py).' : '.'}
                   </td>
                 </tr>
               ) : rows.map((r) => (
@@ -187,6 +233,12 @@ export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelect
                     {r.speaker1_role && r.speaker2_role
                       ? `S1: ${r.speaker1_role} · S2: ${r.speaker2_role}`
                       : 'Not assigned'}
+                  </td>
+                  <td style={{ padding: '10px 14px', fontSize: 12, color: C.textSecondary }}>
+                    {r.assigned_to || '—'}
+                  </td>
+                  <td style={{ padding: '10px 14px', fontSize: 12, color: C.textSecondary }}>
+                    {r.submitted_by || r.reviewer_id || '—'}
                   </td>
                   <td style={{ padding: '10px 14px' }}><VerdictBadge verdict={r.overall_verdict} /></td>
                   <td style={{ padding: '10px 14px' }}><StatusBadge status={r.review_status} /></td>

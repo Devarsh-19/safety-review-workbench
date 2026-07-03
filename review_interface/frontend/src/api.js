@@ -141,14 +141,21 @@ export function markNeedsFinalReview(sessionId, reviewerId) {
 
 // ── Audio review ───────────────────────────────────────────────────────────
 
-export function getAudioStats() {
-  return request('/audio/stats');
+export function getAudioStats(params = {}) {
+  const qs = new URLSearchParams();
+  if (params.reviewer_name) qs.append('reviewer_name', params.reviewer_name);
+  if (params.reviewer_role) qs.append('reviewer_role', params.reviewer_role);
+  const q = qs.toString() ? `?${qs}` : '';
+  return request(`/audio/stats${q}`);
 }
 
 export function getAudioSessions(filters = {}) {
   const params = new URLSearchParams();
-  if (filters.status) params.append('status', filters.status);
-  if (filters.search) params.append('search', filters.search);
+  if (filters.status)        params.append('status', filters.status);
+  if (filters.search)        params.append('search', filters.search);
+  if (filters.reviewer_name) params.append('reviewer_name', filters.reviewer_name);
+  if (filters.reviewer_role) params.append('reviewer_role', filters.reviewer_role);
+  if (filters.assigned_to)   params.append('assigned_to', filters.assigned_to);
   if (filters.limit  != null) params.append('limit',  filters.limit);
   if (filters.offset != null) params.append('offset', filters.offset);
   const qs = params.toString() ? `?${params}` : '';
