@@ -1,4 +1,5 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import Hls from 'hls.js';
 import { C, MONO } from '../tokens';
 import TopBar from './TopBar';
 import Footer from './Footer';
@@ -31,6 +32,9 @@ export default function AudioSessionViewer({ sId, reviewerName, reviewerRole, on
   const [error,   setError]   = useState('');
   const [busy,    setBusy]    = useState(false);
   const [note,    setNote]    = useState('');
+  const [playerError, setPlayerError] = useState('');
+  const audioRef = useRef(null);
+  const hlsRef   = useRef(null);
 
   const load = useCallback(() => {
     setLoading(true);
@@ -47,6 +51,45 @@ export default function AudioSessionViewer({ sId, reviewerName, reviewerRole, on
   const segments = detail?.segments || [];
   const flags    = detail?.flags || [];
   const locked   = session?.review_status === 'LOCKED';
+  const audioUrl = session?.audio_url;
+
+  // Attach the HLS (.m3u8) stream to the <audio> element. Safari plays HLS
+  // natively; everywhere else hls.js does the demuxing via MediaSource.
+  useEffect(() => {
+    const audio = audioRef.current;
+    setPlayerError('');
+    if (!audio || !audioUrl) return undefined;
+
+    if (audio.canPlayType('application/vnd.apple.mpegurl')) {
+      audio.src = audioUrl;
+    } else if (Hls.isSupported()) {
+      const hls = new Hls();
+      hls.loadSource(audioUrl);
+      hls.attachMedia(audio);
+      hls.on(Hls.Events.ERROR, (_evt, data) => {
+        if (data.fatal) {
+          setPlayerError(`Audio stream error (${data.type}) — check the URL is reachable and allows CORS.`);
+          hls.destroy();
+        }
+      });
+      hlsRef.current = hls;
+    } else {
+      setPlayerError('This browser cannot play HLS audio.');
+    }
+
+    return () => {
+      if (hlsRef.current) { hlsRef.current.destroy(); hlsRef.current = null; }
+      audio.removeAttribute('src');
+      audio.load();
+    };
+  }, [audioUrl]);
+
+  const seekTo = (seconds) => {
+    const audio = audioRef.current;
+    if (!audio || !audioUrl) return;
+    audio.currentTime = Math.max(0, Number(seconds) || 0);
+    audio.play().catch(() => {});
+  };
 
   // Distinct raw speaker labels, in order of appearance -> lane 1 and lane 2.
   const speakerLabels = [];
@@ -155,9 +198,20 @@ export default function AudioSessionViewer({ sId, reviewerName, reviewerRole, on
                 marginBottom: 8,
               }}>
                 <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-                  <span style={{ fontFamily: MONO, fontSize: 12, fontWeight: 600, color: C.textPrimary }}>
-                    {formatTime(seg?.ts_start)} – {formatTime(seg?.ts_end)}
-                  </span>
+                  <button
+                    onClick={() => seekTo(seg?.ts_start)}
+                    disabled={!audioUrl}
+                    title={audioUrl ? 'Play from this timestamp' : 'No recording attached'}
+                    style={{
+                      fontFamily: MONO, fontSize: 12, fontWeight: 600,
+                      color: audioUrl ? C.accentDark : C.textPrimary,
+                      background: 'none', border: 'none', padding: 0,
+                      cursor: audioUrl ? 'pointer' : 'default',
+                      textDecoration: audioUrl ? 'underline' : 'none',
+                    }}
+                  >
+                    {audioUrl ? '▶ ' : ''}{formatTime(seg?.ts_start)} – {formatTime(seg?.ts_end)}
+                  </button>
                   <VerdictBadge verdict={f.severity} />
                   <span style={{
                     fontSize: 11, fontFamily: MONO, textTransform: 'uppercase',
@@ -226,6 +280,33 @@ export default function AudioSessionViewer({ sId, reviewerName, reviewerRole, on
                 </span>
               )}
             </div>
+
+            {/* Audio player — HLS stream; click a flag's timestamp to jump there */}
+            {audioUrl ? (
+              <div style={{
+                background: C.bgSurface, border: `1px solid ${C.border}`,
+                borderRadius: 6, padding: '12px 18px', marginBottom: 16,
+              }}>
+                <div style={{
+                  fontSize: 11, fontFamily: MONO, textTransform: 'uppercase',
+                  letterSpacing: '0.05em', color: C.textSecondary, marginBottom: 8,
+                }}>
+                  Recording — click any flagged timestamp below to jump to it
+                </div>
+                <audio ref={audioRef} controls preload="metadata" style={{ width: '100%' }} />
+                {playerError && (
+                  <div style={{ fontSize: 12, color: C.severeText, marginTop: 6 }}>
+                    {playerError}
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div style={{
+                fontSize: 12, color: C.textMuted, marginBottom: 16,
+              }}>
+                No recording attached to this session (no audio_url ingested).
+              </div>
+            )}
 
             {error && (
               <div style={{

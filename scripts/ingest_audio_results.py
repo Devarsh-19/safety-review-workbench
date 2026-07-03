@@ -8,6 +8,7 @@ directory of .json files; each file holds one session object or a list of them.
 Expected object shape:
   {
     "s_id": 123, "lang": "hindi", "review": true, "pauses": [...],
+    "audio_url": "https://cdn.example.com/recordings/123.m3u8",   # optional — HLS stream for the in-browser player
     "segments": [
       {"ts_start": "00:01:05", "ts_end": "00:01:12", "seg_id": 1,
        "speaker": "SPEAKER_1", "tone": "aggressive",
@@ -61,21 +62,23 @@ def ingest_session(conn, obj: dict) -> tuple[int, int, int]:
     ).fetchone()
     if existing:
         # Refresh the LLM-derived columns, keep review workflow state.
+        # audio_url only overwrites when the new JSON provides one.
         conn.execute(
             """UPDATE audio_sessions
-               SET lang = ?, pauses = ?, needs_review = ?, overall_verdict = ?
+               SET lang = ?, pauses = ?, needs_review = ?, overall_verdict = ?,
+                   audio_url = COALESCE(?, audio_url)
                WHERE s_id = ?""",
             (obj.get("lang"), json.dumps(obj.get("pauses") or []),
-             1 if obj.get("review") else 0, verdict, s_id),
+             1 if obj.get("review") else 0, verdict, obj.get("audio_url"), s_id),
         )
         conn.execute("DELETE FROM audio_flags WHERE s_id = ?", (s_id,))
         conn.execute("DELETE FROM audio_segments WHERE s_id = ?", (s_id,))
     else:
         conn.execute(
-            """INSERT INTO audio_sessions (s_id, lang, pauses, needs_review, overall_verdict)
-               VALUES (?, ?, ?, ?, ?)""",
+            """INSERT INTO audio_sessions (s_id, lang, pauses, needs_review, overall_verdict, audio_url)
+               VALUES (?, ?, ?, ?, ?, ?)""",
             (s_id, obj.get("lang"), json.dumps(obj.get("pauses") or []),
-             1 if obj.get("review") else 0, verdict),
+             1 if obj.get("review") else 0, verdict, obj.get("audio_url")),
         )
 
     n_flags = 0

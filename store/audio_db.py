@@ -29,6 +29,20 @@ def initialise_audio_db() -> None:
     schema = _SCHEMA_PATH.read_text(encoding="utf-8")
     with get_audio_connection() as conn:
         conn.executescript(schema)
+
+    # Columns added after the initial schema — same pattern as store/db.py:
+    # they live here (not in audio_schema.sql) so existing DBs get them too.
+    migrations = [
+        "ALTER TABLE audio_sessions ADD COLUMN audio_url TEXT",  # HLS (.m3u8) recording URL
+    ]
+    with get_audio_connection() as conn:
+        for migration in migrations:
+            try:
+                conn.execute(migration)
+                conn.commit()
+            except Exception:
+                pass  # Column already exists — safe to ignore
+
     print(f"Audio database initialised at {AUDIO_DB_PATH}")
 
 
