@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { C, MONO } from '../tokens';
 import TopBar from './TopBar';
 import Footer from './Footer';
-import { getStats } from '../api';
+import { getStats, getAudioStats } from '../api';
 
 const REVIEWERS = [
   { name: 'Gaurav',   role: 'L1' },
@@ -26,9 +26,13 @@ export default function LoginScreen({ onLogin }) {
   const [stats,    setStats]    = useState(null);
   const [btnHover, setBtnHover] = useState(false);
 
+  // Stats strip follows the selected workspace: chat stats or audio stats.
+  // Both endpoints return total_pending / total_reviewed / total_sessions.
   useEffect(() => {
-    getStats().then(setStats).catch(() => {});
-  }, []);
+    setStats(null);
+    const fetchStats = mode === 'audio' ? getAudioStats : getStats;
+    fetchStats().then(setStats).catch(() => {});
+  }, [mode]);
 
   const disabled = !name;
 
