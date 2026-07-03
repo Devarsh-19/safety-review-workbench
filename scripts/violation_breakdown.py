@@ -5,12 +5,16 @@ Extracts the same Violation Breakdown shown in the UI (/stats/violations):
 distinct sessions per violation category, over sessions whose overall_verdict
 is not CLEAN. Read-only.
 
-Prints five breakdowns:
+Prints nine breakdowns:
   1. Overall                          (same numbers as the UI panel)
   2. astrotalk_flagged = 0            (AstroTalk did NOT flag the session)
   3. astrotalk_flagged = 1            (AstroTalk DID flag the session)
   4. Violations by USER               (flagged turn was spoken by the user)
   5. Violations by ASTROLOGER         (flagged turn was spoken by the astrologer)
+  6. astrotalk_flagged = 0 x USER
+  7. astrotalk_flagged = 0 x ASTROLOGER
+  8. astrotalk_flagged = 1 x USER
+  9. astrotalk_flagged = 1 x ASTROLOGER
 
 Who committed a violation comes from the speaker of the flagged turn
 (flags.turn_id -> turns.speaker). A session where both sides violated is
@@ -46,7 +50,11 @@ BREAKDOWN_SQL = """
         COUNT(DISTINCT CASE WHEN s.astrotalk_flagged = 0 THEN f.session_id END) AS astro_0,
         COUNT(DISTINCT CASE WHEN s.astrotalk_flagged = 1 THEN f.session_id END) AS astro_1,
         COUNT(DISTINCT CASE WHEN t.speaker = 'USER'       THEN f.session_id END) AS by_user,
-        COUNT(DISTINCT CASE WHEN t.speaker = 'ASTROLOGER' THEN f.session_id END) AS by_astrologer
+        COUNT(DISTINCT CASE WHEN t.speaker = 'ASTROLOGER' THEN f.session_id END) AS by_astrologer,
+        COUNT(DISTINCT CASE WHEN s.astrotalk_flagged = 0 AND t.speaker = 'USER'       THEN f.session_id END) AS astro_0_user,
+        COUNT(DISTINCT CASE WHEN s.astrotalk_flagged = 0 AND t.speaker = 'ASTROLOGER' THEN f.session_id END) AS astro_0_astrologer,
+        COUNT(DISTINCT CASE WHEN s.astrotalk_flagged = 1 AND t.speaker = 'USER'       THEN f.session_id END) AS astro_1_user,
+        COUNT(DISTINCT CASE WHEN s.astrotalk_flagged = 1 AND t.speaker = 'ASTROLOGER' THEN f.session_id END) AS astro_1_astrologer
     FROM flags f
     JOIN sessions s ON s.session_id = f.session_id
     LEFT JOIN turns t ON t.session_id = f.session_id AND t.turn_id = f.turn_id
@@ -61,7 +69,11 @@ SESSION_TOTALS_SQL = """
         COUNT(DISTINCT CASE WHEN s.astrotalk_flagged = 0 THEN f.session_id END) AS astro_0,
         COUNT(DISTINCT CASE WHEN s.astrotalk_flagged = 1 THEN f.session_id END) AS astro_1,
         COUNT(DISTINCT CASE WHEN t.speaker = 'USER'       THEN f.session_id END) AS by_user,
-        COUNT(DISTINCT CASE WHEN t.speaker = 'ASTROLOGER' THEN f.session_id END) AS by_astrologer
+        COUNT(DISTINCT CASE WHEN t.speaker = 'ASTROLOGER' THEN f.session_id END) AS by_astrologer,
+        COUNT(DISTINCT CASE WHEN s.astrotalk_flagged = 0 AND t.speaker = 'USER'       THEN f.session_id END) AS astro_0_user,
+        COUNT(DISTINCT CASE WHEN s.astrotalk_flagged = 0 AND t.speaker = 'ASTROLOGER' THEN f.session_id END) AS astro_0_astrologer,
+        COUNT(DISTINCT CASE WHEN s.astrotalk_flagged = 1 AND t.speaker = 'USER'       THEN f.session_id END) AS astro_1_user,
+        COUNT(DISTINCT CASE WHEN s.astrotalk_flagged = 1 AND t.speaker = 'ASTROLOGER' THEN f.session_id END) AS astro_1_astrologer
     FROM flags f
     JOIN sessions s ON s.session_id = f.session_id
     LEFT JOIN turns t ON t.session_id = f.session_id AND t.turn_id = f.turn_id
@@ -132,6 +144,14 @@ def main():
                  violation_sessions=totals["by_user"])
     _print_table("Violations by ASTROLOGER (flagged turn spoken by astrologer)", rows, "by_astrologer",
                  violation_sessions=totals["by_astrologer"])
+    _print_table("astrotalk_flagged = 0  x  USER violations", rows, "astro_0_user",
+                 violation_sessions=totals["astro_0_user"])
+    _print_table("astrotalk_flagged = 0  x  ASTROLOGER violations", rows, "astro_0_astrologer",
+                 violation_sessions=totals["astro_0_astrologer"])
+    _print_table("astrotalk_flagged = 1  x  USER violations", rows, "astro_1_user",
+                 violation_sessions=totals["astro_1_user"])
+    _print_table("astrotalk_flagged = 1  x  ASTROLOGER violations", rows, "astro_1_astrologer",
+                 violation_sessions=totals["astro_1_astrologer"])
 
     if args.out:
         out_path = Path(args.out)
@@ -139,10 +159,14 @@ def main():
         with open(out_path, "w", newline="", encoding="utf-8") as fh:
             writer = csv.writer(fh)
             writer.writerow(["category_code", "overall", "astrotalk_flagged_0",
-                             "astrotalk_flagged_1", "by_user", "by_astrologer"])
+                             "astrotalk_flagged_1", "by_user", "by_astrologer",
+                             "flagged_0_user", "flagged_0_astrologer",
+                             "flagged_1_user", "flagged_1_astrologer"])
             for r in rows:
                 writer.writerow([r["category_code"], r["overall"], r["astro_0"],
-                                 r["astro_1"], r["by_user"], r["by_astrologer"]])
+                                 r["astro_1"], r["by_user"], r["by_astrologer"],
+                                 r["astro_0_user"], r["astro_0_astrologer"],
+                                 r["astro_1_user"], r["astro_1_astrologer"]])
         print(f"  CSV written: {out_path}")
 
 
