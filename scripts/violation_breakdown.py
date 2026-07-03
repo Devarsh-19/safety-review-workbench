@@ -24,8 +24,14 @@ Counts are DISTINCT sessions, so a session with the same category on multiple
 turns counts once. A session with several different categories appears once
 under each of them, so column totals can exceed the number of sessions.
 
+Export (--out) writes everything shown on screen:
+  .xlsx  -> two sheets: "Summary" (total sessions + sessions-with-violations
+            for every section) and "Breakdown" (per-category table).
+  .csv   -> two files: <name>.csv (breakdown) and <name>_summary.csv (totals).
+
 Usage:
   python scripts/violation_breakdown.py
+  python scripts/violation_breakdown.py --out exports/violation_breakdown.xlsx
   python scripts/violation_breakdown.py --out exports/violation_breakdown.csv
 """
 
@@ -154,20 +160,64 @@ def main():
                  violation_sessions=totals["astro_1_astrologer"])
 
     if args.out:
+        breakdown_header = ["category_code", "overall", "astrotalk_flagged_0",
+                            "astrotalk_flagged_1", "by_user", "by_astrologer",
+                            "flagged_0_user", "flagged_0_astrologer",
+                            "flagged_1_user", "flagged_1_astrologer"]
+        breakdown_rows = [
+            [r["category_code"], r["overall"], r["astro_0"], r["astro_1"],
+             r["by_user"], r["by_astrologer"],
+             r["astro_0_user"], r["astro_0_astrologer"],
+             r["astro_1_user"], r["astro_1_astrologer"]]
+            for r in rows
+        ]
+        summary_rows = [
+            ("Total sessions in DB",                              all_sessions["total"]),
+            ("Total sessions astrotalk_flagged = 0",              all_sessions["astro_0"] or 0),
+            ("Total sessions astrotalk_flagged = 1",              all_sessions["astro_1"] or 0),
+            ("Sessions with violations (overall)",                totals["overall"]),
+            ("Sessions with violations astrotalk_flagged = 0",    totals["astro_0"]),
+            ("Sessions with violations astrotalk_flagged = 1",    totals["astro_1"]),
+            ("Sessions with a USER violation",                    totals["by_user"]),
+            ("Sessions with an ASTROLOGER violation",             totals["by_astrologer"]),
+            ("Sessions astrotalk_flagged = 0 x USER violation",       totals["astro_0_user"]),
+            ("Sessions astrotalk_flagged = 0 x ASTROLOGER violation", totals["astro_0_astrologer"]),
+            ("Sessions astrotalk_flagged = 1 x USER violation",       totals["astro_1_user"]),
+            ("Sessions astrotalk_flagged = 1 x ASTROLOGER violation", totals["astro_1_astrologer"]),
+        ]
+
         out_path = Path(args.out)
         out_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(out_path, "w", newline="", encoding="utf-8") as fh:
-            writer = csv.writer(fh)
-            writer.writerow(["category_code", "overall", "astrotalk_flagged_0",
-                             "astrotalk_flagged_1", "by_user", "by_astrologer",
-                             "flagged_0_user", "flagged_0_astrologer",
-                             "flagged_1_user", "flagged_1_astrologer"])
-            for r in rows:
-                writer.writerow([r["category_code"], r["overall"], r["astro_0"],
-                                 r["astro_1"], r["by_user"], r["by_astrologer"],
-                                 r["astro_0_user"], r["astro_0_astrologer"],
-                                 r["astro_1_user"], r["astro_1_astrologer"]])
-        print(f"  CSV written: {out_path}")
+
+        if out_path.suffix.lower() == ".csv":
+            with open(out_path, "w", newline="", encoding="utf-8") as fh:
+                writer = csv.writer(fh)
+                writer.writerow(breakdown_header)
+                writer.writerows(breakdown_rows)
+            summary_path = out_path.with_name(out_path.stem + "_summary.csv")
+            with open(summary_path, "w", newline="", encoding="utf-8") as fh:
+                writer = csv.writer(fh)
+                writer.writerow(["metric", "session_count"])
+                writer.writerows(summary_rows)
+            print(f"  CSV written: {out_path}")
+            print(f"  CSV written: {summary_path}")
+        else:
+            from openpyxl import Workbook
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "Summary"
+            ws.append(["metric", "session_count"])
+            for row in summary_rows:
+                ws.append(list(row))
+            ws.column_dimensions["A"].width = 52
+            ws.column_dimensions["B"].width = 14
+            ws2 = wb.create_sheet("Breakdown")
+            ws2.append(breakdown_header)
+            for row in breakdown_rows:
+                ws2.append(row)
+            ws2.column_dimensions["A"].width = 36
+            wb.save(out_path)
+            print(f"  Excel written: {out_path}  (sheets: Summary, Breakdown)")
 
 
 if __name__ == "__main__":
