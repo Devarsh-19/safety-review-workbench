@@ -181,7 +181,7 @@ def main() -> None:
 
     print("=" * 60)
     print("  Export AstroTalk-flagged + reviewer-clean sessions")
-    print(f"  DB: {os.getenv('DB_PATH', 'store/results.db')}")
+    print(f"  DB: {os.getenv('DB_PATH', 'store/astrotalk.db')}")
     print(f"  Reviewers: {', '.join(reviewers)}")
     print("=" * 60)
     export(out_path, reviewers)

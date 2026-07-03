@@ -113,7 +113,7 @@ def main() -> None:
 
     print("=" * 60)
     print("  Export PENDING sessions not reviewed by the LLM")
-    print(f"  DB  : {os.getenv('DB_PATH', 'store/results.db')}")
+    print(f"  DB  : {os.getenv('DB_PATH', 'store/astrotalk.db')}")
     print(f"  Mode: {'DRY-RUN' if args.dry_run else 'COMMIT'}")
     print("=" * 60)
 

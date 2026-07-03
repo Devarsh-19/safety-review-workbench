@@ -68,14 +68,16 @@ def _severity_for_category(category_code: str) -> str:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Initialise BOTH databases on startup. Failures must be visible — a
+    # silent pass here leaves the app running against a missing DB.
     try:
         initialise_db()
-    except Exception:
-        pass
+    except Exception as exc:
+        print(f"[startup] chat DB initialisation failed: {exc}")
     try:
         initialise_audio_db()
-    except Exception:
-        pass
+    except Exception as exc:
+        print(f"[startup] audio DB initialisation failed: {exc}")
     yield
 
 

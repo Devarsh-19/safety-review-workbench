@@ -217,7 +217,7 @@ def main() -> None:
 
     print("=" * 60)
     print("  Export manual-flagged + astrotalk-clean sessions")
-    print(f"  DB: {os.getenv('DB_PATH', 'store/results.db')}")
+    print(f"  DB: {os.getenv('DB_PATH', 'store/astrotalk.db')}")
     print("=" * 60)
     export(out_path)
 
