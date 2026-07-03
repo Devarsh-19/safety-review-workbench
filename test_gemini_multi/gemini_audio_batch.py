@@ -19,7 +19,6 @@ import re
 import subprocess
 import time
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlparse
@@ -44,6 +43,32 @@ DEFAULT_THINKING_LEVEL = "minimal"
 DEFAULT_MAX_OUTPUT_TOKENS = 65536
 LONG_PAUSE_THRESHOLD_SECONDS = 60.0
 SILENCE_NOISE_THRESHOLD = "-45dB"
+OUTPUT_DROP_COLUMNS = {
+    "month",
+    "processed_at_utc",
+    "audio_file_path",
+    "audio_duration_seconds",
+    "gemini_s_id",
+    "pause_count",
+    "pauses_json",
+    "pauses_timestamp_valid",
+    "pauses_timestamp_error_count",
+    "pauses_max_ts_end",
+    "invalid_pauses_json",
+    "segments_json",
+    "segments_timestamp_valid",
+    "segments_timestamp_error_count",
+    "segments_max_ts_end",
+    "invalid_segments_json",
+    "flags_timestamp_valid",
+    "flags_max_ts_end",
+    "invalid_flags_json",
+    "raw_json_path",
+    "candidate_output_tokens",
+    "max_output_tokens",
+    "model_id",
+    "thinking_level",
+}
 
 
 # Gemini 3 Flash Preview standard paid rates, USD per 1M tokens.
@@ -919,7 +944,6 @@ def usage_to_telemetry(usage: Any) -> dict[str, int | float]:
         "input_audio_tokens": input_audio_tokens,
         "cached_text_tokens": cached_text_tokens,
         "cached_audio_tokens": cached_audio_tokens,
-        "candidate_output_tokens": candidate_output_tokens,
         "thinking_tokens": thinking_tokens,
         "billable_output_tokens": billable_output_tokens,
         "output_tokens": billable_output_tokens,
@@ -1168,6 +1192,15 @@ def response_output_token_count(response: Any) -> int | None:
     return int(value) if value is not None else None
 
 
+def is_cache_unavailable_error(exc: Exception) -> bool:
+    """Return True when Gemini says cached content is missing or inaccessible."""
+    message = str(exc).lower()
+    mentions_cache = any(token in message for token in ("cachedcontent", "cached content", "cached_content"))
+    if not mentions_cache:
+        return False
+    return any(token in message for token in ("not found", "permission denied", "permission_denied", "403"))
+
+
 def parse_audio_report(response: Any, session_id: str) -> AstroTalkAudioReport:
     report = getattr(response, "parsed", None)
     if report is None:
@@ -1324,14 +1357,12 @@ def flatten_segment_flags(segments: list[dict[str, Any]]) -> list[dict[str, Any]
 
 def flatten_result(
     row: pd.Series,
-    audio_path: Path,
     audio_duration_seconds: float | None,
     report: AstroTalkAudioReport | None,
     detected_pauses: list[LongPause] | None,
     telemetry: dict[str, int | float] | None,
     latency_seconds: float | None,
     response_json: str | None,
-    raw_json_path: Path | None,
     status: str,
     error: str | None = None,
     has_video: bool = False,
@@ -1346,42 +1377,21 @@ def flatten_result(
         review = bool(pauses) or has_video
 
     invalid_flags = invalid_timestamp_records(flags, audio_duration_seconds)
-    invalid_segments = invalid_timestamp_records(segments, audio_duration_seconds)
-    invalid_pauses = invalid_timestamp_records(pauses, audio_duration_seconds)
 
     result = row.to_dict()
     result.update(
         {
             "status": status,
             "error": error or "",
-            "processed_at_utc": datetime.now(UTC).isoformat(),
-            "audio_file_path": str(audio_path),
-            "audio_duration_seconds": audio_duration_seconds,
-            "gemini_s_id": report.s_id if report else "",
             "detected_languages": report.lang if report else "",
             "review": review,
             "has_video": has_video,
-            "pause_count": len(pauses),
             "long_pause_count": len(pauses),
-            "pauses_json": json.dumps(pauses, ensure_ascii=False),
-            "pauses_timestamp_valid": not invalid_pauses,
-            "pauses_timestamp_error_count": len(invalid_pauses),
-            "pauses_max_ts_end": max_ts_end(pauses),
-            "invalid_pauses_json": json.dumps(invalid_pauses, ensure_ascii=False),
             "segment_count": len(segments),
-            "segments_json": json.dumps(segments, ensure_ascii=False),
-            "segments_timestamp_valid": not invalid_segments,
-            "segments_timestamp_error_count": len(invalid_segments),
-            "segments_max_ts_end": max_ts_end(segments),
-            "invalid_segments_json": json.dumps(invalid_segments, ensure_ascii=False),
             "flag_count": len(flags),
             "flags_json": json.dumps(flags, ensure_ascii=False),
-            "flags_timestamp_valid": not invalid_flags,
             "flags_timestamp_error_count": len(invalid_flags),
-            "flags_max_ts_end": max_ts_end(flags),
-            "invalid_flags_json": json.dumps(invalid_flags, ensure_ascii=False),
             "response_json": response_json or "",
-            "raw_json_path": str(raw_json_path) if raw_json_path else "",
             "latency_seconds": latency_seconds,
         }
     )
@@ -1389,13 +1399,86 @@ def flatten_result(
     return result
 
 
+def truthy_export_value(value: Any) -> bool:
+    if value is None:
+        return False
+    try:
+        if pd.isna(value):
+            return False
+    except (TypeError, ValueError):
+        pass
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"", "0", "false", "no", "n", "none", "nan"}:
+            return False
+        if normalized in {"1", "true", "yes", "y"}:
+            return True
+    return bool(value)
+
+
+def positive_export_count(value: Any) -> bool:
+    if value is None:
+        return False
+    try:
+        if pd.isna(value):
+            return False
+    except (TypeError, ValueError):
+        pass
+    try:
+        return float(value) > 0
+    except (TypeError, ValueError):
+        return False
+
+
+def is_flagged_result(record: dict[str, Any]) -> bool:
+    return (
+        positive_export_count(record.get("flag_count"))
+        or positive_export_count(record.get("long_pause_count"))
+        or positive_export_count(record.get("pause_count"))
+        or truthy_export_value(record.get("has_video"))
+    )
+
+
+def clean_export_value(value: Any) -> Any:
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    return value
+
+
+def export_record(record: dict[str, Any]) -> dict[str, Any]:
+    cleaned = {
+        key: clean_export_value(value)
+        for key, value in record.items()
+        if key not in OUTPUT_DROP_COLUMNS and key != "flagged"
+    }
+    cleaned["flagged"] = is_flagged_result(record)
+    return cleaned
+
+
+def output_dataframe(results: list[dict[str, Any]]) -> pd.DataFrame:
+    df = pd.DataFrame([export_record(record) for record in results])
+    if "flagged" in df:
+        return df[[column for column in df.columns if column != "flagged"] + ["flagged"]]
+    return df
+
+
 def write_outputs(results: list[dict[str, Any]], output_csv: Path, output_jsonl: Path) -> None:
     output_csv.parent.mkdir(parents=True, exist_ok=True)
-    df = pd.DataFrame(results)
+    output_records = [export_record(record) for record in results]
+    df = output_dataframe(results)
     df.to_csv(output_csv, index=False, encoding="utf-8-sig")
     with output_jsonl.open("w", encoding="utf-8") as handle:
-        for record in results:
-            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+        for record in output_records:
+            handle.write(json.dumps(record, ensure_ascii=False, allow_nan=False) + "\n")
 
 
 def write_raw_response(raw_json_dir: Path, session_id: str, response_json: str) -> Path:
@@ -1450,12 +1533,14 @@ def run_batch(args: argparse.Namespace) -> pd.DataFrame:
     results: list[dict[str, Any]] = load_previous_records(output_csv) if args.skip_existing else []
     cache_info: GeminiCacheInfo | None = None
     cache_name: str | None = None
+    cache_cleanup_name: str | None = None
     cache_storage_cost_recorded = False
 
     try:
         if client and not args.no_cache:
             cache_info = create_gemini_cache(client, args.model_id, args.cache_ttl)
         cache_name = cache_info.name if cache_info else None
+        cache_cleanup_name = cache_name
 
         for index, row in df.iterrows():
             session_id = str(row["session_id"])
@@ -1504,14 +1589,12 @@ def run_batch(args: argparse.Namespace) -> pd.DataFrame:
                 if args.skip_gemini:
                     record = flatten_result(
                         row,
-                        audio_path,
                         duration_seconds,
                         report=None,
                         detected_pauses=local_pauses,
                         telemetry={},
                         latency_seconds=None,
                         response_json=None,
-                        raw_json_path=None,
                         status="downloaded",
                         has_video=has_video,
                     )
@@ -1520,30 +1603,50 @@ def run_batch(args: argparse.Namespace) -> pd.DataFrame:
                     print(f"[{index + 1}/{len(df)}] session {session_id}: uploading to Gemini")
                     if client is None:
                         raise RuntimeError("Gemini client was not initialized.")
-                    report, telemetry, latency, response_json = evaluate_audio(
-                        client,
-                        args.model_id,
-                        audio_path,
-                        session_id,
-                        duration_seconds,
-                        local_pauses,
-                        cache_name,
-                        thinking_level=args.thinking_level or "minimal",
-                        max_output_tokens=args.max_output_tokens,
-                    )
+                    try:
+                        report, telemetry, latency, response_json = evaluate_audio(
+                            client,
+                            args.model_id,
+                            audio_path,
+                            session_id,
+                            duration_seconds,
+                            local_pauses,
+                            cache_name,
+                            thinking_level=args.thinking_level or "minimal",
+                            max_output_tokens=args.max_output_tokens,
+                        )
+                    except Exception as exc:
+                        if cache_name and is_cache_unavailable_error(exc):
+                            print(
+                                f"[WARN] session {session_id}: cache unavailable ({exc}). "
+                                "Retrying without cache and disabling cache for remaining sessions."
+                            )
+                            cache_name = None
+                            cache_info = None
+                            report, telemetry, latency, response_json = evaluate_audio(
+                                client,
+                                args.model_id,
+                                audio_path,
+                                session_id,
+                                duration_seconds,
+                                local_pauses,
+                                cache_name=None,
+                                thinking_level=args.thinking_level or "minimal",
+                                max_output_tokens=args.max_output_tokens,
+                            )
+                        else:
+                            raise
                     t_gemini = time.perf_counter()
 
-                    raw_json_path = write_raw_response(raw_json_dir, session_id, response_json)
+                    write_raw_response(raw_json_dir, session_id, response_json)
                     record = flatten_result(
                         row,
-                        audio_path,
                         duration_seconds,
                         report,
                         detected_pauses=local_pauses,
                         telemetry=telemetry,
                         latency_seconds=latency,
                         response_json=response_json,
-                        raw_json_path=raw_json_path,
                         status="success",
                         has_video=has_video,
                     )
@@ -1556,14 +1659,12 @@ def run_batch(args: argparse.Namespace) -> pd.DataFrame:
                 t_gemini = time.perf_counter()
                 record = flatten_result(
                     row,
-                    audio_path,
                     audio_duration_seconds=None,
                     report=None,
                     detected_pauses=None,
                     telemetry={},
                     latency_seconds=None,
                     response_json=None,
-                    raw_json_path=None,
                     status="error",
                     error=f"{type(exc).__name__}: {exc}",
                     has_video=has_video,
@@ -1591,8 +1692,6 @@ def run_batch(args: argparse.Namespace) -> pd.DataFrame:
                 f"total={step_timing['time_total_s']:.1f}s"
             )
 
-            record["model_id"] = args.model_id
-            record["max_output_tokens"] = args.max_output_tokens
             record["cache_name"] = cache_name or ""
             record["cache_storage_tokens"] = cache_info.token_count if cache_info else 0
             if cache_info and not cache_storage_cost_recorded:
@@ -1600,16 +1699,15 @@ def run_batch(args: argparse.Namespace) -> pd.DataFrame:
                 cache_storage_cost_recorded = True
             else:
                 record["cache_storage_cost_usd"] = 0.0
-            record["thinking_level"] = args.thinking_level or ""
             results.append(record)
             write_outputs(results, output_csv, output_jsonl)
     finally:
         if client and args.delete_cache:
-            delete_gemini_cache(client, cache_name)
-        elif client and cache_name:
-            print(f"[INFO] Cache retained until TTL expires: {cache_name}")
+            delete_gemini_cache(client, cache_cleanup_name)
+        elif client and cache_cleanup_name:
+            print(f"[INFO] Cache retained until TTL expires: {cache_cleanup_name}")
 
-    return pd.DataFrame(results)
+    return output_dataframe(results)
 
 
 def parse_args() -> argparse.Namespace:
@@ -1646,10 +1744,19 @@ def parse_args() -> argparse.Namespace:
 if __name__ == "__main__":
     final_df = run_batch(parse_args())
     if not final_df.empty:
-        request_cost = final_df.get("estimated_cost_usd", pd.Series(dtype=float)).fillna(0).sum()
-        cache_storage_cost = final_df.get("cache_storage_cost_usd", pd.Series(dtype=float)).fillna(0).sum()
+        request_cost_series = pd.to_numeric(
+            final_df.get("estimated_cost_usd", pd.Series(dtype=float)),
+            errors="coerce",
+        )
+        request_cost = request_cost_series.fillna(0).sum()
+        cache_storage_cost_series = pd.to_numeric(
+            final_df.get("cache_storage_cost_usd", pd.Series(dtype=float)),
+            errors="coerce",
+        )
+        cache_storage_cost = cache_storage_cost_series.fillna(0).sum()
         total_cost = request_cost + cache_storage_cost
-        total_duration = final_df.get("audio_duration_seconds", pd.Series(dtype=float)).fillna(0).sum()
+        duration_series = pd.to_numeric(final_df.get("duration_sec", pd.Series(dtype=float)), errors="coerce")
+        total_duration = duration_series.fillna(0).sum()
         print(f"Processed rows: {len(final_df)}")
         print(f"Total audio duration seconds: {total_duration:.3f}")
         print(f"Estimated Gemini request cost USD: {request_cost:.6f}")
