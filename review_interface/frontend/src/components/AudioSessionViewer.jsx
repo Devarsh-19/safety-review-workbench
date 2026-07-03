@@ -12,6 +12,10 @@ import {
   submitAudioSession,
   lockAudioSession,
   unlockAudioSession,
+  confirmAudioFlag,
+  amendAudioFlag,
+  dismissAudioFlag,
+  confirmAllAudioFlags,
 } from '../api';
 
 function formatTime(seconds) {
@@ -25,6 +29,7 @@ function formatTime(seconds) {
 
 const ROLES = ['ASTROLOGER', 'USER'];
 const opposite = (role) => (role === 'ASTROLOGER' ? 'USER' : 'ASTROLOGER');
+const SEVERITIES = ['LOW', 'MEDIUM', 'HIGH'];
 
 export default function AudioSessionViewer({ sId, reviewerName, reviewerRole, onBack }) {
   const [detail,  setDetail]  = useState(null);
@@ -33,6 +38,10 @@ export default function AudioSessionViewer({ sId, reviewerName, reviewerRole, on
   const [busy,    setBusy]    = useState(false);
   const [note,    setNote]    = useState('');
   const [playerError, setPlayerError] = useState('');
+  const [editingFlag, setEditingFlag] = useState(null);   // flag_id being edited
+  const [editIntent,    setEditIntent]    = useState('');
+  const [editSeverity,  setEditSeverity]  = useState('MEDIUM');
+  const [editReasoning, setEditReasoning] = useState('');
   const audioRef = useRef(null);
   const hlsRef   = useRef(null);
 
@@ -101,8 +110,41 @@ export default function AudioSessionViewer({ sId, reviewerName, reviewerRole, on
   const segById = {};
   segments.forEach((seg) => { segById[seg.seg_id] = seg; });
 
+  // Active flags = amendment rows + originals without an amendment
+  // (same model as chat review; amended originals stay as audit history).
+  const amendedParents = new Set(
+    flags.filter((f) => f.parent_flag_id != null).map((f) => f.parent_flag_id)
+  );
+  const activeFlags = flags.filter(
+    (f) => f.parent_flag_id != null || !amendedParents.has(f.flag_id)
+  );
+  const unactionedCount = activeFlags.filter((f) => f.status !== 'CONFIRMED').length;
+
   const flagsForSpeaker = (label) =>
-    flags.filter((f) => segById[f.seg_id]?.speaker === label);
+    activeFlags.filter((f) => segById[f.seg_id]?.speaker === label);
+
+  const startEdit = (f) => {
+    setEditingFlag(f.flag_id);
+    setEditIntent(f.intent || '');
+    setEditSeverity(f.severity || 'MEDIUM');
+    setEditReasoning('');
+  };
+
+  const saveEdit = () => {
+    if (!editIntent.trim()) return;
+    doAction(() => amendAudioFlag(editingFlag, {
+      intent: editIntent.trim().toUpperCase().replace(/\s+/g, '_'),
+      severity: editSeverity,
+      reasoning: editReasoning,
+      reviewer_id: reviewerName,
+    }).then(() => setEditingFlag(null)));
+  };
+
+  const dismissFlag = (f) => {
+    // eslint-disable-next-line no-alert
+    const ok = window.confirm(`Dismiss ${f.intent} as a false detection? This removes the flag.`);
+    if (ok) doAction(() => dismissAudioFlag(f.flag_id, reviewerName, 'Dismissed as false detection'));
+  };
 
   const roleForLane = (laneIdx) =>
     laneIdx === 0 ? session?.speaker1_role : session?.speaker2_role;
@@ -189,10 +231,12 @@ export default function AudioSessionViewer({ sId, reviewerName, reviewerRole, on
             </div>
           ) : laneFlags.map((f) => {
             const seg = segById[f.seg_id];
+            const confirmed = f.status === 'CONFIRMED';
+            const isEditing = editingFlag === f.flag_id;
             return (
               <div key={f.flag_id} style={{
-                border: `1px solid ${C.flaggedBorder}`,
-                background: C.flaggedBg,
+                border: `1px solid ${confirmed ? C.cleanBorder : C.flaggedBorder}`,
+                background: confirmed ? C.cleanBg : C.flaggedBg,
                 borderRadius: 5,
                 padding: '10px 12px',
                 marginBottom: 8,
@@ -215,7 +259,7 @@ export default function AudioSessionViewer({ sId, reviewerName, reviewerRole, on
                   <VerdictBadge verdict={f.severity} />
                   <span style={{
                     fontSize: 11, fontFamily: MONO, textTransform: 'uppercase',
-                    letterSpacing: '0.04em', color: C.flaggedText,
+                    letterSpacing: '0.04em', color: confirmed ? C.cleanText : C.flaggedText,
                   }}>
                     {f.intent}
                   </span>
@@ -225,10 +269,135 @@ export default function AudioSessionViewer({ sId, reviewerName, reviewerRole, on
                   {seg?.tone && (
                     <span style={{ fontSize: 11, color: C.textSecondary }}>tone: {seg.tone}</span>
                   )}
+                  {f.source === 'MANUAL' && (
+                    <span style={{
+                      fontSize: 10, fontFamily: MONO, padding: '1px 6px', borderRadius: 3,
+                      background: C.manualBg, border: `1px solid ${C.manualBorder}`, color: C.manualText,
+                    }}>
+                      EDITED
+                    </span>
+                  )}
+                  {confirmed && (
+                    <span style={{
+                      fontSize: 10, fontFamily: MONO, padding: '1px 6px', borderRadius: 3,
+                      background: C.accentLight, border: '1px solid #9FE1CB', color: C.accentDark,
+                    }}>
+                      CONFIRMED
+                    </span>
+                  )}
                 </div>
                 {f.transcript && (
                   <div style={{ fontSize: 13, color: C.textPrimary, marginTop: 6, lineHeight: 1.5 }}>
                     “{f.transcript}”
+                  </div>
+                )}
+                {f.reasoning && (
+                  <div style={{ fontSize: 11, color: C.textSecondary, marginTop: 4 }}>
+                    Note: {f.reasoning}
+                  </div>
+                )}
+
+                {/* Flag actions — confirm / edit / dismiss (hidden when locked) */}
+                {!locked && !isEditing && (
+                  <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
+                    {!confirmed && (
+                      <button
+                        disabled={busy}
+                        onClick={() => doAction(() => confirmAudioFlag(f.flag_id, reviewerName))}
+                        style={{
+                          padding: '4px 10px', fontSize: 11, fontFamily: MONO, borderRadius: 3,
+                          border: `1px solid ${C.accent}`, background: C.accent, color: '#FFFFFF',
+                          cursor: busy ? 'not-allowed' : 'pointer',
+                        }}
+                      >
+                        ✓ Confirm
+                      </button>
+                    )}
+                    <button
+                      disabled={busy}
+                      onClick={() => startEdit(f)}
+                      style={{
+                        padding: '4px 10px', fontSize: 11, fontFamily: MONO, borderRadius: 3,
+                        border: `1px solid ${C.border}`, background: C.bgSurface, color: C.textPrimary,
+                        cursor: busy ? 'not-allowed' : 'pointer',
+                      }}
+                    >
+                      Edit
+                    </button>
+                    <button
+                      disabled={busy}
+                      onClick={() => dismissFlag(f)}
+                      style={{
+                        padding: '4px 10px', fontSize: 11, fontFamily: MONO, borderRadius: 3,
+                        border: `1px solid ${C.severeBorder}`, background: C.bgSurface, color: C.severeText,
+                        cursor: busy ? 'not-allowed' : 'pointer',
+                      }}
+                    >
+                      Dismiss
+                    </button>
+                  </div>
+                )}
+
+                {/* Inline edit form — saves as an amendment, resets to unconfirmed */}
+                {!locked && isEditing && (
+                  <div style={{
+                    marginTop: 8, padding: 10, borderRadius: 4,
+                    background: C.bgSurface, border: `1px solid ${C.border}`,
+                  }}>
+                    <div style={{ display: 'flex', gap: 6, marginBottom: 6 }}>
+                      <input
+                        value={editIntent}
+                        onChange={(e) => setEditIntent(e.target.value)}
+                        placeholder="Intent (e.g. FEAR_MANIPULATION)"
+                        style={{
+                          flex: 1, padding: '6px 8px', fontSize: 12, fontFamily: MONO,
+                          borderRadius: 4, border: `1px solid ${C.border}`,
+                        }}
+                      />
+                      <select
+                        value={editSeverity}
+                        onChange={(e) => setEditSeverity(e.target.value)}
+                        style={{
+                          padding: '6px 8px', fontSize: 12, fontFamily: MONO,
+                          borderRadius: 4, border: `1px solid ${C.border}`, cursor: 'pointer',
+                        }}
+                      >
+                        {SEVERITIES.map((s) => <option key={s} value={s}>{s}</option>)}
+                      </select>
+                    </div>
+                    <input
+                      value={editReasoning}
+                      onChange={(e) => setEditReasoning(e.target.value)}
+                      placeholder="Reason for the edit (optional)…"
+                      style={{
+                        width: '100%', boxSizing: 'border-box', padding: '6px 8px',
+                        fontSize: 12, borderRadius: 4, border: `1px solid ${C.border}`,
+                        marginBottom: 6,
+                      }}
+                    />
+                    <div style={{ display: 'flex', gap: 6 }}>
+                      <button
+                        disabled={busy || !editIntent.trim()}
+                        onClick={saveEdit}
+                        style={{
+                          padding: '4px 12px', fontSize: 11, fontFamily: MONO, borderRadius: 3,
+                          border: 'none', background: C.accent, color: '#FFFFFF',
+                          cursor: busy ? 'not-allowed' : 'pointer',
+                        }}
+                      >
+                        Save
+                      </button>
+                      <button
+                        onClick={() => setEditingFlag(null)}
+                        style={{
+                          padding: '4px 12px', fontSize: 11, fontFamily: MONO, borderRadius: 3,
+                          border: `1px solid ${C.border}`, background: C.bgSurface, color: C.textSecondary,
+                          cursor: 'pointer',
+                        }}
+                      >
+                        Cancel
+                      </button>
+                    </div>
                   </div>
                 )}
               </div>
@@ -271,7 +440,8 @@ export default function AudioSessionViewer({ sId, reviewerName, reviewerRole, on
               <VerdictBadge verdict={session.overall_verdict} />
               <StatusBadge status={session.review_status} />
               <span style={{ fontSize: 12, color: C.textSecondary }}>
-                {session.lang || 'unknown language'} · {segments.length} segments · {flags.length} flags
+                {session.lang || 'unknown language'} · {segments.length} segments · {activeFlags.length} flags
+                {unactionedCount > 0 ? ` (${unactionedCount} unactioned)` : ''}
                 {pauses.length > 0 ? ` · ${pauses.length} pauses` : ''}
               </span>
               {session.locked_by && (
@@ -346,14 +516,34 @@ export default function AudioSessionViewer({ sId, reviewerName, reviewerRole, on
                       color: C.textPrimary,
                     }}
                   />
+                  {unactionedCount > 0 && (
+                    <button
+                      disabled={busy}
+                      onClick={() => doAction(() => confirmAllAudioFlags(sId, reviewerName))}
+                      title="Confirm every unactioned flag at once"
+                      style={{
+                        padding: '9px 16px', fontSize: 13, fontWeight: 500,
+                        borderRadius: 5, border: `1px solid ${C.accent}`,
+                        background: C.accentLight, color: C.accentDark,
+                        cursor: busy ? 'not-allowed' : 'pointer', whiteSpace: 'nowrap',
+                      }}
+                    >
+                      ✓ Confirm All ({unactionedCount})
+                    </button>
+                  )}
                   <button
-                    disabled={busy}
+                    disabled={busy || unactionedCount > 0}
+                    title={unactionedCount > 0
+                      ? `${unactionedCount} flag(s) must be confirmed, edited or dismissed first`
+                      : 'Submit this session for L2 review'}
                     onClick={() => doAction(() => submitAudioSession(sId, reviewerName, note))}
                     style={{
                       padding: '9px 16px', fontSize: 13, fontWeight: 500,
                       borderRadius: 5, border: 'none',
-                      background: busy ? '#D4D0C9' : C.accent, color: '#FFFFFF',
-                      cursor: busy ? 'not-allowed' : 'pointer',
+                      background: (busy || unactionedCount > 0) ? '#D4D0C9' : C.accent,
+                      color: (busy || unactionedCount > 0) ? C.textMuted : '#FFFFFF',
+                      cursor: (busy || unactionedCount > 0) ? 'not-allowed' : 'pointer',
+                      whiteSpace: 'nowrap',
                     }}
                   >
                     Submit for Review

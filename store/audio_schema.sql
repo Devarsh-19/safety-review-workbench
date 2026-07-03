@@ -47,6 +47,17 @@ CREATE TABLE IF NOT EXISTS audio_flags (
     FOREIGN KEY (s_id) REFERENCES audio_sessions(s_id)
 );
 
+CREATE TABLE IF NOT EXISTS audio_review_log (
+    log_id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    s_id                INTEGER,
+    flag_id             INTEGER,
+    action              TEXT,                               -- 'CONFIRM_FLAG', 'AMENDED', 'DISMISSED', 'SUBMIT', 'LOCK'
+    reviewer_id         TEXT,
+    note                TEXT,
+    actioned_at         TEXT    DEFAULT (datetime('now')),
+    FOREIGN KEY (s_id) REFERENCES audio_sessions(s_id)
+);
+
 CREATE INDEX IF NOT EXISTS idx_audio_sessions_status ON audio_sessions(review_status);
 CREATE INDEX IF NOT EXISTS idx_audio_segments_s_id   ON audio_segments(s_id);
 CREATE INDEX IF NOT EXISTS idx_audio_flags_s_id      ON audio_flags(s_id);

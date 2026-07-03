@@ -46,6 +46,8 @@ from store.audio_db import (
     submit_audio_session,
     lock_audio_session,
     unlock_audio_session,
+    recompute_audio_session_verdict,
+    get_audio_flag_summary,
 )
 from store.writer import write_review_action
 from engine.verdict_rules import get_db_verdict_for_flags
@@ -151,6 +153,13 @@ class SubmitRequest(BaseModel):
 class SpeakerRolesRequest(BaseModel):
     speaker1_role: str          # 'ASTROLOGER' | 'USER'
     speaker2_role: str
+    reviewer_id: str
+
+
+class AmendAudioFlagRequest(BaseModel):
+    intent: str
+    severity: str
+    reasoning: str = ""
     reviewer_id: str
 
 
@@ -948,11 +957,200 @@ def audio_speaker_roles(s_id: int, body: SpeakerRolesRequest):
         raise HTTPException(status_code=500, detail=str(exc))
 
 
-@app.post("/audio/sessions/{s_id}/submit")
-def audio_submit(s_id: int, body: SubmitRequest):
+def _audio_session_or_404(s_id: int) -> dict:
     detail = fetch_audio_session_detail(s_id)
     if detail["session"] is None:
         raise HTTPException(status_code=404, detail=f"Audio session {s_id} not found")
+    return detail
+
+
+def _reject_if_audio_locked(detail: dict):
+    if detail["session"]["review_status"] == "LOCKED":
+        raise HTTPException(status_code=400, detail="Session is locked — flags can no longer be changed")
+
+
+@app.post("/audio/flags/{flag_id}/confirm")
+def audio_confirm_flag(flag_id: int, body: LockRequest):
+    """Confirm an audio flag — sets status = CONFIRMED on the active row
+    (the amendment if one exists, otherwise the original). Mirrors
+    /flags/{flag_id}/confirm."""
+    conn = get_audio_connection()
+    try:
+        with conn:
+            target = conn.execute(
+                "SELECT flag_id, s_id, parent_flag_id FROM audio_flags WHERE flag_id = ?",
+                (flag_id,),
+            ).fetchone()
+            if target is None:
+                raise HTTPException(status_code=404, detail=f"Audio flag {flag_id} not found")
+
+            s_id = target["s_id"]
+            _reject_if_audio_locked(_audio_session_or_404(s_id))
+            original_flag_id = target["parent_flag_id"] if target["parent_flag_id"] else flag_id
+
+            amendment = conn.execute(
+                "SELECT flag_id FROM audio_flags WHERE parent_flag_id = ?",
+                (original_flag_id,),
+            ).fetchone()
+            active_flag_id = amendment["flag_id"] if amendment else original_flag_id
+
+            conn.execute(
+                "UPDATE audio_flags SET status = 'CONFIRMED' WHERE flag_id = ?",
+                (active_flag_id,),
+            )
+            conn.execute(
+                """INSERT INTO audio_review_log (s_id, flag_id, action, reviewer_id, note)
+                   VALUES (?, ?, 'CONFIRM_FLAG', ?, '')""",
+                (s_id, active_flag_id, body.reviewer_id),
+            )
+            recompute_audio_session_verdict(s_id, conn)
+        return {"success": True, "confirmed_flag_id": active_flag_id}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        conn.close()
+
+
+@app.post("/audio/flags/{flag_id}/amend")
+def audio_amend_flag(flag_id: int, body: AmendAudioFlagRequest):
+    """Edit an audio flag. Replaces any existing amendment with a new one;
+    the original row is kept as silent audit history. The amendment resets
+    to ACTIVE so the reviewer must re-confirm. Mirrors /flags/{flag_id}/amend."""
+    conn = get_audio_connection()
+    try:
+        with conn:
+            target = conn.execute(
+                "SELECT flag_id, s_id, seg_id, parent_flag_id FROM audio_flags WHERE flag_id = ?",
+                (flag_id,),
+            ).fetchone()
+            if target is None:
+                raise HTTPException(status_code=404, detail=f"Audio flag {flag_id} not found")
+
+            s_id = target["s_id"]
+            _reject_if_audio_locked(_audio_session_or_404(s_id))
+            original_flag_id = target["parent_flag_id"] if target["parent_flag_id"] else flag_id
+
+            # Keep only one amendment per original
+            conn.execute("DELETE FROM audio_flags WHERE parent_flag_id = ?", (original_flag_id,))
+
+            original = conn.execute(
+                "SELECT seg_id, transcript, conf FROM audio_flags WHERE flag_id = ?",
+                (original_flag_id,),
+            ).fetchone()
+
+            cur = conn.execute(
+                """INSERT INTO audio_flags
+                       (s_id, seg_id, intent, severity, conf, transcript,
+                        source, status, parent_flag_id, reasoning)
+                   VALUES (?, ?, ?, ?, ?, ?, 'MANUAL', 'ACTIVE', ?, ?)""",
+                (
+                    s_id,
+                    original["seg_id"] if original else target["seg_id"],
+                    body.intent,
+                    body.severity,
+                    1.0,
+                    original["transcript"] if original else None,
+                    original_flag_id,
+                    body.reasoning,
+                ),
+            )
+            new_flag_id = cur.lastrowid
+
+            conn.execute(
+                """INSERT INTO audio_review_log (s_id, flag_id, action, reviewer_id, note)
+                   VALUES (?, ?, 'AMENDED', ?, ?)""",
+                (s_id, new_flag_id, body.reviewer_id, body.reasoning),
+            )
+            recompute_audio_session_verdict(s_id, conn)
+        return {"success": True, "new_flag_id": new_flag_id}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        conn.close()
+
+
+@app.post("/audio/flags/{flag_id}/dismiss")
+def audio_dismiss_flag(flag_id: int, body: DismissFlagRequest):
+    """Dismiss (false positive): hard-delete the flag and its amendment, log
+    the dismissal, recompute the verdict. Mirrors /flags/{flag_id}/dismiss."""
+    conn = get_audio_connection()
+    try:
+        with conn:
+            target = conn.execute(
+                "SELECT flag_id, s_id, parent_flag_id FROM audio_flags WHERE flag_id = ?",
+                (flag_id,),
+            ).fetchone()
+            if target is None:
+                raise HTTPException(status_code=404, detail=f"Audio flag {flag_id} not found")
+
+            s_id = target["s_id"]
+            _reject_if_audio_locked(_audio_session_or_404(s_id))
+            original_flag_id = target["parent_flag_id"] if target["parent_flag_id"] else flag_id
+
+            conn.execute("DELETE FROM audio_flags WHERE parent_flag_id = ?", (original_flag_id,))
+            conn.execute("DELETE FROM audio_flags WHERE flag_id = ?", (original_flag_id,))
+
+            conn.execute(
+                """INSERT INTO audio_review_log (s_id, flag_id, action, reviewer_id, note)
+                   VALUES (?, ?, 'DISMISSED', ?, ?)""",
+                (s_id, original_flag_id, body.reviewer_id, body.note),
+            )
+            recompute_audio_session_verdict(s_id, conn)
+        return {"success": True}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        conn.close()
+
+
+@app.post("/audio/sessions/{s_id}/confirm-all-flags")
+def audio_confirm_all_flags(s_id: int, body: LockRequest):
+    """Confirm every active, not-yet-confirmed flag on the session at once.
+    Mirrors /sessions/{session_id}/confirm-all-flags."""
+    _reject_if_audio_locked(_audio_session_or_404(s_id))
+    conn = get_audio_connection()
+    try:
+        with conn:
+            rows = conn.execute(
+                "SELECT flag_id, parent_flag_id, status FROM audio_flags WHERE s_id = ?",
+                (s_id,),
+            ).fetchall()
+            amended_parents = {
+                r["parent_flag_id"] for r in rows if r["parent_flag_id"] is not None
+            }
+            to_confirm = [
+                r["flag_id"] for r in rows
+                if (r["parent_flag_id"] is not None or r["flag_id"] not in amended_parents)
+                and r["status"] != "CONFIRMED"
+            ]
+            for fid in to_confirm:
+                conn.execute(
+                    "UPDATE audio_flags SET status = 'CONFIRMED' WHERE flag_id = ?", (fid,)
+                )
+                conn.execute(
+                    """INSERT INTO audio_review_log (s_id, flag_id, action, reviewer_id, note)
+                       VALUES (?, ?, 'CONFIRM_FLAG', ?, '')""",
+                    (s_id, fid, body.reviewer_id),
+                )
+            recompute_audio_session_verdict(s_id, conn)
+        return {"success": True, "confirmed_count": len(to_confirm)}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        conn.close()
+
+
+@app.post("/audio/sessions/{s_id}/submit")
+def audio_submit(s_id: int, body: SubmitRequest):
+    detail = _audio_session_or_404(s_id)
     if detail["session"]["review_status"] == "LOCKED":
         raise HTTPException(status_code=400, detail="Session is locked")
     # Speaker roles must be assigned before an L1 can submit — otherwise the
@@ -960,6 +1158,14 @@ def audio_submit(s_id: int, body: SubmitRequest):
     if detail["flags"] and not (detail["session"]["speaker1_role"] and detail["session"]["speaker2_role"]):
         raise HTTPException(status_code=400,
                             detail="Assign speaker roles (astrologer/user) before submitting")
+    # Same gate as chat: every active flag must be actioned (confirmed after
+    # any edits, or dismissed) before the session can be submitted.
+    summary = get_audio_flag_summary(s_id)
+    if not summary["can_submit"]:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot submit — {summary['unactioned_flags']} unactioned flag(s) remain",
+        )
     try:
         submit_audio_session(s_id, body.reviewer_id, body.note or None)
         return {"success": True, "s_id": s_id}

@@ -171,6 +171,38 @@ export function saveSpeakerRoles(sId, speaker1Role, speaker2Role, reviewerId) {
   });
 }
 
+export function confirmAudioFlag(flagId, reviewerId) {
+  return request(`/audio/flags/${flagId}/confirm`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ reviewer_id: reviewerId }),
+  });
+}
+
+export function amendAudioFlag(flagId, { intent, severity, reasoning, reviewer_id }) {
+  return request(`/audio/flags/${flagId}/amend`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ intent, severity, reasoning: reasoning || '', reviewer_id }),
+  });
+}
+
+export function dismissAudioFlag(flagId, reviewerId, note = '') {
+  return request(`/audio/flags/${flagId}/dismiss`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ reviewer_id: reviewerId, note }),
+  });
+}
+
+export function confirmAllAudioFlags(sId, reviewerId) {
+  return request(`/audio/sessions/${sId}/confirm-all-flags`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ reviewer_id: reviewerId }),
+  });
+}
+
 export function submitAudioSession(sId, reviewerId, note) {
   return request(`/audio/sessions/${sId}/submit`, {
     method: 'POST',

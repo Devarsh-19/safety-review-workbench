@@ -34,6 +34,7 @@ def initialise_audio_db() -> None:
     # they live here (not in audio_schema.sql) so existing DBs get them too.
     migrations = [
         "ALTER TABLE audio_sessions ADD COLUMN audio_url TEXT",  # HLS (.m3u8) recording URL
+        "ALTER TABLE audio_flags ADD COLUMN reasoning TEXT",     # reviewer note on amendments
     ]
     with get_audio_connection() as conn:
         for migration in migrations:
@@ -102,6 +103,48 @@ def fetch_audio_session_detail(s_id: int) -> dict:
         "session": dict(session) if session else None,
         "segments": [dict(s) for s in segments],
         "flags": [dict(f) for f in flags],
+    }
+
+
+def _active_audio_flag_rows(rows) -> list:
+    """Active flags = amendment rows + original rows that have no amendment.
+    Same model as the chat flags table."""
+    amended_parents = {r["parent_flag_id"] for r in rows if r["parent_flag_id"] is not None}
+    return [
+        r for r in rows
+        if r["parent_flag_id"] is not None or r["flag_id"] not in amended_parents
+    ]
+
+
+def recompute_audio_session_verdict(s_id: int, conn) -> str:
+    """Recompute and persist overall_verdict from the session's active flags."""
+    rows = conn.execute(
+        "SELECT flag_id, parent_flag_id FROM audio_flags WHERE s_id = ?", (s_id,)
+    ).fetchall()
+    verdict = "FLAGGED" if _active_audio_flag_rows(rows) else "CLEAN"
+    conn.execute(
+        "UPDATE audio_sessions SET overall_verdict = ? WHERE s_id = ?", (verdict, s_id)
+    )
+    return verdict
+
+
+def get_audio_flag_summary(s_id: int) -> dict:
+    """Flag counts for the submit gate — same semantics as the chat workflow:
+    a session can be submitted only when every active flag is CONFIRMED
+    (dismissed flags are deleted, so they don't count)."""
+    with get_audio_connection() as conn:
+        rows = conn.execute(
+            "SELECT flag_id, status, parent_flag_id FROM audio_flags WHERE s_id = ?",
+            (s_id,),
+        ).fetchall()
+    active = _active_audio_flag_rows(rows)
+    total = len(active)
+    actioned = sum(1 for r in active if r["status"] == "CONFIRMED")
+    return {
+        "total_flags":      total,
+        "actioned_flags":   actioned,
+        "unactioned_flags": total - actioned,
+        "can_submit":       total == actioned,
     }
 
 
