@@ -55,11 +55,25 @@ SESSION_TOTALS_SQL = """
     WHERE s.overall_verdict != 'CLEAN'
 """
 
+# Total sessions in the DB per astrotalk_flagged value (regardless of verdict).
+ALL_SESSIONS_SQL = """
+    SELECT
+        COUNT(*) AS total,
+        SUM(CASE WHEN astrotalk_flagged = 0 THEN 1 ELSE 0 END) AS astro_0,
+        SUM(CASE WHEN astrotalk_flagged = 1 THEN 1 ELSE 0 END) AS astro_1
+    FROM sessions
+"""
 
-def _print_table(title, rows, col):
+
+def _print_table(title, rows, col, total_sessions=None, violation_sessions=None):
     print("-" * 64)
     print(f"  {title}")
     print("-" * 64)
+    if total_sessions is not None:
+        print(f"  Total sessions                           {total_sessions:>8,}")
+    if violation_sessions is not None:
+        print(f"  Sessions with violations                 {violation_sessions:>8,}")
+        print()
     shown = [(r["category_code"], r[col]) for r in rows if r[col] > 0]
     if not shown:
         print("  (no violation data)")
@@ -78,20 +92,27 @@ def main():
     conn = get_connection()
     rows = conn.execute(BREAKDOWN_SQL).fetchall()
     totals = conn.execute(SESSION_TOTALS_SQL).fetchone()
+    all_sessions = conn.execute(ALL_SESSIONS_SQL).fetchone()
     conn.close()
 
     print("=" * 64)
     print("  Violation Breakdown (distinct sessions per category)")
     print(f"  DB: {DB_PATH}")
     print("=" * 64)
+    print(f"  Total sessions in DB                         : {all_sessions['total']:>8,}")
+    print(f"  ... of which astrotalk_flagged = 0           : {all_sessions['astro_0'] or 0:>8,}")
+    print(f"  ... of which astrotalk_flagged = 1           : {all_sessions['astro_1'] or 0:>8,}")
     print(f"  Sessions with violations (overall)           : {totals['overall']:>8,}")
     print(f"  ... of which astrotalk_flagged = 0           : {totals['astro_0']:>8,}")
     print(f"  ... of which astrotalk_flagged = 1           : {totals['astro_1']:>8,}")
     print()
 
-    _print_table("Overall (matches the UI Violation Breakdown)", rows, "overall")
-    _print_table("astrotalk_flagged = 0  (AstroTalk did NOT flag)", rows, "astro_0")
-    _print_table("astrotalk_flagged = 1  (AstroTalk DID flag)", rows, "astro_1")
+    _print_table("Overall (matches the UI Violation Breakdown)", rows, "overall",
+                 total_sessions=all_sessions["total"], violation_sessions=totals["overall"])
+    _print_table("astrotalk_flagged = 0  (AstroTalk did NOT flag)", rows, "astro_0",
+                 total_sessions=all_sessions["astro_0"] or 0, violation_sessions=totals["astro_0"])
+    _print_table("astrotalk_flagged = 1  (AstroTalk DID flag)", rows, "astro_1",
+                 total_sessions=all_sessions["astro_1"] or 0, violation_sessions=totals["astro_1"])
 
     if args.out:
         out_path = Path(args.out)
