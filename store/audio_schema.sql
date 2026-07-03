@@ -8,8 +8,8 @@ CREATE TABLE IF NOT EXISTS audio_sessions (
     needs_review        INTEGER DEFAULT 0,                  -- the 'review' boolean from the LLM output
     speaker1_role       TEXT,                               -- 'ASTROLOGER' | 'USER' — assigned by reviewer, NULL until set
     speaker2_role       TEXT,
-    overall_verdict     TEXT,                               -- 'CLEAN', 'FLAGGED'
-    review_status       TEXT    DEFAULT 'PENDING',          -- 'PENDING', 'SUBMITTED_FOR_REVIEW', 'LOCKED'
+    overall_verdict     TEXT,                               -- 'CLEAN', 'FLAGGED', 'SEVERE' (same rules as chat: engine/verdict_rules.py)
+    review_status       TEXT    DEFAULT 'PENDING',          -- 'PENDING', 'SUBMITTED_FOR_REVIEW', 'LOCKED', 'REVIEWED' (after unlock, same as chat)
     reviewer_id         TEXT,
     reviewer_note       TEXT,
     reviewed_at         TEXT,

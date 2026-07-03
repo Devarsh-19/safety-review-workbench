@@ -52,10 +52,20 @@ def hms_to_seconds(value) -> float:
 
 def ingest_session(conn, obj: dict) -> tuple[int, int, int]:
     """Insert/replace one session object. Returns (s_id, n_segments, n_flags)."""
+    from engine.verdict_rules import get_db_verdict_for_flags, get_db_confidence_for_verdict
+
     s_id = int(obj["s_id"])
     segments = obj.get("segments") or []
-    n_flags_total = sum(len(seg.get("flags") or []) for seg in segments)
-    verdict = "FLAGGED" if n_flags_total else "CLEAN"
+    # Same verdict rules as the chat DB: SEVERE / FLAGGED / CLEAN from the
+    # intent codes, including flagged-combination escalations.
+    intent_codes = [
+        f.get("intent")
+        for seg in segments
+        for f in (seg.get("flags") or [])
+        if f.get("intent")
+    ]
+    verdict    = get_db_verdict_for_flags(intent_codes)
+    confidence = get_db_confidence_for_verdict(verdict)
 
     existing = conn.execute(
         "SELECT s_id FROM audio_sessions WHERE s_id = ?", (s_id,)
@@ -66,19 +76,21 @@ def ingest_session(conn, obj: dict) -> tuple[int, int, int]:
         conn.execute(
             """UPDATE audio_sessions
                SET lang = ?, pauses = ?, needs_review = ?, overall_verdict = ?,
-                   audio_url = COALESCE(?, audio_url)
+                   confidence_score = ?, audio_url = COALESCE(?, audio_url)
                WHERE s_id = ?""",
             (obj.get("lang"), json.dumps(obj.get("pauses") or []),
-             1 if obj.get("review") else 0, verdict, obj.get("audio_url"), s_id),
+             1 if obj.get("review") else 0, verdict, confidence,
+             obj.get("audio_url"), s_id),
         )
         conn.execute("DELETE FROM audio_flags WHERE s_id = ?", (s_id,))
         conn.execute("DELETE FROM audio_segments WHERE s_id = ?", (s_id,))
     else:
         conn.execute(
-            """INSERT INTO audio_sessions (s_id, lang, pauses, needs_review, overall_verdict, audio_url)
-               VALUES (?, ?, ?, ?, ?, ?)""",
+            """INSERT INTO audio_sessions
+                   (s_id, lang, pauses, needs_review, overall_verdict, confidence_score, audio_url)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
             (s_id, obj.get("lang"), json.dumps(obj.get("pauses") or []),
-             1 if obj.get("review") else 0, verdict, obj.get("audio_url")),
+             1 if obj.get("review") else 0, verdict, confidence, obj.get("audio_url")),
         )
 
     n_flags = 0

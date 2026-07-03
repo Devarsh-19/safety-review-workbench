@@ -33,8 +33,9 @@ def initialise_audio_db() -> None:
     # Columns added after the initial schema — same pattern as store/db.py:
     # they live here (not in audio_schema.sql) so existing DBs get them too.
     migrations = [
-        "ALTER TABLE audio_sessions ADD COLUMN audio_url TEXT",  # HLS (.m3u8) recording URL
-        "ALTER TABLE audio_flags ADD COLUMN reasoning TEXT",     # reviewer note on amendments
+        "ALTER TABLE audio_sessions ADD COLUMN audio_url TEXT",         # HLS (.m3u8) recording URL
+        "ALTER TABLE audio_flags ADD COLUMN reasoning TEXT",            # reviewer note on amendments
+        "ALTER TABLE audio_sessions ADD COLUMN confidence_score REAL",  # verdict confidence, same scale as chat
     ]
     with get_audio_connection() as conn:
         for migration in migrations:
@@ -117,13 +118,21 @@ def _active_audio_flag_rows(rows) -> list:
 
 
 def recompute_audio_session_verdict(s_id: int, conn) -> str:
-    """Recompute and persist overall_verdict from the session's active flags."""
+    """Recompute and persist overall_verdict + confidence_score from the
+    session's active flags, using the SAME rules as the chat DB
+    (engine/verdict_rules.py): SEVERE / FLAGGED / CLEAN, including the
+    flagged-combination escalations."""
+    from engine.verdict_rules import get_db_verdict_for_flags, get_db_confidence_for_verdict
+
     rows = conn.execute(
-        "SELECT flag_id, parent_flag_id FROM audio_flags WHERE s_id = ?", (s_id,)
+        "SELECT flag_id, intent, parent_flag_id FROM audio_flags WHERE s_id = ?", (s_id,)
     ).fetchall()
-    verdict = "FLAGGED" if _active_audio_flag_rows(rows) else "CLEAN"
+    codes = [r["intent"] for r in _active_audio_flag_rows(rows) if r["intent"]]
+    verdict    = get_db_verdict_for_flags(codes)
+    confidence = get_db_confidence_for_verdict(verdict)
     conn.execute(
-        "UPDATE audio_sessions SET overall_verdict = ? WHERE s_id = ?", (verdict, s_id)
+        "UPDATE audio_sessions SET overall_verdict = ?, confidence_score = ? WHERE s_id = ?",
+        (verdict, confidence, s_id),
     )
     return verdict
 
@@ -189,10 +198,12 @@ def lock_audio_session(s_id: int, reviewer_id: str) -> None:
 
 
 def unlock_audio_session(s_id: int) -> None:
+    # Same transition as the chat DB: unlock lands on REVIEWED, not back on
+    # SUBMITTED_FOR_REVIEW (see store/db.py unlock_session).
     with get_audio_connection() as conn:
         conn.execute(
             """UPDATE audio_sessions
-               SET review_status = 'SUBMITTED_FOR_REVIEW',
+               SET review_status = 'REVIEWED',
                    locked_by     = NULL,
                    locked_at     = NULL
                WHERE s_id = ?""",

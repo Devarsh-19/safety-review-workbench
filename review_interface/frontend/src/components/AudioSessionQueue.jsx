@@ -23,6 +23,7 @@ const STATUS_FILTERS = [
   { value: 'PENDING',              label: 'Pending' },
   { value: 'SUBMITTED_FOR_REVIEW', label: 'Submitted' },
   { value: 'LOCKED',               label: 'Locked' },
+  { value: 'REVIEWED',             label: 'Reviewed (unlocked)' },
 ];
 
 export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelectSession }) {
@@ -58,6 +59,7 @@ export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelect
     { label: 'Pending',   value: stats?.total_pending  ?? 0 },
     { label: 'Submitted', value: stats?.count_submitted ?? 0 },
     { label: 'Locked',    value: stats?.count_locked   ?? 0 },
+    { label: 'Severe',    value: stats?.count_severe   ?? 0 },
     { label: 'Flagged',   value: stats?.count_flagged  ?? 0 },
   ];
 

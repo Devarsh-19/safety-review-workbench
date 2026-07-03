@@ -904,18 +904,19 @@ def audio_stats():
                     SUM(CASE WHEN review_status = 'PENDING'              THEN 1 ELSE 0 END) AS total_pending,
                     SUM(CASE WHEN review_status = 'SUBMITTED_FOR_REVIEW' THEN 1 ELSE 0 END) AS count_submitted,
                     SUM(CASE WHEN review_status = 'LOCKED'               THEN 1 ELSE 0 END) AS count_locked,
+                    SUM(CASE WHEN overall_verdict = 'SEVERE'             THEN 1 ELSE 0 END) AS count_severe,
                     SUM(CASE WHEN overall_verdict = 'FLAGGED'            THEN 1 ELSE 0 END) AS count_flagged,
                     SUM(CASE WHEN overall_verdict = 'CLEAN'              THEN 1 ELSE 0 END) AS count_clean
                 FROM audio_sessions
             """).fetchone()
         result = {k: (row[k] or 0) for k in row.keys()}
-        result["total_reviewed"] = result["count_submitted"] + result["count_locked"]
+        result["total_reviewed"] = result["total_sessions"] - result["total_pending"]
         return result
     except Exception:
         return {
             "total_sessions": 0, "total_pending": 0, "count_submitted": 0,
-            "count_locked": 0, "count_flagged": 0, "count_clean": 0,
-            "total_reviewed": 0,
+            "count_locked": 0, "count_severe": 0, "count_flagged": 0,
+            "count_clean": 0, "total_reviewed": 0,
         }
 
 
