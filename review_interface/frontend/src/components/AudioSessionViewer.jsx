@@ -15,6 +15,7 @@ import {
   confirmAudioFlag,
   amendAudioFlag,
   dismissAudioFlag,
+  undismissAudioFlag,
   confirmAllAudioFlags,
 } from '../api';
 
@@ -151,6 +152,10 @@ export default function AudioSessionViewer({ sId, reviewerName, reviewerRole, on
 
   const confirmDismiss = (f) => {
     doAction(() => dismissAudioFlag(f.flag_id, reviewerName, 'Dismissed as false detection').then(() => setDismissingFlagId(null)));
+  };
+
+  const undoDismiss = (f) => {
+    doAction(() => undismissAudioFlag(f.flag_id, reviewerName));
   };
 
   const roleForLane = (laneIdx) =>
@@ -302,14 +307,29 @@ export default function AudioSessionViewer({ sId, reviewerName, reviewerRole, on
                     </span>
                   )}
                   {dismissed && (
-                    <span
-                      style={{
-                        fontSize: 10, fontFamily: MONO, padding: '1px 6px', borderRadius: 3,
-                        background: '#EEEEEE', border: `1px solid ${C.border}`, color: C.textSecondary,
-                      }}
-                    >
-                      DISMISSED
-                    </span>
+                    <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                      <span
+                        style={{
+                          fontSize: 10, fontFamily: MONO, padding: '1px 6px', borderRadius: 3,
+                          background: '#EEEEEE', border: `1px solid ${C.border}`, color: C.textSecondary,
+                        }}
+                      >
+                        DISMISSED
+                      </span>
+                      {!readOnly && (
+                        <button
+                          disabled={busy}
+                          onClick={() => undoDismiss(f)}
+                          style={{
+                            fontSize: 10, fontFamily: MONO, padding: '1px 6px', borderRadius: 3,
+                            background: C.bgSurface, border: `1px solid ${C.border}`, color: C.textPrimary,
+                            cursor: busy ? 'not-allowed' : 'pointer',
+                          }}
+                        >
+                          Undo
+                        </button>
+                      )}
+                    </div>
                   )}
                 </div>
                 {f.transcript && (

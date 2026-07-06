@@ -1153,6 +1153,45 @@ def audio_dismiss_flag(flag_id: int, body: DismissFlagRequest):
     finally:
         conn.close()
 
+class UndismissFlagRequest(BaseModel):
+    reviewer_id: str
+
+@app.post("/audio/flags/{flag_id}/undismiss")
+def audio_undismiss_flag(flag_id: int, body: UndismissFlagRequest):
+    """Restore a dismissed flag back to ACTIVE."""
+    conn = get_audio_connection()
+    try:
+        with conn:
+            target = conn.execute(
+                "SELECT flag_id, s_id, parent_flag_id FROM audio_flags WHERE flag_id = ?",
+                (flag_id,),
+            ).fetchone()
+            if target is None:
+                raise HTTPException(status_code=404, detail=f"Audio flag {flag_id} not found")
+
+            s_id = target["s_id"]
+            _reject_if_audio_locked(_audio_session_or_404(s_id))
+            original_flag_id = target["parent_flag_id"] if target["parent_flag_id"] else flag_id
+
+            conn.execute(
+                "UPDATE audio_flags SET status = 'ACTIVE' WHERE flag_id = ? OR parent_flag_id = ?",
+                (original_flag_id, original_flag_id),
+            )
+
+            conn.execute(
+                """INSERT INTO audio_review_log (s_id, flag_id, action, reviewer_id)
+                   VALUES (?, ?, 'UNDISMISSED', ?)""",
+                (s_id, original_flag_id, body.reviewer_id),
+            )
+            recompute_audio_session_verdict(s_id, conn)
+        return {"success": True}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        conn.close()
+
 
 @app.post("/audio/sessions/{s_id}/confirm-all-flags")
 def audio_confirm_all_flags(s_id: int, body: LockRequest):

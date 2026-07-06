@@ -204,6 +204,14 @@ export function dismissAudioFlag(flagId, reviewerId, note = '') {
   });
 }
 
+export function undismissAudioFlag(flagId, reviewerId) {
+  return request(`/audio/flags/${flagId}/undismiss`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ reviewer_id: reviewerId }),
+  });
+}
+
 export function confirmAllAudioFlags(sId, reviewerId) {
   return request(`/audio/sessions/${sId}/confirm-all-flags`, {
     method: 'POST',
