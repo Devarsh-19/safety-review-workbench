@@ -6,7 +6,7 @@ const STYLES = {
   REVIEWED:             { bg: C.accentLight, border: '#9FE1CB', text: C.accentDark,    label: 'REVIEWED'             },
   CONFIRMED:            { bg: C.accentLight, border: '#9FE1CB', text: C.accentDark,    label: 'CONFIRMED'            },
   OVERRIDDEN:           { bg: C.accentLight, border: '#9FE1CB', text: C.accentDark,    label: 'OVERRIDDEN'           },
-  SUBMITTED_FOR_REVIEW: { bg: '#EFF6FF',     border: '#B5D4F4', text: '#0C447C',       label: 'SUBMITTED'            },
+  SUBMITTED_FOR_REVIEW: { bg: '#EFF6FF',     border: '#B5D4F4', text: '#0C447C',       label: 'Submitted for L2 Review' },
   NEEDS_FINAL_REVIEW:   { bg: '#FFFBEB',     border: '#FAC775', text: '#854F0B',       label: 'Needs Final Review'   },
   LOCKED:               { bg: '#F1EFE8',     border: '#D3D1C7', text: '#444441',       label: 'LOCKED'               },
 };

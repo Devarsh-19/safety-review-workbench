@@ -204,26 +204,32 @@ export default function SessionQueue({ reviewerName, reviewerRole, onSelectSessi
   const hasFilters   = verdictFilter || statusFilter || assigneeFilter;
 
   const severe           = stats?.count_severe              ?? 0;
-  const flagged          = stats?.count_flagged             ?? 0;
   const clean            = stats?.count_clean               ?? 0;
-  const unprocessed      = stats?.count_unprocessed         ?? 0;
   const locked           = stats?.count_locked              ?? 0;
   const submitted        = stats?.count_submitted           ?? 0;
-  const needsFinalReview = stats?.count_needs_final_review  ?? 0;
+  const flaggedByBoth    = stats?.count_flagged_by_both     ?? 0;
+  const falsePos         = stats?.count_false_positive      ?? 0;
+  const falsePosPct      = stats?.pct_false_positive        ?? 0;
+  const falseNeg         = stats?.count_false_negative      ?? 0;
+  const falseNegPct      = stats?.pct_false_negative        ?? 0;
   const total            = stats?.total_sessions            ?? 0;
   const pending          = stats?.total_pending             ?? 0;
   const reviewed         = total - pending;
 
   const statCells = [
-    { label: 'Severe',         value: severe,           color: C.severeText  },
-    { label: 'Flagged',        value: flagged,           color: C.flaggedText },
-    { label: 'Clean',          value: clean,             color: C.cleanText   },
-    { label: 'Unprocessed',    value: unprocessed,       color: '#444441'     },
-    { label: 'Locked',         value: locked,            color: '#444441'     },
-    { label: 'Submitted',      value: submitted,         color: '#185FA5'     },
-    { label: 'Needs Review',   value: needsFinalReview,  color: '#854F0B'     },
-    { label: 'Total sessions', value: total,             color: C.textPrimary },
-    { label: 'Pending review', value: pending,           color: C.accent      },
+    { label: 'Severe',            value: severe,                              color: C.severeText  },
+    { label: 'Clean',             value: clean,                               color: C.cleanText   },
+    { label: 'Locked',            value: locked,                              color: '#444441'     },
+    { label: 'Submitted for L2 Review', value: submitted,                     color: '#185FA5'     },
+    { label: 'Flagged by Both',   value: flaggedByBoth,                       color: C.severeText  },
+    { label: 'False Positive',
+      value: <>{falsePos} <span style={{ fontSize: 9 }}>({falsePosPct}%)</span></>,
+      color: '#854F0B' },
+    { label: 'False Negative',
+      value: <>{falseNeg} <span style={{ fontSize: 9 }}>({falseNegPct}%)</span></>,
+      color: '#A32D2D' },
+    { label: 'Total sessions',    value: total,                               color: C.textPrimary },
+    { label: 'Pending L1 Review', value: pending,                             color: C.accent      },
   ];
 
   const handleSortClick = (colLabel) => {
@@ -409,7 +415,7 @@ export default function SessionQueue({ reviewerName, reviewerRole, onSelectSessi
           <select style={selectSt} value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
             <option value="">All Statuses</option>
             <option value="PENDING">PENDING</option>
-            <option value="SUBMITTED_FOR_REVIEW">SUBMITTED FOR REVIEW</option>
+            <option value="SUBMITTED_FOR_REVIEW">SUBMITTED FOR L2 REVIEW</option>
             <option value="NEEDS_FINAL_REVIEW">NEEDS FINAL REVIEW</option>
             <option value="REVIEWED">REVIEWED</option>
             <option value="CONFIRMED">CONFIRMED</option>
