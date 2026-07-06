@@ -44,6 +44,7 @@ export function getSessions(filters = {}) {
   add('reviewer_name',  filters.reviewer_name);
   add('reviewer_role',  filters.reviewer_role);
   add('assigned_to',    filters.assigned_to);
+  add('flag_category',  filters.flag_category);
   add('search',         filters.search);
   add('session_type',   filters.session_type);
   add('astrotalk',      filters.astrotalk);

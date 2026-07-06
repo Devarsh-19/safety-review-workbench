@@ -252,6 +252,18 @@ def stats(
                 params,
             ).fetchone()[0]
 
+            # Ingestion provenance — sessions from ingest_llm_sessions.py carry
+            # LLM-source flags or were auto-submitted by reviewer 'LLM';
+            # everything else is treated as manually ingested.
+            llm_ingested = conn.execute(
+                f"""SELECT COUNT(*) FROM sessions
+                    WHERE (reviewer_id = 'LLM' OR submitted_by = 'LLM'
+                           OR EXISTS (SELECT 1 FROM flags f
+                                      WHERE f.session_id = sessions.session_id
+                                        AND f.source = 'LLM')){scope}""",
+                params,
+            ).fetchone()[0]
+
             # Flagged by both AstroTalk AND us (intersection).
             flagged_by_both = conn.execute(
                 f"""SELECT COUNT(*) FROM sessions
@@ -301,6 +313,7 @@ def stats(
             "count_flagged_by_us": 0,
             "count_flagged_by_both": 0,
             "count_llm_flagged": 0, "count_manual_flagged": 0,
+            "count_llm_ingested": 0, "count_manual_ingested": 0,
             "count_false_positive": 0, "pct_false_positive": 0,
             "count_false_negative": 0, "pct_false_negative": 0,
         }
@@ -325,6 +338,8 @@ def stats(
         "count_flagged_by_both":    flagged_by_both,
         "count_llm_flagged":    llm_flagged,
         "count_manual_flagged": manual_flagged,
+        "count_llm_ingested":    llm_ingested,
+        "count_manual_ingested": total - llm_ingested,
         "count_false_positive":     false_pos,
         "pct_false_positive":       round(100 * false_pos / astro_flagged, 1) if astro_flagged else 0,
         "count_false_negative":     false_neg,
@@ -420,6 +435,7 @@ def sessions(
     search:         Optional[str] = None,
     session_type:   Optional[str] = None,
     astrotalk:      Optional[str] = None,          # 'flagged' | 'clean'
+    flag_category:  Optional[str] = None,
     min_confidence: float         = 0,
     min_duration:   Optional[float] = None,
     max_duration:   Optional[float] = None,
@@ -445,6 +461,7 @@ def sessions(
         language=language,
         session_type=session_type,
         astrotalk=astrotalk,
+        flag_category=flag_category,
         min_confidence=min_confidence,
         min_duration=min_duration,
         max_duration=max_duration,
