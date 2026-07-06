@@ -235,6 +235,23 @@ def stats(
                 f"SELECT COUNT(*) FROM sessions WHERE {_FLAGGED_BY_US_SQL}{scope}",
                 params,
             ).fetchone()[0]
+            # Distinct sessions (out of all) that carry at least one active
+            # LLM flag / at least one active MANUAL flag.
+            llm_flagged = conn.execute(
+                f"""SELECT COUNT(*) FROM sessions
+                    WHERE EXISTS (SELECT 1 FROM flags f
+                                  WHERE f.session_id = sessions.session_id
+                                    AND f.source = 'LLM' AND {_ACTIVE_FLAG}){scope}""",
+                params,
+            ).fetchone()[0]
+            manual_flagged = conn.execute(
+                f"""SELECT COUNT(*) FROM sessions
+                    WHERE EXISTS (SELECT 1 FROM flags f
+                                  WHERE f.session_id = sessions.session_id
+                                    AND f.source = 'MANUAL' AND {_ACTIVE_FLAG}){scope}""",
+                params,
+            ).fetchone()[0]
+
             # Flagged by both AstroTalk AND us (intersection).
             flagged_by_both = conn.execute(
                 f"""SELECT COUNT(*) FROM sessions
@@ -283,6 +300,7 @@ def stats(
             "count_astrotalk_flagged": 0, "count_astrotalk_clean": 0,
             "count_flagged_by_us": 0,
             "count_flagged_by_both": 0,
+            "count_llm_flagged": 0, "count_manual_flagged": 0,
             "count_false_positive": 0, "pct_false_positive": 0,
             "count_false_negative": 0, "pct_false_negative": 0,
         }
@@ -305,6 +323,8 @@ def stats(
         "count_astrotalk_clean":    astro_clean,
         "count_flagged_by_us":      flagged_by_us,
         "count_flagged_by_both":    flagged_by_both,
+        "count_llm_flagged":    llm_flagged,
+        "count_manual_flagged": manual_flagged,
         "count_false_positive":     false_pos,
         "pct_false_positive":       round(100 * false_pos / astro_flagged, 1) if astro_flagged else 0,
         "count_false_negative":     false_neg,

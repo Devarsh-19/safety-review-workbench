@@ -210,6 +210,8 @@ export default function SessionQueue({ reviewerName, reviewerRole, onSelectSessi
   const flaggedByBoth    = stats?.count_flagged_by_both     ?? 0;
   const astroFlagged     = stats?.count_astrotalk_flagged   ?? 0;
   const astroClean       = stats?.count_astrotalk_clean     ?? 0;
+  const llmFlagged       = stats?.count_llm_flagged          ?? 0;
+  const manualFlagged    = stats?.count_manual_flagged       ?? 0;
   const falsePos         = stats?.count_false_positive      ?? 0;
   const falsePosPct      = stats?.pct_false_positive        ?? 0;
   const falseNeg         = stats?.count_false_negative      ?? 0;
@@ -223,6 +225,11 @@ export default function SessionQueue({ reviewerName, reviewerRole, onSelectSessi
     { label: 'Clean',             value: clean,                               color: C.cleanText   },
     { label: 'Locked',            value: locked,                              color: '#444441'     },
     { label: 'Submitted for L2 Review', value: submitted,                     color: '#185FA5'     },
+    { label: 'LLM / Manual Flagged',
+      value: <><span style={{ color: '#185FA5' }}>{llmFlagged}</span>
+        <span style={{ color: C.textMuted }}> / </span>
+        <span style={{ color: '#7F77DD' }}>{manualFlagged}</span></>,
+      color: C.textPrimary },
     { label: 'Flagged by Both',   value: flaggedByBoth,                       color: C.severeText  },
     { label: 'False Positive',
       value: <>{falsePos} <span style={{ fontSize: 9 }}>({falsePosPct}%)</span></>,
