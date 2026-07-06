@@ -1211,7 +1211,7 @@ def audio_confirm_all_flags(s_id: int, body: LockRequest):
             to_confirm = [
                 r["flag_id"] for r in rows
                 if (r["parent_flag_id"] is not None or r["flag_id"] not in amended_parents)
-                and r["status"] != "CONFIRMED"
+                and r["status"] not in ("CONFIRMED", "DISMISSED")
             ]
             for fid in to_confirm:
                 conn.execute(

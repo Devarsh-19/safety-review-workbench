@@ -63,6 +63,14 @@ def ingest_session(conn, obj: dict) -> tuple[int, int, int]:
     verdict    = get_db_verdict_for_flags(intent_codes)
     confidence = get_db_confidence_for_verdict(verdict)
 
+    # Parse astrotalk verdict
+    astrotalk_val = obj.get("astrotalk")
+    astrotalk_verdict = None
+    if astrotalk_val == 0:
+        astrotalk_verdict = 'CLEAN'
+    elif astrotalk_val == 1:
+        astrotalk_verdict = 'FLAGGED'
+
     existing = conn.execute(
         "SELECT s_id FROM audio_sessions WHERE s_id = ?", (s_id,)
     ).fetchone()
@@ -72,10 +80,11 @@ def ingest_session(conn, obj: dict) -> tuple[int, int, int]:
         conn.execute(
             """UPDATE audio_sessions
                SET lang = ?, pauses = ?, needs_review = ?, overall_verdict = ?,
-                   confidence_score = ?, audio_url = COALESCE(?, audio_url)
+                   confidence_score = ?, astrotalk_verdict = COALESCE(?, astrotalk_verdict),
+                   audio_url = COALESCE(?, audio_url)
                WHERE s_id = ?""",
             (obj.get("lang"), json.dumps(obj.get("long_pauses") or obj.get("pauses") or []),
-             1 if obj.get("review") else 0, verdict, confidence,
+             1 if obj.get("review") else 0, verdict, confidence, astrotalk_verdict,
              obj.get("audio_url"), s_id),
         )
         conn.execute("DELETE FROM audio_flags WHERE s_id = ?", (s_id,))
@@ -83,10 +92,10 @@ def ingest_session(conn, obj: dict) -> tuple[int, int, int]:
     else:
         conn.execute(
             """INSERT INTO audio_sessions
-                   (s_id, lang, pauses, needs_review, overall_verdict, confidence_score, audio_url)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                   (s_id, lang, pauses, needs_review, overall_verdict, confidence_score, astrotalk_verdict, audio_url)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
             (s_id, obj.get("lang"), json.dumps(obj.get("long_pauses") or obj.get("pauses") or []),
-             1 if obj.get("review") else 0, verdict, confidence, obj.get("audio_url")),
+             1 if obj.get("review") else 0, verdict, confidence, astrotalk_verdict, obj.get("audio_url")),
         )
 
     for seg in segments:

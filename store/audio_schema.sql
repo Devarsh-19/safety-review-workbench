@@ -9,6 +9,7 @@ CREATE TABLE IF NOT EXISTS audio_sessions (
     speaker1_role       TEXT,                               -- 'ASTROLOGER' | 'USER' — assigned by reviewer, NULL until set
     speaker2_role       TEXT,
     overall_verdict     TEXT,                               -- 'CLEAN', 'FLAGGED', 'SEVERE' (same rules as chat: engine/verdict_rules.py)
+    astrotalk_verdict   TEXT,                               -- 'CLEAN', 'FLAGGED' (from ingestion JSON)
     review_status       TEXT    DEFAULT 'PENDING',          -- 'PENDING', 'SUBMITTED_FOR_REVIEW', 'LOCKED', 'REVIEWED' (after unlock, same as chat)
     reviewer_id         TEXT,
     reviewer_note       TEXT,

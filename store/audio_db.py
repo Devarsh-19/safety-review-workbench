@@ -36,6 +36,7 @@ def initialise_audio_db() -> None:
         "ALTER TABLE audio_sessions ADD COLUMN audio_url TEXT",         # HLS (.m3u8) recording URL
         "ALTER TABLE audio_flags ADD COLUMN reasoning TEXT",            # reviewer note on amendments
         "ALTER TABLE audio_sessions ADD COLUMN confidence_score REAL",  # verdict confidence, same scale as chat
+        "ALTER TABLE audio_sessions ADD COLUMN astrotalk_verdict TEXT", # verdict from original astrotalk pipeline
         # Flag-level audit trail, same as chat's flags table
         "ALTER TABLE audio_flags ADD COLUMN confirmed_by TEXT",
         "ALTER TABLE audio_flags ADD COLUMN confirmed_at TEXT",

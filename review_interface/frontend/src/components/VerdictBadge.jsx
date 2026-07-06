@@ -18,6 +18,7 @@ const LABELS = {
 };
 
 export default function VerdictBadge({ verdict }) {
+  if (!verdict) return <span style={{ color: C.textMuted }}>—</span>;
   const s = MAP[verdict] || { bg: C.bgStatsrow, border: C.border, text: C.textMuted };
   const label = LABELS[verdict] || verdict;
   return (
