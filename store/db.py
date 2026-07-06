@@ -216,9 +216,11 @@ def fetch_sessions_page(
     # defaults or any explicit status filter.
     if reviewer_name == "Locked":
         where.append("s.review_status = 'LOCKED'")
-    # Role-based default visibility — only when no explicit status filter is set.
+    # Role-based default visibility — only when no explicit status filter is
+    # set AND no flag-category filter is active (filtering by flag should show
+    # every matching session regardless of review status).
     # L2 works the post-submission queue: no PENDING (still with L1), no LOCKED.
-    elif not status:
+    elif not status and not flag_category:
         if reviewer_role == "L1":
             where.append("s.review_status NOT IN ('SUBMITTED_FOR_REVIEW','LOCKED')")
         elif reviewer_role == "L2":
