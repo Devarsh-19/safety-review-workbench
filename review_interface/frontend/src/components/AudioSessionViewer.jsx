@@ -247,10 +247,14 @@ export default function AudioSessionViewer({ sId, reviewerName, reviewerRole, on
             const dismissed = f.status === 'DISMISSED';
             const isEditing = editingFlag === f.flag_id;
             const isDismissing = dismissingFlagId === f.flag_id;
-            return (
+              const isSevere = f.severity === 'SEVERE' || f.severity === 'HIGH' || f.severity === 'RED';
+              const isFlagged = f.severity === 'FLAGGED' || f.severity === 'MEDIUM' || f.severity === 'AMBER';
+              return (
               <div key={f.flag_id} style={{
-                border: dismissed ? `1px dashed ${C.border}` : `1px solid ${confirmed ? C.cleanBorder : C.flaggedBorder}`,
-                background: dismissed ? C.bgMuted : (confirmed ? C.cleanBg : C.flaggedBg),
+                border: dismissed ? `1px dashed ${C.border}`
+                  : `1px solid ${confirmed ? (isSevere ? C.severeBorder : isFlagged ? C.flaggedBorder : C.cleanBorder) : C.flaggedBorder}`,
+                background: dismissed ? C.bgMuted
+                  : (confirmed ? (isSevere ? C.severeBg : isFlagged ? C.flaggedBg : C.cleanBg) : C.flaggedBg),
                 borderRadius: 5,
                 padding: '10px 12px',
                 marginBottom: 8,

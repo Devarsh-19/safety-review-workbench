@@ -6,8 +6,10 @@ import { C, MONO } from '../tokens';
 const MAP = {
   SEVERE:       { bg: C.severeBg,  border: C.severeBorder,  text: C.severeText  },
   HIGH:         { bg: C.severeBg,  border: C.severeBorder,  text: C.severeText  },
+  RED:          { bg: C.severeBg,  border: C.severeBorder,  text: C.severeText  },
   FLAGGED:      { bg: C.flaggedBg, border: C.flaggedBorder, text: C.flaggedText },
   MEDIUM:       { bg: C.flaggedBg, border: C.flaggedBorder, text: C.flaggedText },
+  AMBER:        { bg: C.flaggedBg, border: C.flaggedBorder, text: C.flaggedText },
   CLEAN:        { bg: C.cleanBg,   border: C.cleanBorder,   text: C.cleanText   },
   LOW:          { bg: C.cleanBg,   border: C.cleanBorder,   text: C.cleanText   },
   UNPROCESSED:  { bg: '#F1EFE8',   border: '#D3D1C7',       text: '#444441'     },

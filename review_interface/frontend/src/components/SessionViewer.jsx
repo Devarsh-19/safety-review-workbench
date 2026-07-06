@@ -812,9 +812,9 @@ export default function SessionViewer({ sessionId, sessionList, reviewerName, re
                       padding: '10px 14px',
                       borderRadius: isAstrologer ? '0 8px 8px 8px' : '8px 0 8px 8px',
                       fontSize: 13, lineHeight: 1.6,
-                      background: turnFlags.length > 0 ? '#FCEBEB' : (isAstrologer ? '#F1F5F9' : '#EFF6FF'),
-                      color: turnFlags.length > 0 ? '#791F1F' : C.textPrimary,
-                      border: turnFlags.length > 0 ? '1px solid #F7C1C1' : undefined,
+                      background: turnFlags.length > 0 ? flagBg : (isAstrologer ? '#F1F5F9' : '#EFF6FF'),
+                      color: turnFlags.length > 0 ? flagTextColor : C.textPrimary,
+                      border: turnFlags.length > 0 ? `1px solid ${flagColor}` : undefined,
                       wordBreak: 'break-word', flex: 1,
                       boxShadow: highlightedTurnIdx === idx ? '0 0 0 3px #F0C419' : undefined,
                       transition: 'box-shadow 0.4s ease-out',
@@ -1053,6 +1053,9 @@ export default function SessionViewer({ sessionId, sessionList, reviewerName, re
                 const isConfirmedStatus = flag.status === 'CONFIRMED';
                 const scrollMsg     = flagScrollMsg[flag.flag_id];
 
+                const isSevere = flag.severity === 'SEVERE' || flag.severity === 'HIGH' || flag.severity === 'RED';
+                const isFlagged = flag.severity === 'FLAGGED' || flag.severity === 'MEDIUM' || flag.severity === 'AMBER';
+
                 return (
                   <div
                     key={flag.flag_id ?? fi}
@@ -1060,10 +1063,12 @@ export default function SessionViewer({ sessionId, sessionList, reviewerName, re
                     onMouseEnter={() => setFlagCardHoverId(flag.flag_id)}
                     onMouseLeave={() => setFlagCardHoverId(null)}
                     style={{
-                      background: isConfirmedStatus ? '#F0FAF6'
+                      background: isConfirmedStatus
+                        ? (isSevere ? C.severeBg : isFlagged ? C.flaggedBg : C.cleanBg)
                         : (isHoveredCard && !isEditing && !isDismissConf ? '#FAFAF8' : C.bgSurface),
                       border: `1px solid ${
-                        isConfirmedStatus ? '#9FE1CB'
+                        isConfirmedStatus
+                        ? (isSevere ? C.severeBorder : isFlagged ? C.flaggedBorder : C.cleanBorder)
                         : isHoveredCard && !isEditing && !isDismissConf ? '#D4D0C9'
                         : C.border}`,
                       borderRadius: 6, padding: '14px 16px', marginBottom: 10,
