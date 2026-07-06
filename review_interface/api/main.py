@@ -1078,18 +1078,20 @@ def audio_amend_flag(flag_id: int, body: AmendAudioFlagRequest):
             conn.execute("DELETE FROM audio_flags WHERE parent_flag_id = ?", (original_flag_id,))
 
             original = conn.execute(
-                "SELECT seg_id, transcript, conf FROM audio_flags WHERE flag_id = ?",
+                "SELECT seg_id, ts_start, ts_end, transcript, conf FROM audio_flags WHERE flag_id = ?",
                 (original_flag_id,),
             ).fetchone()
 
             cur = conn.execute(
                 """INSERT INTO audio_flags
-                       (s_id, seg_id, intent, severity, conf, transcript,
+                       (s_id, seg_id, ts_start, ts_end, intent, severity, conf, transcript,
                         source, status, parent_flag_id, reasoning, created_by)
-                   VALUES (?, ?, ?, ?, ?, ?, 'MANUAL', 'ACTIVE', ?, ?, ?)""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'MANUAL', 'ACTIVE', ?, ?, ?)""",
                 (
                     s_id,
                     original["seg_id"] if original else target["seg_id"],
+                    original["ts_start"] if original else None,
+                    original["ts_end"] if original else None,
                     body.intent,
                     body.severity,
                     1.0,

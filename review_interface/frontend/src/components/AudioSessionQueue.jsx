@@ -18,25 +18,66 @@ function formatDuration(seconds) {
   return `${pad(h)}:${pad(m)}:${pad(sec)}`;
 }
 
+function getHasVideoState(value) {
+  if (value === null || value === undefined || value === '') return null;
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    if (!normalized) return null;
+    if (['true', '1', 'yes'].includes(normalized)) return true;
+    if (['false', '0', 'no'].includes(normalized)) return false;
+  }
+  return Boolean(value);
+}
+
+function HasVideoBadge({ value }) {
+  const hasVideo = getHasVideoState(value);
+  const label = hasVideo == null ? 'Unknown' : hasVideo ? 'Yes' : 'No';
+  const palette = hasVideo == null
+    ? { bg: C.bgMuted, border: C.border, text: C.textSecondary }
+    : hasVideo
+      ? { bg: C.flaggedBg, border: C.flaggedBorder, text: C.flaggedText }
+      : { bg: C.cleanBg, border: C.cleanBorder, text: C.cleanText };
+
+  return (
+    <span style={{
+      display: 'inline-flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      minWidth: 44,
+      padding: '2px 8px',
+      borderRadius: 999,
+      border: `1px solid ${palette.border}`,
+      background: palette.bg,
+      color: palette.text,
+      fontSize: 11,
+      fontFamily: MONO,
+      textTransform: 'uppercase',
+      letterSpacing: '0.04em',
+    }}>
+      {label}
+    </span>
+  );
+}
+
 const STATUS_FILTERS = [
-  { value: '',                     label: 'All statuses' },
-  { value: 'PENDING',              label: 'Pending' },
+  { value: '', label: 'All statuses' },
+  { value: 'PENDING', label: 'Pending' },
   { value: 'SUBMITTED_FOR_REVIEW', label: 'Submitted' },
-  { value: 'LOCKED',               label: 'Locked' },
-  { value: 'REVIEWED',             label: 'Reviewed (unlocked)' },
+  { value: 'LOCKED', label: 'Locked' },
+  { value: 'REVIEWED', label: 'Reviewed (unlocked)' },
 ];
 
 export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelectSession }) {
-  const [rows,    setRows]    = useState([]);
-  const [total,   setTotal]   = useState(0);
-  const [stats,   setStats]   = useState(null);
-  const [status,  setStatus]  = useState('');
-  const [search,  setSearch]  = useState('');
-  const [page,    setPage]    = useState(0);
+  const [rows, setRows] = useState([]);
+  const [total, setTotal] = useState(0);
+  const [stats, setStats] = useState(null);
+  const [status, setStatus] = useState('');
+  const [search, setSearch] = useState('');
+  const [page, setPage] = useState(0);
   const [sortCol, setSortCol] = useState('s_id');
   const [sortDir, setSortDir] = useState('asc');
   const [loading, setLoading] = useState(true);
-  const [error,   setError]   = useState('');
+  const [error, setError] = useState('');
 
   const load = useCallback(() => {
     setLoading(true);
@@ -69,12 +110,12 @@ export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelect
   };
 
   const statCells = [
-    { label: 'Total',     value: stats?.total_sessions ?? 0 },
-    { label: 'Pending',   value: stats?.total_pending  ?? 0 },
+    { label: 'Total', value: stats?.total_sessions ?? 0 },
+    { label: 'Pending', value: stats?.total_pending ?? 0 },
     { label: 'Submitted', value: stats?.count_submitted ?? 0 },
-    { label: 'Locked',    value: stats?.count_locked   ?? 0 },
-    { label: 'Severe',    value: stats?.count_severe   ?? 0 },
-    { label: 'Flagged',   value: stats?.count_flagged  ?? 0 },
+    { label: 'Locked', value: stats?.count_locked ?? 0 },
+    { label: 'Severe', value: stats?.count_severe ?? 0 },
+    { label: 'Flagged', value: stats?.count_flagged ?? 0 },
   ];
 
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
@@ -90,6 +131,7 @@ export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelect
 
   const TABLE_COLUMNS = [
     { key: 's_id', label: 'Session', sortable: true },
+    { key: 'has_video', label: 'Video', sortable: false },
     { key: 'lang', label: 'Language', sortable: false },
     { key: 'duration', label: 'Duration', sortable: true },
     { key: 'segments', label: 'Segments', sortable: true },
@@ -252,10 +294,10 @@ export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelect
             </thead>
             <tbody>
               {loading ? (
-                <tr><td colSpan={reviewerRole === 'L2' ? 12 : 11} style={{ padding: 32, textAlign: 'center' }}><LoadingSpinner /></td></tr>
+                <tr><td colSpan={reviewerRole === 'L2' ? 13 : 12} style={{ padding: 32, textAlign: 'center' }}><LoadingSpinner /></td></tr>
               ) : rows.length === 0 ? (
                 <tr>
-                  <td colSpan={reviewerRole === 'L2' ? 12 : 11} style={{ padding: 32, textAlign: 'center', color: C.textSecondary }}>
+                  <td colSpan={reviewerRole === 'L2' ? 13 : 12} style={{ padding: 32, textAlign: 'center', color: C.textSecondary }}>
                     No audio sessions. Ingest results with scripts/ingest_audio_results.py
                     {reviewerRole === 'L1' ? ' — or none are assigned to you yet (scripts/assign_audio_sessions.py).' : '.'}
                   </td>
@@ -268,6 +310,7 @@ export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelect
                   onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; }}
                 >
                   <td style={{ padding: '10px 14px', fontFamily: MONO }}>{r.s_id}</td>
+                  <td style={{ padding: '10px 14px' }}><HasVideoBadge value={r.has_video} /></td>
                   <td style={{ padding: '10px 14px' }}>{r.lang || '—'}</td>
                   <td style={{ padding: '10px 14px', fontFamily: MONO }}>{formatDuration(r.duration_seconds)}</td>
                   <td style={{ padding: '10px 14px', fontFamily: MONO }}>{r.segment_count}</td>

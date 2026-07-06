@@ -28,24 +28,63 @@ function formatTime(seconds) {
   return `${pad(h)}:${pad(m)}:${pad(sec)}`;
 }
 
+function getHasVideoState(value) {
+  if (value === null || value === undefined || value === '') return null;
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    if (!normalized) return null;
+    if (['true', '1', 'yes'].includes(normalized)) return true;
+    if (['false', '0', 'no'].includes(normalized)) return false;
+  }
+  return Boolean(value);
+}
+
+function HasVideoBadge({ value }) {
+  const hasVideo = getHasVideoState(value);
+  const label = hasVideo == null ? 'Video Unknown' : hasVideo ? 'Video Present' : 'Audio Only';
+  const palette = hasVideo == null
+    ? { bg: C.bgMuted, border: C.border, text: C.textSecondary }
+    : hasVideo
+      ? { bg: C.flaggedBg, border: C.flaggedBorder, text: C.flaggedText }
+      : { bg: C.cleanBg, border: C.cleanBorder, text: C.cleanText };
+
+  return (
+    <span style={{
+      display: 'inline-flex',
+      alignItems: 'center',
+      padding: '3px 10px',
+      borderRadius: 999,
+      border: `1px solid ${palette.border}`,
+      background: palette.bg,
+      color: palette.text,
+      fontSize: 11,
+      fontFamily: MONO,
+      textTransform: 'uppercase',
+      letterSpacing: '0.04em',
+    }}>
+      {label}
+    </span>
+  );
+}
+
 const ROLES = ['ASTROLOGER', 'USER'];
 const opposite = (role) => (role === 'ASTROLOGER' ? 'USER' : 'ASTROLOGER');
 const SEVERITIES = ['LOW', 'MEDIUM', 'HIGH'];
 
 export default function AudioSessionViewer({ sId, reviewerName, reviewerRole, onBack }) {
-  const [detail,  setDetail]  = useState(null);
+  const [detail, setDetail] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [error,   setError]   = useState('');
-  const [busy,    setBusy]    = useState(false);
-  const [note,    setNote]    = useState('');
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState('');
   const [playerError, setPlayerError] = useState('');
   const [editingFlag, setEditingFlag] = useState(null);   // flag_id being edited
   const [dismissingFlagId, setDismissingFlagId] = useState(null);
-  const [editIntent,    setEditIntent]    = useState('');
-  const [editSeverity,  setEditSeverity]  = useState('MEDIUM');
+  const [editIntent, setEditIntent] = useState('');
+  const [editSeverity, setEditSeverity] = useState('MEDIUM');
   const [editReasoning, setEditReasoning] = useState('');
   const audioRef = useRef(null);
-  const hlsRef   = useRef(null);
+  const hlsRef = useRef(null);
 
   // Refreshes after actions keep the current content (and the playing audio
   // element!) mounted — the full-screen spinner only shows on first load.
@@ -62,10 +101,10 @@ export default function AudioSessionViewer({ sId, reviewerName, reviewerRole, on
 
   useEffect(() => { load(); }, [load]);
 
-  const session  = detail?.session;
+  const session = detail?.session;
   const segments = detail?.segments || [];
-  const flags    = detail?.flags || [];
-  const locked   = session?.review_status === 'LOCKED';
+  const flags = detail?.flags || [];
+  const locked = session?.review_status === 'LOCKED';
   const isSubmitted = session?.review_status === 'SUBMITTED_FOR_REVIEW';
   const isReviewed = session?.review_status === 'REVIEWED';
   const flagsEditable = !locked && (reviewerRole === 'L2' ? true : session?.review_status === 'PENDING');
@@ -107,7 +146,7 @@ export default function AudioSessionViewer({ sId, reviewerName, reviewerRole, on
     const audio = audioRef.current;
     if (!audio || !audioUrl) return;
     audio.currentTime = Math.max(0, Number(seconds) || 0);
-    audio.play().catch(() => {});
+    audio.play().catch(() => { });
   };
 
   // Distinct raw speaker labels, in order of appearance -> lane 1 and lane 2.
@@ -131,7 +170,13 @@ export default function AudioSessionViewer({ sId, reviewerName, reviewerRole, on
   const unactionedCount = activeFlags.filter((f) => f.status !== 'CONFIRMED' && f.status !== 'DISMISSED').length;
 
   const flagsForSpeaker = (label) =>
-    activeFlags.filter((f) => segById[f.seg_id]?.speaker === label);
+    activeFlags
+      .filter((f) => segById[f.seg_id]?.speaker === label)
+      .sort((a, b) => {
+        const aStart = Number(a.ts_start ?? segById[a.seg_id]?.ts_start ?? Number.MAX_SAFE_INTEGER);
+        const bStart = Number(b.ts_start ?? segById[b.seg_id]?.ts_start ?? Number.MAX_SAFE_INTEGER);
+        return aStart - bStart;
+      });
 
   const startEdit = (f) => {
     setEditingFlag(f.flag_id);
@@ -247,9 +292,9 @@ export default function AudioSessionViewer({ sId, reviewerName, reviewerRole, on
             const dismissed = f.status === 'DISMISSED';
             const isEditing = editingFlag === f.flag_id;
             const isDismissing = dismissingFlagId === f.flag_id;
-              const isSevere = f.severity === 'SEVERE' || f.severity === 'HIGH' || f.severity === 'RED';
-              const isFlagged = f.severity === 'FLAGGED' || f.severity === 'MEDIUM' || f.severity === 'AMBER';
-              return (
+            const isSevere = f.severity === 'SEVERE' || f.severity === 'HIGH' || f.severity === 'RED';
+            const isFlagged = f.severity === 'FLAGGED' || f.severity === 'MEDIUM' || f.severity === 'AMBER';
+            return (
               <div key={f.flag_id} style={{
                 border: dismissed ? `1px dashed ${C.border}`
                   : `1px solid ${confirmed ? (isSevere ? C.severeBorder : isFlagged ? C.flaggedBorder : C.cleanBorder) : C.flaggedBorder}`,
@@ -525,6 +570,7 @@ export default function AudioSessionViewer({ sId, reviewerName, reviewerRole, on
               </span>
               <VerdictBadge verdict={session.overall_verdict} />
               <StatusBadge status={session.review_status} />
+              <HasVideoBadge value={session.has_video} />
               <span style={{ fontSize: 12, color: C.textSecondary }}>
                 {session.lang || 'unknown language'} · {segments.length} segments · {activeFlags.length} flags
                 {unactionedCount > 0 ? ` (${unactionedCount} unactioned)` : ''}
@@ -556,6 +602,13 @@ export default function AudioSessionViewer({ sId, reviewerName, reviewerRole, on
                   letterSpacing: '0.05em', color: C.textSecondary, marginBottom: 8,
                 }}>
                   Recording — click any flagged timestamp below to jump to it
+                </div>
+                <div style={{ fontSize: 12, color: C.textSecondary, marginBottom: 10 }}>
+                  Source media: {getHasVideoState(session.has_video) == null
+                    ? 'video status unknown'
+                    : getHasVideoState(session.has_video)
+                      ? 'contains a video stream'
+                      : 'audio only'}
                 </div>
                 <audio ref={audioRef} controls preload="metadata" style={{ width: '100%' }} />
                 {playerError && (

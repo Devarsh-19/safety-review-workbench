@@ -27,7 +27,7 @@ from urllib.parse import urlparse
 import pandas as pd
 from google import genai
 from google.genai import types
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
 import prompts
 
@@ -39,10 +39,15 @@ DEFAULT_AUDIO_DIR = BASE_DIR / "audio_files"
 DEFAULT_OUTPUT_CSV = BASE_DIR / "data" / "gemini_audio_results.csv"
 DEFAULT_OUTPUT_JSONL = BASE_DIR / "data" / "gemini_audio_results.jsonl"
 DEFAULT_RAW_JSON_DIR = BASE_DIR / "data" / "raw_json"
+DEFAULT_JSON_DIR = BASE_DIR / "data"
 DEFAULT_MODEL_ID = "gemini-3-flash-preview"
 DEFAULT_THINKING_LEVEL = "minimal"
 LONG_PAUSE_THRESHOLD_SECONDS = 60.0
 SILENCE_NOISE_THRESHOLD = "-45dB"
+FALLBACK_RETRY_USER_MESSAGE = (
+    "Your previous response did not validate. Retry once with a compact reply and return only one valid JSON "
+    "object that matches the schema exactly, with no markdown or extra commentary."
+)
 
 
 # Gemini 3 Flash Preview standard paid rates, USD per 1M tokens.
@@ -233,6 +238,27 @@ def convert_to_mp3(recording_url: str, output_path: Path, force: bool = False) -
         raise RuntimeError(f"ffmpeg conversion failed: {result.stderr.strip()}")
 
 
+def probe_has_video(media_source: str) -> bool | None:
+    """Best-effort video probe for the source media."""
+    cmd = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-select_streams",
+        "v",
+        "-show_entries",
+        "stream=index",
+        "-of",
+        "csv=p=0",
+        media_source,
+    ]
+    result = _run_subprocess(cmd)
+    if result.returncode != 0:
+        print(f"[WARN] ffprobe video probe failed for {media_source}: {result.stderr.strip()}")
+        return None
+    return any(line.strip() for line in result.stdout.splitlines())
+
+
 def probe_audio_duration(audio_path: Path) -> float:
     cmd = [
         "ffprobe",
@@ -315,6 +341,28 @@ def long_pauses_to_json(long_pauses: list[LongPause]) -> str:
     return json.dumps([pause.model_dump() for pause in long_pauses], ensure_ascii=False)
 
 
+def build_audio_prompt(
+    session_id: str,
+    audio_duration_seconds: float,
+    local_long_pauses: list[LongPause],
+    *,
+    retry_compact: bool = False,
+) -> str:
+    prompt = (
+        f"audio_duration_seconds: {audio_duration_seconds}\n"
+        "All ts_start and ts_end values must be seconds from the beginning "
+        "of this audio and must be within the audio duration.\n"
+        f"local_long_pause_candidates_json: {long_pauses_to_json(local_long_pauses)}\n"
+        "If local_long_pause_candidates_json is not empty, include those spans in long_pauses "
+        "and set review to true.\n\n"
+        + prompts.USER_MESSAGE.replace("{s_id}", session_id)
+    )
+    if retry_compact:
+        retry_user_message = getattr(prompts, "RETRY_USER_MESSAGE", "").strip() or FALLBACK_RETRY_USER_MESSAGE
+        prompt += "\n\n" + retry_user_message
+    return prompt
+
+
 def gemini_safety_settings() -> list[types.SafetySetting]:
     return [
         types.SafetySetting(category=cat, threshold="OFF")
@@ -344,6 +392,29 @@ def calculate_cache_storage_cost_usd(token_count: int, ttl: str) -> float:
         print(f"[WARN] Could not parse cache TTL {ttl!r}; cache storage cost set to 0.")
         ttl_hours = 0.0
     return token_count * ttl_hours * CACHE_STORAGE_RATE_PER_HOUR
+
+
+def build_thinking_config(
+    model_id: str,
+    thinking_level: str | None = DEFAULT_THINKING_LEVEL,
+    thinking_budget: int | None = None,
+    include_thoughts: bool = False,
+) -> types.ThinkingConfig:
+    del model_id
+
+    config_kwargs: dict[str, Any] = {"include_thoughts": include_thoughts}
+    normalized_level = (thinking_level or "").strip().lower()
+
+    if thinking_budget is not None:
+        config_kwargs["thinking_budget"] = int(thinking_budget)
+    elif normalized_level == "minimal":
+        config_kwargs["thinking_budget"] = 0
+    elif normalized_level:
+        config_kwargs["thinking_level"] = normalized_level
+    else:
+        config_kwargs["thinking_budget"] = 0
+
+    return types.ThinkingConfig(**config_kwargs)
 
 
 def create_gemini_cache(client: genai.Client, model_id: str, ttl: str) -> GeminiCacheInfo | None:
@@ -481,11 +552,170 @@ def normalize_long_pause_duration(pause: LongPause) -> LongPause:
     return pause
 
 
+def _segment_overlap_seconds(
+    flag_ts_start: float,
+    flag_ts_end: float,
+    segment: DiarizedSegment,
+) -> float:
+    return max(0.0, min(flag_ts_end, float(segment.ts_end)) - max(flag_ts_start, float(segment.ts_start)))
+
+
+def _ordered_segment_candidates(
+    segments: list[DiarizedSegment],
+    *,
+    speaker: str | None,
+    flag_ts_start: float | None,
+    flag_ts_end: float | None,
+) -> list[DiarizedSegment]:
+    if not segments:
+        return []
+
+    if flag_ts_start is None and flag_ts_end is None:
+        if speaker:
+            same_speaker = [segment for segment in segments if segment.speaker == speaker]
+            if same_speaker:
+                return same_speaker
+        return segments
+
+    if flag_ts_start is None:
+        flag_ts_start = flag_ts_end
+    if flag_ts_end is None:
+        flag_ts_end = flag_ts_start
+
+    assert flag_ts_start is not None
+    assert flag_ts_end is not None
+
+    def sort_key(segment: DiarizedSegment) -> tuple[float, float, int]:
+        overlap = _segment_overlap_seconds(flag_ts_start, flag_ts_end, segment)
+        start_distance = min(
+            abs(float(segment.ts_start) - flag_ts_start),
+            abs(float(segment.ts_end) - flag_ts_start),
+        )
+        return (-overlap, start_distance, int(segment.segment_id))
+
+    def ordered(pool: list[DiarizedSegment]) -> list[DiarizedSegment]:
+        if not pool:
+            return []
+        containing_start = [
+            segment
+            for segment in pool
+            if float(segment.ts_start) - 0.001 <= flag_ts_start <= float(segment.ts_end) + 0.001
+        ]
+        if containing_start:
+            return sorted(containing_start, key=sort_key)
+        overlapping = [
+            segment
+            for segment in pool
+            if _segment_overlap_seconds(flag_ts_start, flag_ts_end, segment) > 0
+        ]
+        if overlapping:
+            return sorted(overlapping, key=sort_key)
+        return sorted(pool, key=sort_key)
+
+    if speaker:
+        same_speaker = [segment for segment in segments if segment.speaker == speaker]
+        speaker_matches = ordered(same_speaker)
+        if speaker_matches:
+            return speaker_matches
+
+    return ordered(segments)
+
+
+def resolve_flag_segment(
+    flag: FlagEntry,
+    ordered_segments: list[DiarizedSegment],
+) -> DiarizedSegment | None:
+    if flag.segment_id is not None:
+        exact_match = next(
+            (segment for segment in ordered_segments if int(segment.segment_id) == int(flag.segment_id)),
+            None,
+        )
+        if exact_match is not None:
+            return exact_match
+
+    candidates = _ordered_segment_candidates(
+        ordered_segments,
+        speaker=flag.speaker,
+        flag_ts_start=float(flag.ts_start),
+        flag_ts_end=float(flag.ts_end),
+    )
+    return candidates[0] if candidates else None
+
+
+def _localize_flag_span_to_segment(
+    flag: FlagEntry,
+    segment: DiarizedSegment | None,
+) -> tuple[float, float]:
+    if segment is None:
+        return float(flag.ts_start), float(flag.ts_end)
+
+    seg_start = float(segment.ts_start)
+    seg_end = float(segment.ts_end)
+    localized_start = max(float(flag.ts_start), seg_start)
+    localized_end = min(float(flag.ts_end), seg_end)
+    if localized_end < localized_start:
+        return seg_start, seg_end
+    return localized_start, localized_end
+
+
+def normalize_flag_entries(
+    flags: list[FlagEntry],
+    ordered_segments: list[DiarizedSegment],
+) -> list[FlagEntry]:
+    normalized_flags: list[FlagEntry] = []
+    for flag in flags:
+        matched_segment = resolve_flag_segment(flag, ordered_segments)
+        localized_start, localized_end = _localize_flag_span_to_segment(flag, matched_segment)
+        update: dict[str, Any] = {
+            "ts_start": round(localized_start, 3),
+            "ts_end": round(localized_end, 3),
+        }
+        if matched_segment is not None:
+            update["segment_id"] = int(matched_segment.segment_id)
+            if flag.speaker is None:
+                update["speaker"] = matched_segment.speaker
+            if flag.tone is None:
+                update["tone"] = matched_segment.tone
+        normalized_flags.append(flag.model_copy(update=update))
+
+    normalized_flags.sort(key=lambda item: (float(item.ts_start), float(item.ts_end), int(item.segment_id or 0), item.intent))
+    return normalized_flags
+
+
+def normalize_segment_intents(
+    ordered_segments: list[DiarizedSegment],
+    normalized_flags: list[FlagEntry],
+) -> list[DiarizedSegment]:
+    intents_by_segment: dict[int, list[IntentId]] = {int(segment.segment_id): [] for segment in ordered_segments}
+    segment_by_id = {int(segment.segment_id): segment for segment in ordered_segments}
+
+    for flag in normalized_flags:
+        matched_segment = segment_by_id.get(int(flag.segment_id)) if flag.segment_id is not None else None
+        if matched_segment is None:
+            matched_segment = resolve_flag_segment(flag, ordered_segments)
+        if matched_segment is None:
+            continue
+        segment_intents = intents_by_segment[int(matched_segment.segment_id)]
+        if flag.intent not in segment_intents:
+            segment_intents.append(flag.intent)
+
+    return [
+        segment.model_copy(update={"intents": intents_by_segment.get(int(segment.segment_id), [])})
+        for segment in ordered_segments
+    ]
+
+
 def normalize_audio_report(
     report: AstroTalkAudioReport,
     session_id: str,
     local_long_pauses: list[LongPause],
 ) -> AstroTalkAudioReport:
+    ordered_segments = sorted(
+        report.segments,
+        key=lambda segment: (float(segment.ts_start), float(segment.ts_end), int(segment.segment_id)),
+    )
+    normalized_flags = normalize_flag_entries(report.flags, ordered_segments)
+    normalized_segments = normalize_segment_intents(ordered_segments, normalized_flags)
     merged_pauses = [
         normalize_long_pause_duration(pause)
         for pause in report.long_pauses
@@ -501,6 +731,8 @@ def normalize_audio_report(
             "s_id": str(session_id),
             "review": bool(merged_pauses),
             "long_pauses": merged_pauses,
+            "segments": normalized_segments,
+            "flags": normalized_flags,
         }
     )
 
@@ -522,6 +754,7 @@ def evaluate_audio(
     audio_duration_seconds: float,
     local_long_pauses: list[LongPause],
     cache_name: str | None,
+    thinking_level: str | None,
 ) -> tuple[AstroTalkAudioReport, dict[str, int | float], float, str]:
     uploaded_file = None
     try:
@@ -538,30 +771,43 @@ def evaluate_audio(
             "max_output_tokens": 16384,
             "response_mime_type": "application/json",
             "response_schema": AstroTalkAudioReport,
-            "thinking_config": types.ThinkingConfig(thinking_budget=0),
+            "thinking_config": build_thinking_config(model_id, thinking_level),
         }
         if cache_name:
             config_kwargs["cached_content"] = cache_name
         config = types.GenerateContentConfig(**config_kwargs)
 
-        prompt = (
-            f"audio_duration_seconds: {audio_duration_seconds}\n"
-            "All ts_start and ts_end values must be seconds from the beginning "
-            "of this audio and must be within the audio duration.\n"
-            f"local_long_pause_candidates_json: {long_pauses_to_json(local_long_pauses)}\n"
-            "If local_long_pause_candidates_json is not empty, include those spans in long_pauses "
-            "and set review to true.\n\n"
-            + prompts.USER_MESSAGE.replace("{s_id}", session_id)
-        )
-        start_time = time.perf_counter()
-        response = client.models.generate_content(
-            model=model_id,
-            contents=[uploaded_file, prompt],
-            config=config,
-        )
-        latency_seconds = round(time.perf_counter() - start_time, 3)
+        def generate_with_prompt(prompt_text: str) -> tuple[Any, float]:
+            start_time = time.perf_counter()
+            response = client.models.generate_content(
+                model=model_id,
+                contents=[uploaded_file, prompt_text],
+                config=config,
+            )
+            return response, round(time.perf_counter() - start_time, 3)
 
-        report = normalize_audio_report(parse_audio_report(response, session_id), session_id, local_long_pauses)
+        response, latency_seconds = generate_with_prompt(
+            build_audio_prompt(session_id, audio_duration_seconds, local_long_pauses)
+        )
+        try:
+            parsed_report = parse_audio_report(response, session_id)
+        except ValidationError:
+            print(
+                f"[WARN] session {session_id}: Gemini returned invalid/truncated JSON; "
+                "retrying once with compact-output instructions"
+            )
+            response, retry_latency_seconds = generate_with_prompt(
+                build_audio_prompt(
+                    session_id,
+                    audio_duration_seconds,
+                    local_long_pauses,
+                    retry_compact=True,
+                )
+            )
+            latency_seconds = round(latency_seconds + retry_latency_seconds, 3)
+            parsed_report = parse_audio_report(response, session_id)
+
+        report = normalize_audio_report(parsed_report, session_id, local_long_pauses)
         telemetry = usage_to_telemetry(response.usage_metadata) if response.usage_metadata else {}
         response_json = report.model_dump_json()
         return report, telemetry, latency_seconds, response_json
@@ -609,6 +855,7 @@ def flatten_result(
     raw_json_path: Path | None,
     status: str,
     error: str | None = None,
+    has_video: bool | None = None,
 ) -> dict[str, Any]:
     flags = [flag.model_dump() for flag in report.flags] if report else []
     segments = [segment.model_dump() for segment in report.segments] if report else []
@@ -631,6 +878,7 @@ def flatten_result(
             "processed_at_utc": datetime.now(UTC).isoformat(),
             "audio_file_path": str(audio_path),
             "audio_duration_seconds": audio_duration_seconds,
+            "has_video": has_video,
             "gemini_s_id": report.s_id if report else "",
             "detected_languages": report.lang if report else "",
             "review": review,
@@ -663,11 +911,52 @@ def flatten_result(
 
 def write_outputs(results: list[dict[str, Any]], output_csv: Path, output_jsonl: Path) -> None:
     output_csv.parent.mkdir(parents=True, exist_ok=True)
+    output_jsonl.parent.mkdir(parents=True, exist_ok=True)
     df = pd.DataFrame(results)
     df.to_csv(output_csv, index=False, encoding="utf-8-sig")
     with output_jsonl.open("w", encoding="utf-8") as handle:
         for record in results:
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+
+def append_raw_json(response_json: str, recording_url: str, at_flag: Any, has_video: bool | None) -> None:
+    output_file = DEFAULT_JSON_DIR / "audio_response.json"
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+
+    if output_file.exists():
+        try:
+            with output_file.open("r", encoding="utf-8") as f:
+                data = json.load(f)
+
+            if not isinstance(data, list):
+                data = []
+        except (json.JSONDecodeError, FileNotFoundError):
+            data = []
+    else:
+        data = []
+
+    try:
+        new_record = json.loads(response_json)
+    except json.JSONDecodeError:
+        new_record = {"raw_response": response_json}
+    if isinstance(new_record, dict):
+        new_record["audio_url"] = recording_url
+        new_record["at_flag"] = at_flag
+        new_record["has_video"] = has_video
+    elif isinstance(new_record, list):
+        new_record = {
+            "audio_url": recording_url,
+            "at_flag": at_flag,
+            "has_video": has_video,
+            "response_data": new_record
+        }
+
+    data.append(new_record)
+
+    with output_file.open("w", encoding="utf-8") as f:
+        json.dump(data, f, indent=4, ensure_ascii=False)
+
 
 
 def write_raw_response(raw_json_dir: Path, session_id: str, response_json: str) -> Path:
@@ -731,8 +1020,10 @@ def run_batch(args: argparse.Namespace) -> pd.DataFrame:
 
         for index, row in df.iterrows():
             session_id = str(row["session_id"])
+            recording_url = str(row["recording_url"])
             audio_stem = _safe_audio_stem(row)
             audio_path = audio_dir / f"{audio_stem}.mp3"
+            has_video: bool | None = None
 
             if session_id in completed_sessions:
                 print(f"[{index + 1}/{len(df)}] skip completed session {session_id}")
@@ -740,7 +1031,11 @@ def run_batch(args: argparse.Namespace) -> pd.DataFrame:
 
             print(f"[{index + 1}/{len(df)}] session {session_id}: converting/downloading audio")
             try:
-                convert_to_mp3(str(row["recording_url"]), audio_path, force=args.force_download)
+                has_video = probe_has_video(recording_url)
+                if has_video:
+                    print(f"[{index + 1}/{len(df)}] session {session_id}: source media contains video")
+
+                convert_to_mp3(recording_url, audio_path, force=args.force_download)
                 duration_seconds = probe_audio_duration(audio_path)
                 local_long_pauses = detect_long_pauses(audio_path, duration_seconds)
                 if local_long_pauses:
@@ -761,6 +1056,7 @@ def run_batch(args: argparse.Namespace) -> pd.DataFrame:
                         response_json=None,
                         raw_json_path=None,
                         status="downloaded",
+                        has_video=has_video,
                     )
                 else:
                     print(f"[{index + 1}/{len(df)}] session {session_id}: uploading to Gemini")
@@ -776,6 +1072,12 @@ def run_batch(args: argparse.Namespace) -> pd.DataFrame:
                         cache_name,
                     )
                     raw_json_path = write_raw_response(raw_json_dir, session_id, response_json)
+                    append_raw_json(
+                        response_json=response_json,
+                        recording_url=recording_url,
+                        at_flag=row.get("flagged", ""),
+                        has_video=has_video,
+                    )
                     record = flatten_result(
                         row,
                         audio_path,
@@ -787,6 +1089,7 @@ def run_batch(args: argparse.Namespace) -> pd.DataFrame:
                         response_json=response_json,
                         raw_json_path=raw_json_path,
                         status="success",
+                        has_video=has_video,
                     )
                     cost = record.get("estimated_cost_usd", 0.0)
                     print(
@@ -806,6 +1109,7 @@ def run_batch(args: argparse.Namespace) -> pd.DataFrame:
                     raw_json_path=None,
                     status="error",
                     error=f"{type(exc).__name__}: {exc}",
+                    has_video=has_video,
                 )
                 print(f"[ERROR] session {session_id}: {record['error']}")
 

@@ -24,6 +24,9 @@ DIARIZATION, TONE & REVIEW RULES:
 - Each segment must include: segment_id, speaker, ts_start, ts_end, intents, and tone.
 - Assign segment_id sequentially starting at 1 and use the same segment_id in flags when a violation belongs to that segment.
 - "segments[*].intents" must contain only matching policy intent IDs from the taxonomy below. Use [] when no policy intent applies to that segment.
+- Only put an intent on a segment when the triggering words, sounds, or conduct are actually present inside that exact segment.
+- Do not copy a flagged intent forward or backward into neighboring segments just because the same topic continues.
+- If a segment is only a reply, acknowledgement, transition, or clean follow-up, keep "segments[*].intents" as [] even if adjacent segments are flagged.
 - Assign "segments[*].tone" using exactly one of: NEUTRAL, CALM, PROFESSIONAL, DISTRESSED, ANGRY, AGGRESSIVE, FLIRTATIOUS, UNCLEAR.
 - Set "review": true if you detect any pause/no-speech/silence span of 60 seconds or more. Otherwise set "review": false.
 - Include all 60+ second pause/no-speech/silence spans in "long_pauses" with ts_start, ts_end, and duration_seconds.
@@ -34,6 +37,8 @@ CRITICAL FLAGGING RULES:
 - Flag ALL violations exhaustively across the entire audio runtime. Do not summarize or stop parsing early.
 - Output each distinct violation occurrence once. Do NOT create repeated every-few-seconds flags for the same word, noise, or continuous event.
 - If the same violation is repeated continuously or in a tight burst, use one timestamp span covering that burst.
+- Keep each flag tightly bounded to the exact triggering segment or burst. Do not stretch one flag across later clean or merely responsive segments.
+- If violating content happens again in a later segment, create a new flag for that later segment instead of using one session-wide flag span.
 - Rely heavily on your audio intelligence: flag aggressive shouting under HATE_SPEECH or VIOLENCE, or ambient distress/crying where appropriate based on context.
 - Only include flags with confidence >= 0.5, EXCEPT for CSAM_RISK which must be flagged at a lower threshold of >= 0.2.
 - Return transcript text only in "flags[*].transcript_excerpt" for marked violations. Do not return transcript text for clean speech.

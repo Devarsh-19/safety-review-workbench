@@ -37,6 +37,9 @@ def initialise_audio_db() -> None:
         "ALTER TABLE audio_flags ADD COLUMN reasoning TEXT",            # reviewer note on amendments
         "ALTER TABLE audio_sessions ADD COLUMN confidence_score REAL",  # verdict confidence, same scale as chat
         "ALTER TABLE audio_sessions ADD COLUMN astrotalk_verdict TEXT", # verdict from original astrotalk pipeline
+        "ALTER TABLE audio_sessions ADD COLUMN has_video INTEGER",      # source media contains a video stream
+        "ALTER TABLE audio_flags ADD COLUMN ts_start REAL",             # exact flagged span start
+        "ALTER TABLE audio_flags ADD COLUMN ts_end REAL",               # exact flagged span end
         # Flag-level audit trail, same as chat's flags table
         "ALTER TABLE audio_flags ADD COLUMN confirmed_by TEXT",
         "ALTER TABLE audio_flags ADD COLUMN confirmed_at TEXT",
@@ -51,6 +54,13 @@ def initialise_audio_db() -> None:
                 pass  # Column already exists — safe to ignore
 
     print(f"Audio database initialised at {AUDIO_DB_PATH}")
+
+
+def _normalize_audio_session_row(row: dict) -> dict:
+    normalized = dict(row)
+    if "has_video" in normalized and normalized["has_video"] is not None:
+        normalized["has_video"] = bool(normalized["has_video"])
+    return normalized
 
 
 def fetch_audio_sessions_page(
@@ -130,7 +140,7 @@ def fetch_audio_sessions_page(
                 LIMIT ? OFFSET ?""",
             params + [limit, offset],
         ).fetchall()
-    return [dict(r) for r in rows], total
+    return [_normalize_audio_session_row(dict(r)) for r in rows], total
 
 
 def fetch_audio_session_detail(s_id: int) -> dict:
@@ -142,10 +152,10 @@ def fetch_audio_session_detail(s_id: int) -> dict:
             "SELECT * FROM audio_segments WHERE s_id = ? ORDER BY seg_id", (s_id,)
         ).fetchall()
         flags = conn.execute(
-            "SELECT * FROM audio_flags WHERE s_id = ? ORDER BY seg_id, flag_id", (s_id,)
+            "SELECT * FROM audio_flags WHERE s_id = ? ORDER BY COALESCE(ts_start, 1e18), seg_id, flag_id", (s_id,)
         ).fetchall()
     return {
-        "session": dict(session) if session else None,
+        "session": _normalize_audio_session_row(dict(session)) if session else None,
         "segments": [dict(s) for s in segments],
         "flags": [dict(f) for f in flags],
     }
