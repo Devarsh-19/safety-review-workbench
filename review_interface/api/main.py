@@ -1134,8 +1134,10 @@ def audio_dismiss_flag(flag_id: int, body: DismissFlagRequest):
             _reject_if_audio_locked(_audio_session_or_404(s_id))
             original_flag_id = target["parent_flag_id"] if target["parent_flag_id"] else flag_id
 
-            conn.execute("DELETE FROM audio_flags WHERE parent_flag_id = ?", (original_flag_id,))
-            conn.execute("DELETE FROM audio_flags WHERE flag_id = ?", (original_flag_id,))
+            conn.execute(
+                "UPDATE audio_flags SET status = 'DISMISSED' WHERE flag_id = ? OR parent_flag_id = ?",
+                (original_flag_id, original_flag_id),
+            )
 
             conn.execute(
                 """INSERT INTO audio_review_log (s_id, flag_id, action, reviewer_id, note)

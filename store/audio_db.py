@@ -109,11 +109,13 @@ def fetch_audio_sessions_page(
         'status': 's.review_status',
     }
     
-    order_clause = "ORDER BY s.s_id ASC"
+    status_sort = "CASE WHEN s.review_status = 'SUBMITTED_FOR_REVIEW' THEN 0 ELSE 1 END, " if reviewer_role == "L2" else ""
+    
+    order_clause = f"ORDER BY {status_sort}s.s_id ASC"
     if sort_col and sort_col in valid_cols:
         col_expr = valid_cols[sort_col]
         direction = "DESC" if sort_dir == "desc" else "ASC"
-        order_clause = f"ORDER BY {col_expr} {direction}, s.s_id ASC"
+        order_clause = f"ORDER BY {status_sort}{col_expr} {direction}, s.s_id ASC"
 
     with get_audio_connection() as conn:
         total = conn.execute(f"SELECT COUNT(*) {base}", params).fetchone()[0]
@@ -166,9 +168,9 @@ def recompute_audio_session_verdict(s_id: int, conn) -> str:
     from engine.verdict_rules import get_db_verdict_for_flags, get_db_confidence_for_verdict
 
     rows = conn.execute(
-        "SELECT flag_id, intent, parent_flag_id FROM audio_flags WHERE s_id = ?", (s_id,)
+        "SELECT flag_id, intent, status, parent_flag_id FROM audio_flags WHERE s_id = ?", (s_id,)
     ).fetchall()
-    codes = [r["intent"] for r in _active_audio_flag_rows(rows) if r["intent"]]
+    codes = [r["intent"] for r in _active_audio_flag_rows(rows) if r["intent"] and r["status"] != "DISMISSED"]
     verdict    = get_db_verdict_for_flags(codes)
     confidence = get_db_confidence_for_verdict(verdict)
     conn.execute(
@@ -189,7 +191,7 @@ def get_audio_flag_summary(s_id: int) -> dict:
         ).fetchall()
     active = _active_audio_flag_rows(rows)
     total = len(active)
-    actioned = sum(1 for r in active if r["status"] == "CONFIRMED")
+    actioned = sum(1 for r in active if r["status"] in ("CONFIRMED", "DISMISSED"))
     return {
         "total_flags":      total,
         "actioned_flags":   actioned,
