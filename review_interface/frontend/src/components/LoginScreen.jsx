@@ -12,7 +12,7 @@ const REVIEWERS = [
   { name: 'Vineet',   role: 'L1' },
   { name: 'Devarsh',  role: 'L1' },
   { name: 'Amogh',    role: 'L2' },
-  { name: 'Locked',   role: 'L2' },
+  { name: 'Locked',   role: 'L2' },   // read-only view of LOCKED sessions only
 ];
 
 const WORKSPACES = [

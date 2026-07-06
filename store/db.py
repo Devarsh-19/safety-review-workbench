@@ -193,6 +193,7 @@ def fetch_sessions_page(
     language: str = None,
     session_type: str = None,
     astrotalk: str = None,          # 'flagged' | 'clean' | None
+    flag_category: str = None,      # only sessions carrying this flag category
     min_confidence: float = 0,      # 0-100
     min_duration=None,
     max_duration=None,
@@ -211,16 +212,20 @@ def fetch_sessions_page(
     if status:
         where.append("s.review_status = ?"); params.append(status)
 
+    # Special "Locked" login: sees ONLY locked sessions, regardless of role
+    # defaults or any explicit status filter.
+    if reviewer_name == "Locked":
+        where.append("s.review_status = 'LOCKED'")
     # Role-based default visibility — only when no explicit status filter is set.
     # L2 works the post-submission queue: no PENDING (still with L1), no LOCKED.
-    if not status:
+    elif not status:
         if reviewer_role == "L1":
             where.append("s.review_status NOT IN ('SUBMITTED_FOR_REVIEW','LOCKED')")
         elif reviewer_role == "L2":
             where.append("s.review_status NOT IN ('PENDING','LOCKED')")
 
     # L1 sees only sessions assigned to them; L2 may filter by a specific assignee.
-    if reviewer_role == "L1" and reviewer_name:
+    if reviewer_role == "L1" and reviewer_name and reviewer_name != "Locked":
         where.append("s.assigned_to = ?"); params.append(reviewer_name)
     elif assigned_to:
         where.append("s.assigned_to = ?"); params.append(assigned_to)
@@ -244,6 +249,14 @@ def fetch_sessions_page(
         where.append("s.astrotalk_flagged = 1")
     elif astrotalk == "clean":
         where.append("(s.astrotalk_flagged IS NULL OR s.astrotalk_flagged != 1)")
+
+    if flag_category:
+        where.append(
+            """EXISTS (SELECT 1 FROM flags f
+                       WHERE f.session_id = s.session_id
+                         AND LOWER(REPLACE(REPLACE(f.category_code,'-','_'),' ','_')) = ?)"""
+        )
+        params.append(flag_category.strip().lower().replace("-", "_").replace(" ", "_"))
 
     if min_confidence:
         where.append("COALESCE(s.confidence_score, 0) * 100 >= ?"); params.append(min_confidence)

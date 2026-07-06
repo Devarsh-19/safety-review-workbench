@@ -38,15 +38,16 @@ export function getSessions(filters = {}) {
   const add = (k, v) => {
     if (v !== undefined && v !== null && v !== '') params.append(k, v);
   };
-  add('verdict', filters.verdict);
-  add('status', filters.status);
-  add('language', filters.language);
-  add('reviewer_name', filters.reviewer_name);
-  add('reviewer_role', filters.reviewer_role);
-  add('assigned_to', filters.assigned_to);
-  add('search', filters.search);
-  add('session_type', filters.session_type);
-  add('astrotalk', filters.astrotalk);
+  add('verdict',        filters.verdict);
+  add('status',         filters.status);
+  add('language',       filters.language);
+  add('reviewer_name',  filters.reviewer_name);
+  add('reviewer_role',  filters.reviewer_role);
+  add('assigned_to',    filters.assigned_to);
+  add('flag_category',  filters.flag_category);
+  add('search',         filters.search);
+  add('session_type',   filters.session_type);
+  add('astrotalk',      filters.astrotalk);
   if (filters.min_confidence) add('min_confidence', filters.min_confidence);
   add('min_duration', filters.min_duration);
   add('max_duration', filters.max_duration);
