@@ -96,7 +96,7 @@ export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelect
     { key: 'flags', label: 'Flags', sortable: true },
     { key: 'roles', label: 'Speaker Roles', sortable: false },
     { key: 'assigned_to', label: 'Assigned To', sortable: false },
-    { key: 'reviewer', label: 'Reviewer', sortable: false },
+    ...(reviewerRole === 'L2' ? [{ key: 'reviewer', label: 'Reviewer', sortable: false }] : []),
     { key: 'verdict', label: 'LLM Verdict', sortable: true },
     { key: 'astrotalk_verdict', label: 'Astrotalk', sortable: false },
     { key: 'status', label: 'Status', sortable: true },
@@ -252,10 +252,10 @@ export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelect
             </thead>
             <tbody>
               {loading ? (
-                <tr><td colSpan={12} style={{ padding: 32, textAlign: 'center' }}><LoadingSpinner /></td></tr>
+                <tr><td colSpan={reviewerRole === 'L2' ? 12 : 11} style={{ padding: 32, textAlign: 'center' }}><LoadingSpinner /></td></tr>
               ) : rows.length === 0 ? (
                 <tr>
-                  <td colSpan={12} style={{ padding: 32, textAlign: 'center', color: C.textSecondary }}>
+                  <td colSpan={reviewerRole === 'L2' ? 12 : 11} style={{ padding: 32, textAlign: 'center', color: C.textSecondary }}>
                     No audio sessions. Ingest results with scripts/ingest_audio_results.py
                     {reviewerRole === 'L1' ? ' — or none are assigned to you yet (scripts/assign_audio_sessions.py).' : '.'}
                   </td>
@@ -286,9 +286,11 @@ export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelect
                   <td style={{ padding: '10px 14px', fontSize: 12, color: C.textSecondary }}>
                     {r.assigned_to || '—'}
                   </td>
-                  <td style={{ padding: '10px 14px', fontSize: 12, color: C.textSecondary }}>
-                    {r.submitted_by || r.reviewer_id || '—'}
-                  </td>
+                  {reviewerRole === 'L2' && (
+                    <td style={{ padding: '10px 14px', fontSize: 12, color: C.textSecondary }}>
+                      {r.submitted_by || r.reviewer_id || '—'}
+                    </td>
+                  )}
                   <td style={{ padding: '10px 14px' }}><VerdictBadge verdict={r.overall_verdict} /></td>
                   <td style={{ padding: '10px 14px' }}><VerdictBadge verdict={r.astrotalk_verdict} /></td>
                   <td style={{ padding: '10px 14px' }}><StatusBadge status={r.review_status} /></td>
