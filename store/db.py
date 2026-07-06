@@ -212,11 +212,12 @@ def fetch_sessions_page(
         where.append("s.review_status = ?"); params.append(status)
 
     # Role-based default visibility — only when no explicit status filter is set.
+    # L2 works the post-submission queue: no PENDING (still with L1), no LOCKED.
     if not status:
         if reviewer_role == "L1":
             where.append("s.review_status NOT IN ('SUBMITTED_FOR_REVIEW','LOCKED')")
         elif reviewer_role == "L2":
-            where.append("s.review_status != 'LOCKED'")
+            where.append("s.review_status NOT IN ('PENDING','LOCKED')")
 
     # L1 sees only sessions assigned to them; L2 may filter by a specific assignee.
     if reviewer_role == "L1" and reviewer_name:
