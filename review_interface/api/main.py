@@ -53,6 +53,42 @@ def _severity_for_category(category_code: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# "Flagged by us" definition for /stats — based on scripts/diag_export_funnel.py:
+# only active (non-amended-parent) MANUAL/LLM flags count, excluded categories
+# never count at all, and a session whose remaining flags are ALL low-signal
+# categories is not counted.
+# ---------------------------------------------------------------------------
+_EXCLUDED_CATEGORIES = (
+    "re_engagement_solicitation",
+    "personal_data_collection",
+)
+_DROP_ONLY_CATEGORIES = (
+    "fake_remedies",
+    "instigation",
+    "fear_manipulation",
+    "financial_solicitation",
+    "off_platform_solicitation",
+)
+_NORM_CAT    = "LOWER(REPLACE(REPLACE(f.category_code,'-','_'),' ','_'))"
+_ACTIVE_FLAG = ("f.flag_id NOT IN "
+                "(SELECT parent_flag_id FROM flags WHERE parent_flag_id IS NOT NULL)")
+_EXCL_LIST   = ",".join(f"'{c}'" for c in _EXCLUDED_CATEGORIES)
+_DROP_LIST   = ",".join(f"'{c}'" for c in _DROP_ONLY_CATEGORIES)
+_FLAGGED_BY_US_SQL = f"""(
+    EXISTS (SELECT 1 FROM flags f
+            WHERE f.session_id = sessions.session_id
+              AND f.source IN ('MANUAL','LLM')
+              AND {_NORM_CAT} NOT IN ({_EXCL_LIST})
+              AND {_ACTIVE_FLAG})
+    AND EXISTS (SELECT 1 FROM flags f
+            WHERE f.session_id = sessions.session_id
+              AND {_NORM_CAT} NOT IN ({_EXCL_LIST})
+              AND {_NORM_CAT} NOT IN ({_DROP_LIST})
+              AND {_ACTIVE_FLAG})
+)"""
+
+
+# ---------------------------------------------------------------------------
 # Lifespan — initialise DB (including session_note migration) on startup
 # ---------------------------------------------------------------------------
 
@@ -187,6 +223,40 @@ def stats(
                 f"SELECT COUNT(*) FROM sessions WHERE review_status = 'NEEDS_FINAL_REVIEW'{scope}", params
             ).fetchone()[0]
 
+            # AstroTalk's own flag vs. our (LLM/REGEX/MANUAL) flags.
+            astro_flagged = conn.execute(
+                f"SELECT COUNT(*) FROM sessions WHERE astrotalk_flagged = 1{scope}", params
+            ).fetchone()[0]
+            astro_clean   = conn.execute(
+                f"SELECT COUNT(*) FROM sessions WHERE (astrotalk_flagged IS NULL OR astrotalk_flagged != 1){scope}",
+                params,
+            ).fetchone()[0]
+            flagged_by_us = conn.execute(
+                f"SELECT COUNT(*) FROM sessions WHERE {_FLAGGED_BY_US_SQL}{scope}",
+                params,
+            ).fetchone()[0]
+            # Flagged by both AstroTalk AND us (intersection).
+            flagged_by_both = conn.execute(
+                f"""SELECT COUNT(*) FROM sessions
+                    WHERE astrotalk_flagged = 1 AND {_FLAGGED_BY_US_SQL}{scope}""",
+                params,
+            ).fetchone()[0]
+            # False positive: AstroTalk flagged it, but we marked it clean —
+            # LLM verdict CLEAN or a human reviewer cleared it (REVIEWED).
+            false_pos = conn.execute(
+                f"""SELECT COUNT(*) FROM sessions
+                    WHERE astrotalk_flagged = 1
+                      AND (overall_verdict = 'CLEAN' OR review_status = 'REVIEWED'){scope}""",
+                params,
+            ).fetchone()[0]
+            # False negative: AstroTalk missed it, but we flagged it.
+            false_neg = conn.execute(
+                f"""SELECT COUNT(*) FROM sessions
+                    WHERE (astrotalk_flagged IS NULL OR astrotalk_flagged != 1)
+                      AND {_FLAGGED_BY_US_SQL}{scope}""",
+                params,
+            ).fetchone()[0]
+
             # L2-only: per-reviewer assignment breakdown
             reviewer_stats = None
             if reviewer_role == 'L2':
@@ -210,6 +280,10 @@ def stats(
             "count_severe": 0, "count_flagged": 0, "count_clean": 0,
             "count_unprocessed": 0, "count_locked": 0,
             "count_submitted": 0, "count_needs_final_review": 0,
+            "count_astrotalk_flagged": 0, "count_flagged_by_us": 0,
+            "count_flagged_by_both": 0,
+            "count_false_positive": 0, "pct_false_positive": 0,
+            "count_false_negative": 0, "pct_false_negative": 0,
         }
         if reviewer_role == 'L2':
             result["reviewer_stats"] = []
@@ -226,6 +300,13 @@ def stats(
         "count_locked":             locked,
         "count_submitted":          submitted,
         "count_needs_final_review": needs_final,
+        "count_astrotalk_flagged":  astro_flagged,
+        "count_flagged_by_us":      flagged_by_us,
+        "count_flagged_by_both":    flagged_by_both,
+        "count_false_positive":     false_pos,
+        "pct_false_positive":       round(100 * false_pos / astro_flagged, 1) if astro_flagged else 0,
+        "count_false_negative":     false_neg,
+        "pct_false_negative":       round(100 * false_neg / astro_clean, 1) if astro_clean else 0,
     }
     if reviewer_stats is not None:
         result["reviewer_stats"] = reviewer_stats
@@ -256,19 +337,42 @@ def reviewer_stats():
         return []
 
 
+# Fixed display order for the violation breakdown — only these categories are
+# shown, in exactly this order.
+_VIOLATION_DISPLAY_ORDER = [
+    "nsfw",
+    "nsfw_explicit",
+    "nsfw_grooming",
+    "nsfw_appearance",
+    "csam_risk",
+    "abusive_language",
+    "hate_speech",
+    "self_harm",
+    "violence",
+    "fake_remedies",
+    "unauthorized_medical_advice",
+    "financial_solicitation",
+    "identity_fraud",
+    "instigation",
+]
+
+
 @app.get("/stats/violations")
 def violation_stats():
     try:
         with get_connection() as conn:
-            rows = conn.execute("""
-                SELECT f.category_code, COUNT(DISTINCT f.session_id) AS count
+            rows = conn.execute(f"""
+                SELECT {_NORM_CAT} AS cat, COUNT(DISTINCT f.session_id) AS count
                 FROM flags f
                 JOIN sessions s ON s.session_id = f.session_id
                 WHERE s.overall_verdict != 'CLEAN'
-                GROUP BY f.category_code
-                ORDER BY count DESC
+                GROUP BY cat
             """).fetchall()
-        return [dict(row) for row in rows]
+        counts = {r["cat"]: r["count"] for r in rows}
+        return [
+            {"category_code": c.upper(), "count": counts.get(c, 0)}
+            for c in _VIOLATION_DISPLAY_ORDER
+        ]
     except Exception:
         return []
 
