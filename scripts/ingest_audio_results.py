@@ -10,10 +10,10 @@ Expected object shape:
     "s_id": 123, "lang": "hindi", "review": true, "pauses": [...],
     "audio_url": "https://cdn.example.com/recordings/123.m3u8",   # optional — HLS stream for the in-browser player
     "segments": [
-      {"ts_start": "00:01:05", "ts_end": "00:01:12", "seg_id": 1,
-       "speaker": "SPEAKER_1", "tone": "aggressive",
-       "flags": [{"intent": "...", "s": "HIGH", "conf": 0.91, "transcript": "..."}]}
-    ]
+      {"ts_start": 65.0, "ts_end": 72.0, "segment_id": 1,
+       "speaker": "SPEAKER_1", "tone": "AGGRESSIVE", "intents": []}
+    ],
+    "flags": [{"intent": "...", "s": "RED", "conf": 0.91, "transcript_excerpt": "...", "segment_id": 1}]
   }
 
 Timestamps are converted from HH:MM:SS to seconds. Re-ingesting an existing
@@ -58,12 +58,8 @@ def ingest_session(conn, obj: dict) -> tuple[int, int, int]:
     segments = obj.get("segments") or []
     # Same verdict rules as the chat DB: SEVERE / FLAGGED / CLEAN from the
     # intent codes, including flagged-combination escalations.
-    intent_codes = [
-        f.get("intent")
-        for seg in segments
-        for f in (seg.get("flags") or [])
-        if f.get("intent")
-    ]
+    flags = obj.get("flags") or []
+    intent_codes = [f.get("intent") for f in flags if f.get("intent")]
     verdict    = get_db_verdict_for_flags(intent_codes)
     confidence = get_db_confidence_for_verdict(verdict)
 
@@ -78,7 +74,7 @@ def ingest_session(conn, obj: dict) -> tuple[int, int, int]:
                SET lang = ?, pauses = ?, needs_review = ?, overall_verdict = ?,
                    confidence_score = ?, audio_url = COALESCE(?, audio_url)
                WHERE s_id = ?""",
-            (obj.get("lang"), json.dumps(obj.get("pauses") or []),
+            (obj.get("lang"), json.dumps(obj.get("long_pauses") or obj.get("pauses") or []),
              1 if obj.get("review") else 0, verdict, confidence,
              obj.get("audio_url"), s_id),
         )
@@ -89,27 +85,29 @@ def ingest_session(conn, obj: dict) -> tuple[int, int, int]:
             """INSERT INTO audio_sessions
                    (s_id, lang, pauses, needs_review, overall_verdict, confidence_score, audio_url)
                VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (s_id, obj.get("lang"), json.dumps(obj.get("pauses") or []),
+            (s_id, obj.get("lang"), json.dumps(obj.get("long_pauses") or obj.get("pauses") or []),
              1 if obj.get("review") else 0, verdict, confidence, obj.get("audio_url")),
         )
 
-    n_flags = 0
     for seg in segments:
-        seg_id = int(seg["seg_id"])
+        seg_id = int(seg.get("segment_id") or seg.get("seg_id") or 0)
         conn.execute(
             """INSERT INTO audio_segments (s_id, seg_id, ts_start, ts_end, speaker, tone)
                VALUES (?, ?, ?, ?, ?, ?)""",
             (s_id, seg_id, hms_to_seconds(seg.get("ts_start")),
              hms_to_seconds(seg.get("ts_end")), seg.get("speaker"), seg.get("tone")),
         )
-        for flag in seg.get("flags") or []:
-            conn.execute(
-                """INSERT INTO audio_flags (s_id, seg_id, intent, severity, conf, transcript, source)
-                   VALUES (?, ?, ?, ?, ?, ?, 'LLM')""",
-                (s_id, seg_id, flag.get("intent"), flag.get("s"),
-                 flag.get("conf"), flag.get("transcript")),
-            )
-            n_flags += 1
+
+    n_flags = 0
+    for flag in flags:
+        seg_id = flag.get("segment_id") or flag.get("seg_id")
+        conn.execute(
+            """INSERT INTO audio_flags (s_id, seg_id, intent, severity, conf, transcript, source)
+               VALUES (?, ?, ?, ?, ?, ?, 'LLM')""",
+            (s_id, seg_id, flag.get("intent"), flag.get("s"),
+             flag.get("conf"), flag.get("transcript_excerpt") or flag.get("transcript")),
+        )
+        n_flags += 1
     return s_id, len(segments), n_flags
 
 
