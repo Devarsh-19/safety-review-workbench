@@ -9,6 +9,7 @@ CREATE TABLE IF NOT EXISTS audio_sessions (
     speaker1_role       TEXT,                               -- 'ASTROLOGER' | 'USER' — assigned by reviewer, NULL until set
     speaker2_role       TEXT,
     overall_verdict     TEXT,                               -- 'CLEAN', 'FLAGGED', 'SEVERE' (same rules as chat: engine/verdict_rules.py)
+    astrotalk_verdict   TEXT,                               -- 'CLEAN', 'FLAGGED' (from ingestion JSON)
     review_status       TEXT    DEFAULT 'PENDING',          -- 'PENDING', 'SUBMITTED_FOR_REVIEW', 'LOCKED', 'REVIEWED' (after unlock, same as chat)
     reviewer_id         TEXT,
     reviewer_note       TEXT,
@@ -18,6 +19,7 @@ CREATE TABLE IF NOT EXISTS audio_sessions (
     submitted_at        TEXT,
     locked_by           TEXT,
     locked_at           TEXT,
+    has_video           INTEGER,                            -- 1 when the source media has a video stream, 0 when audio-only
     created_at          TEXT    DEFAULT (datetime('now'))
 );
 
@@ -36,6 +38,8 @@ CREATE TABLE IF NOT EXISTS audio_flags (
     flag_id             INTEGER PRIMARY KEY AUTOINCREMENT,
     s_id                INTEGER,
     seg_id              INTEGER,
+    ts_start            REAL,                               -- exact flagged span start, when available
+    ts_end              REAL,                               -- exact flagged span end, when available
     intent              TEXT,                               -- violation category
     severity            TEXT,                               -- the 's' field of the LLM output
     conf                REAL,

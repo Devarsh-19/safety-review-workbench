@@ -15,6 +15,7 @@ import {
   confirmAudioFlag,
   amendAudioFlag,
   dismissAudioFlag,
+  undismissAudioFlag,
   confirmAllAudioFlags,
 } from '../api';
 
@@ -27,23 +28,63 @@ function formatTime(seconds) {
   return `${pad(h)}:${pad(m)}:${pad(sec)}`;
 }
 
+function getHasVideoState(value) {
+  if (value === null || value === undefined || value === '') return null;
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    if (!normalized) return null;
+    if (['true', '1', 'yes'].includes(normalized)) return true;
+    if (['false', '0', 'no'].includes(normalized)) return false;
+  }
+  return Boolean(value);
+}
+
+function HasVideoBadge({ value }) {
+  const hasVideo = getHasVideoState(value);
+  const label = hasVideo == null ? 'Video Unknown' : hasVideo ? 'Video Present' : 'Audio Only';
+  const palette = hasVideo == null
+    ? { bg: C.bgMuted, border: C.border, text: C.textSecondary }
+    : hasVideo
+      ? { bg: C.flaggedBg, border: C.flaggedBorder, text: C.flaggedText }
+      : { bg: C.cleanBg, border: C.cleanBorder, text: C.cleanText };
+
+  return (
+    <span style={{
+      display: 'inline-flex',
+      alignItems: 'center',
+      padding: '3px 10px',
+      borderRadius: 999,
+      border: `1px solid ${palette.border}`,
+      background: palette.bg,
+      color: palette.text,
+      fontSize: 11,
+      fontFamily: MONO,
+      textTransform: 'uppercase',
+      letterSpacing: '0.04em',
+    }}>
+      {label}
+    </span>
+  );
+}
+
 const ROLES = ['ASTROLOGER', 'USER'];
 const opposite = (role) => (role === 'ASTROLOGER' ? 'USER' : 'ASTROLOGER');
 const SEVERITIES = ['LOW', 'MEDIUM', 'HIGH'];
 
 export default function AudioSessionViewer({ sId, reviewerName, reviewerRole, onBack }) {
-  const [detail,  setDetail]  = useState(null);
+  const [detail, setDetail] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [error,   setError]   = useState('');
-  const [busy,    setBusy]    = useState(false);
-  const [note,    setNote]    = useState('');
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState('');
   const [playerError, setPlayerError] = useState('');
   const [editingFlag, setEditingFlag] = useState(null);   // flag_id being edited
-  const [editIntent,    setEditIntent]    = useState('');
-  const [editSeverity,  setEditSeverity]  = useState('MEDIUM');
+  const [dismissingFlagId, setDismissingFlagId] = useState(null);
+  const [editIntent, setEditIntent] = useState('');
+  const [editSeverity, setEditSeverity] = useState('MEDIUM');
   const [editReasoning, setEditReasoning] = useState('');
   const audioRef = useRef(null);
-  const hlsRef   = useRef(null);
+  const hlsRef = useRef(null);
 
   // Refreshes after actions keep the current content (and the playing audio
   // element!) mounted — the full-screen spinner only shows on first load.
@@ -60,10 +101,14 @@ export default function AudioSessionViewer({ sId, reviewerName, reviewerRole, on
 
   useEffect(() => { load(); }, [load]);
 
-  const session  = detail?.session;
+  const session = detail?.session;
   const segments = detail?.segments || [];
-  const flags    = detail?.flags || [];
-  const locked   = session?.review_status === 'LOCKED';
+  const flags = detail?.flags || [];
+  const locked = session?.review_status === 'LOCKED';
+  const isSubmitted = session?.review_status === 'SUBMITTED_FOR_REVIEW';
+  const isReviewed = session?.review_status === 'REVIEWED';
+  const flagsEditable = !locked && (reviewerRole === 'L2' ? true : session?.review_status === 'PENDING');
+  const readOnly = !flagsEditable;
   const audioUrl = session?.audio_url;
 
   // Attach the HLS (.m3u8) stream to the <audio> element. Safari plays HLS
@@ -101,7 +146,7 @@ export default function AudioSessionViewer({ sId, reviewerName, reviewerRole, on
     const audio = audioRef.current;
     if (!audio || !audioUrl) return;
     audio.currentTime = Math.max(0, Number(seconds) || 0);
-    audio.play().catch(() => {});
+    audio.play().catch(() => { });
   };
 
   // Distinct raw speaker labels, in order of appearance -> lane 1 and lane 2.
@@ -122,10 +167,16 @@ export default function AudioSessionViewer({ sId, reviewerName, reviewerRole, on
   const activeFlags = flags.filter(
     (f) => f.parent_flag_id != null || !amendedParents.has(f.flag_id)
   );
-  const unactionedCount = activeFlags.filter((f) => f.status !== 'CONFIRMED').length;
+  const unactionedCount = activeFlags.filter((f) => f.status !== 'CONFIRMED' && f.status !== 'DISMISSED').length;
 
   const flagsForSpeaker = (label) =>
-    activeFlags.filter((f) => segById[f.seg_id]?.speaker === label);
+    activeFlags
+      .filter((f) => segById[f.seg_id]?.speaker === label)
+      .sort((a, b) => {
+        const aStart = Number(a.ts_start ?? segById[a.seg_id]?.ts_start ?? Number.MAX_SAFE_INTEGER);
+        const bStart = Number(b.ts_start ?? segById[b.seg_id]?.ts_start ?? Number.MAX_SAFE_INTEGER);
+        return aStart - bStart;
+      });
 
   const startEdit = (f) => {
     setEditingFlag(f.flag_id);
@@ -144,17 +195,19 @@ export default function AudioSessionViewer({ sId, reviewerName, reviewerRole, on
     }).then(() => setEditingFlag(null)));
   };
 
-  const dismissFlag = (f) => {
-    // eslint-disable-next-line no-alert
-    const ok = window.confirm(`Dismiss ${f.intent} as a false detection? This removes the flag.`);
-    if (ok) doAction(() => dismissAudioFlag(f.flag_id, reviewerName, 'Dismissed as false detection'));
+  const confirmDismiss = (f) => {
+    doAction(() => dismissAudioFlag(f.flag_id, reviewerName, 'Dismissed as false detection').then(() => setDismissingFlagId(null)));
+  };
+
+  const undoDismiss = (f) => {
+    doAction(() => undismissAudioFlag(f.flag_id, reviewerName));
   };
 
   const roleForLane = (laneIdx) =>
     laneIdx === 0 ? session?.speaker1_role : session?.speaker2_role;
 
   const assignRole = (laneIdx, role) => {
-    if (locked || busy) return;
+    if (readOnly || busy) return;
     const s1 = laneIdx === 0 ? role : opposite(role);
     const s2 = laneIdx === 0 ? opposite(role) : role;
     setBusy(true);
@@ -209,7 +262,7 @@ export default function AudioSessionViewer({ sId, reviewerName, reviewerRole, on
               return (
                 <button
                   key={r}
-                  disabled={locked || busy}
+                  disabled={readOnly || busy}
                   onClick={() => assignRole(laneIdx, r)}
                   style={{
                     padding: '3px 10px', fontSize: 11, fontFamily: MONO,
@@ -217,7 +270,7 @@ export default function AudioSessionViewer({ sId, reviewerName, reviewerRole, on
                     border: `1px solid ${active ? C.accent : C.border}`,
                     background: active ? C.accentLight : C.bgSurface,
                     color: active ? C.accentDark : C.textSecondary,
-                    cursor: locked || busy ? 'not-allowed' : 'pointer',
+                    cursor: readOnly || busy ? 'not-allowed' : 'pointer',
                   }}
                 >
                   {r}
@@ -236,14 +289,21 @@ export default function AudioSessionViewer({ sId, reviewerName, reviewerRole, on
           ) : laneFlags.map((f) => {
             const seg = segById[f.seg_id];
             const confirmed = f.status === 'CONFIRMED';
+            const dismissed = f.status === 'DISMISSED';
             const isEditing = editingFlag === f.flag_id;
+            const isDismissing = dismissingFlagId === f.flag_id;
+            const isSevere = f.severity === 'SEVERE' || f.severity === 'HIGH' || f.severity === 'RED';
+            const isFlagged = f.severity === 'FLAGGED' || f.severity === 'MEDIUM' || f.severity === 'AMBER';
             return (
               <div key={f.flag_id} style={{
-                border: `1px solid ${confirmed ? C.cleanBorder : C.flaggedBorder}`,
-                background: confirmed ? C.cleanBg : C.flaggedBg,
+                border: dismissed ? `1px dashed ${C.border}`
+                  : `1px solid ${confirmed ? (isSevere ? C.severeBorder : isFlagged ? C.flaggedBorder : C.cleanBorder) : C.flaggedBorder}`,
+                background: dismissed ? C.bgMuted
+                  : (confirmed ? (isSevere ? C.severeBg : isFlagged ? C.flaggedBg : C.cleanBg) : C.flaggedBg),
                 borderRadius: 5,
                 padding: '10px 12px',
                 marginBottom: 8,
+                opacity: dismissed ? 0.75 : 1,
               }}>
                 <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
                   <button
@@ -295,6 +355,31 @@ export default function AudioSessionViewer({ sId, reviewerName, reviewerRole, on
                       CONFIRMED{f.confirmed_by ? ` · ${f.confirmed_by}` : ''}
                     </span>
                   )}
+                  {dismissed && (
+                    <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                      <span
+                        style={{
+                          fontSize: 10, fontFamily: MONO, padding: '1px 6px', borderRadius: 3,
+                          background: '#EEEEEE', border: `1px solid ${C.border}`, color: C.textSecondary,
+                        }}
+                      >
+                        DISMISSED
+                      </span>
+                      {!readOnly && (
+                        <button
+                          disabled={busy}
+                          onClick={() => undoDismiss(f)}
+                          style={{
+                            fontSize: 10, fontFamily: MONO, padding: '1px 6px', borderRadius: 3,
+                            background: C.bgSurface, border: `1px solid ${C.border}`, color: C.textPrimary,
+                            cursor: busy ? 'not-allowed' : 'pointer',
+                          }}
+                        >
+                          Undo
+                        </button>
+                      )}
+                    </div>
+                  )}
                 </div>
                 {f.transcript && (
                   <div style={{ fontSize: 13, color: C.textPrimary, marginTop: 6, lineHeight: 1.5 }}>
@@ -307,8 +392,8 @@ export default function AudioSessionViewer({ sId, reviewerName, reviewerRole, on
                   </div>
                 )}
 
-                {/* Flag actions — confirm / edit / dismiss (hidden when locked) */}
-                {!locked && !isEditing && (
+                {/* Flag actions — confirm / edit / dismiss (hidden when readOnly) */}
+                {!readOnly && !isEditing && !dismissed && !isDismissing && (
                   <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
                     {!confirmed && (
                       <button
@@ -336,7 +421,7 @@ export default function AudioSessionViewer({ sId, reviewerName, reviewerRole, on
                     </button>
                     <button
                       disabled={busy}
-                      onClick={() => dismissFlag(f)}
+                      onClick={() => setDismissingFlagId(f.flag_id)}
                       style={{
                         padding: '4px 10px', fontSize: 11, fontFamily: MONO, borderRadius: 3,
                         border: `1px solid ${C.severeBorder}`, background: C.bgSurface, color: C.severeText,
@@ -348,8 +433,44 @@ export default function AudioSessionViewer({ sId, reviewerName, reviewerRole, on
                   </div>
                 )}
 
+                {/* Inline dismiss confirmation */}
+                {!readOnly && isDismissing && (
+                  <div style={{
+                    marginTop: 8, padding: 10, borderRadius: 4,
+                    background: '#FEF2F2', border: `1px solid ${C.severeBorder}`,
+                  }}>
+                    <div style={{ fontSize: 13, color: '#A32D2D', marginBottom: 8 }}>
+                      Dismiss this flag? This marks it as a false detection.
+                    </div>
+                    <div style={{ display: 'flex', gap: 6 }}>
+                      <button
+                        disabled={busy}
+                        onClick={() => confirmDismiss(f)}
+                        style={{
+                          padding: '6px 12px', fontSize: 12, fontWeight: 500, borderRadius: 3,
+                          border: 'none', background: busy ? '#D4D0C9' : '#A32D2D', color: '#FFFFFF',
+                          cursor: busy ? 'not-allowed' : 'pointer',
+                        }}
+                      >
+                        {busy ? '…' : 'Confirm Dismiss'}
+                      </button>
+                      <button
+                        disabled={busy}
+                        onClick={() => setDismissingFlagId(null)}
+                        style={{
+                          padding: '6px 12px', fontSize: 12, fontWeight: 500, borderRadius: 3,
+                          border: `1px solid ${C.border}`, background: '#FFFFFF', color: C.textPrimary,
+                          cursor: busy ? 'not-allowed' : 'pointer',
+                        }}
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                )}
+
                 {/* Inline edit form — saves as an amendment, resets to unconfirmed */}
-                {!locked && isEditing && (
+                {!readOnly && isEditing && (
                   <div style={{
                     marginTop: 8, padding: 10, borderRadius: 4,
                     background: C.bgSurface, border: `1px solid ${C.border}`,
@@ -449,6 +570,7 @@ export default function AudioSessionViewer({ sId, reviewerName, reviewerRole, on
               </span>
               <VerdictBadge verdict={session.overall_verdict} />
               <StatusBadge status={session.review_status} />
+              <HasVideoBadge value={session.has_video} />
               <span style={{ fontSize: 12, color: C.textSecondary }}>
                 {session.lang || 'unknown language'} · {segments.length} segments · {activeFlags.length} flags
                 {unactionedCount > 0 ? ` (${unactionedCount} unactioned)` : ''}
@@ -480,6 +602,13 @@ export default function AudioSessionViewer({ sId, reviewerName, reviewerRole, on
                   letterSpacing: '0.05em', color: C.textSecondary, marginBottom: 8,
                 }}>
                   Recording — click any flagged timestamp below to jump to it
+                </div>
+                <div style={{ fontSize: 12, color: C.textSecondary, marginBottom: 10 }}>
+                  Source media: {getHasVideoState(session.has_video) == null
+                    ? 'video status unknown'
+                    : getHasVideoState(session.has_video)
+                      ? 'contains a video stream'
+                      : 'audio only'}
                 </div>
                 <audio ref={audioRef} controls preload="metadata" style={{ width: '100%' }} />
                 {playerError && (
@@ -522,7 +651,7 @@ export default function AudioSessionViewer({ sId, reviewerName, reviewerRole, on
               border: `1px solid ${C.border}`, borderRadius: 6,
               padding: '14px 18px', display: 'flex', gap: 10, alignItems: 'center',
             }}>
-              {!locked && (
+              {!readOnly && reviewerRole !== 'L2' && (
                 <>
                   <input
                     value={note}
@@ -596,9 +725,9 @@ export default function AudioSessionViewer({ sId, reviewerName, reviewerRole, on
                   Unlock Session
                 </button>
               )}
-              {locked && reviewerRole !== 'L2' && (
+              {readOnly && reviewerRole !== 'L2' && (
                 <span style={{ fontSize: 13, color: C.textSecondary }}>
-                  This session is locked — read only.
+                  This session is submitted or locked — read only.
                 </span>
               )}
             </div>

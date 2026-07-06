@@ -957,6 +957,8 @@ def audio_sessions(
     reviewer_name: Optional[str] = None,
     reviewer_role: Optional[str] = None,
     assigned_to:   Optional[str] = None,
+    sort_col: Optional[str] = None,
+    sort_dir: Optional[str] = None,
     limit:  int = Query(default=50, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
 ):
@@ -964,6 +966,7 @@ def audio_sessions(
         status=status, search=search,
         reviewer_role=reviewer_role, reviewer_name=reviewer_name,
         assigned_to=assigned_to,
+        sort_col=sort_col, sort_dir=sort_dir,
         limit=limit, offset=offset,
     )
     return {"rows": rows, "total": total}
@@ -1075,18 +1078,20 @@ def audio_amend_flag(flag_id: int, body: AmendAudioFlagRequest):
             conn.execute("DELETE FROM audio_flags WHERE parent_flag_id = ?", (original_flag_id,))
 
             original = conn.execute(
-                "SELECT seg_id, transcript, conf FROM audio_flags WHERE flag_id = ?",
+                "SELECT seg_id, ts_start, ts_end, transcript, conf FROM audio_flags WHERE flag_id = ?",
                 (original_flag_id,),
             ).fetchone()
 
             cur = conn.execute(
                 """INSERT INTO audio_flags
-                       (s_id, seg_id, intent, severity, conf, transcript,
+                       (s_id, seg_id, ts_start, ts_end, intent, severity, conf, transcript,
                         source, status, parent_flag_id, reasoning, created_by)
-                   VALUES (?, ?, ?, ?, ?, ?, 'MANUAL', 'ACTIVE', ?, ?, ?)""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'MANUAL', 'ACTIVE', ?, ?, ?)""",
                 (
                     s_id,
                     original["seg_id"] if original else target["seg_id"],
+                    original["ts_start"] if original else None,
+                    original["ts_end"] if original else None,
                     body.intent,
                     body.severity,
                     1.0,
@@ -1131,13 +1136,54 @@ def audio_dismiss_flag(flag_id: int, body: DismissFlagRequest):
             _reject_if_audio_locked(_audio_session_or_404(s_id))
             original_flag_id = target["parent_flag_id"] if target["parent_flag_id"] else flag_id
 
-            conn.execute("DELETE FROM audio_flags WHERE parent_flag_id = ?", (original_flag_id,))
-            conn.execute("DELETE FROM audio_flags WHERE flag_id = ?", (original_flag_id,))
+            conn.execute(
+                "UPDATE audio_flags SET status = 'DISMISSED' WHERE flag_id = ? OR parent_flag_id = ?",
+                (original_flag_id, original_flag_id),
+            )
 
             conn.execute(
                 """INSERT INTO audio_review_log (s_id, flag_id, action, reviewer_id, note)
                    VALUES (?, ?, 'DISMISSED', ?, ?)""",
                 (s_id, original_flag_id, body.reviewer_id, body.note),
+            )
+            recompute_audio_session_verdict(s_id, conn)
+        return {"success": True}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        conn.close()
+
+class UndismissFlagRequest(BaseModel):
+    reviewer_id: str
+
+@app.post("/audio/flags/{flag_id}/undismiss")
+def audio_undismiss_flag(flag_id: int, body: UndismissFlagRequest):
+    """Restore a dismissed flag back to ACTIVE."""
+    conn = get_audio_connection()
+    try:
+        with conn:
+            target = conn.execute(
+                "SELECT flag_id, s_id, parent_flag_id FROM audio_flags WHERE flag_id = ?",
+                (flag_id,),
+            ).fetchone()
+            if target is None:
+                raise HTTPException(status_code=404, detail=f"Audio flag {flag_id} not found")
+
+            s_id = target["s_id"]
+            _reject_if_audio_locked(_audio_session_or_404(s_id))
+            original_flag_id = target["parent_flag_id"] if target["parent_flag_id"] else flag_id
+
+            conn.execute(
+                "UPDATE audio_flags SET status = 'ACTIVE' WHERE flag_id = ? OR parent_flag_id = ?",
+                (original_flag_id, original_flag_id),
+            )
+
+            conn.execute(
+                """INSERT INTO audio_review_log (s_id, flag_id, action, reviewer_id)
+                   VALUES (?, ?, 'UNDISMISSED', ?)""",
+                (s_id, original_flag_id, body.reviewer_id),
             )
             recompute_audio_session_verdict(s_id, conn)
         return {"success": True}
@@ -1167,7 +1213,7 @@ def audio_confirm_all_flags(s_id: int, body: LockRequest):
             to_confirm = [
                 r["flag_id"] for r in rows
                 if (r["parent_flag_id"] is not None or r["flag_id"] not in amended_parents)
-                and r["status"] != "CONFIRMED"
+                and r["status"] not in ("CONFIRMED", "DISMISSED")
             ]
             for fid in to_confirm:
                 conn.execute(

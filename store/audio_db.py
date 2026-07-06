@@ -36,6 +36,10 @@ def initialise_audio_db() -> None:
         "ALTER TABLE audio_sessions ADD COLUMN audio_url TEXT",         # HLS (.m3u8) recording URL
         "ALTER TABLE audio_flags ADD COLUMN reasoning TEXT",            # reviewer note on amendments
         "ALTER TABLE audio_sessions ADD COLUMN confidence_score REAL",  # verdict confidence, same scale as chat
+        "ALTER TABLE audio_sessions ADD COLUMN astrotalk_verdict TEXT", # verdict from original astrotalk pipeline
+        "ALTER TABLE audio_sessions ADD COLUMN has_video INTEGER",      # source media contains a video stream
+        "ALTER TABLE audio_flags ADD COLUMN ts_start REAL",             # exact flagged span start
+        "ALTER TABLE audio_flags ADD COLUMN ts_end REAL",               # exact flagged span end
         # Flag-level audit trail, same as chat's flags table
         "ALTER TABLE audio_flags ADD COLUMN confirmed_by TEXT",
         "ALTER TABLE audio_flags ADD COLUMN confirmed_at TEXT",
@@ -52,6 +56,13 @@ def initialise_audio_db() -> None:
     print(f"Audio database initialised at {AUDIO_DB_PATH}")
 
 
+def _normalize_audio_session_row(row: dict) -> dict:
+    normalized = dict(row)
+    if "has_video" in normalized and normalized["has_video"] is not None:
+        normalized["has_video"] = bool(normalized["has_video"])
+    return normalized
+
+
 def fetch_audio_sessions_page(
     *,
     status: str = None,
@@ -59,6 +70,8 @@ def fetch_audio_sessions_page(
     reviewer_role: str = None,
     reviewer_name: str = None,
     assigned_to: str = None,
+    sort_col: str = None,
+    sort_dir: str = None,
     limit: int = 50,
     offset: int = 0,
 ) -> tuple[list[dict], int]:
@@ -97,6 +110,24 @@ def fetch_audio_sessions_page(
         ) sc ON sc.s_id = s.s_id
         WHERE {where_sql}
     """
+    # Safe columns for sorting
+    valid_cols = {
+        's_id': 's.s_id',
+        'duration': 'duration_seconds',
+        'segments': 'segment_count',
+        'flags': 'flag_count',
+        'verdict': 's.overall_verdict',
+        'status': 's.review_status',
+    }
+    
+    status_sort = "CASE WHEN s.review_status = 'SUBMITTED_FOR_REVIEW' THEN 0 ELSE 1 END, " if reviewer_role == "L2" else ""
+    
+    order_clause = f"ORDER BY {status_sort}s.s_id ASC"
+    if sort_col and sort_col in valid_cols:
+        col_expr = valid_cols[sort_col]
+        direction = "DESC" if sort_dir == "desc" else "ASC"
+        order_clause = f"ORDER BY {status_sort}{col_expr} {direction}, s.s_id ASC"
+
     with get_audio_connection() as conn:
         total = conn.execute(f"SELECT COUNT(*) {base}", params).fetchone()[0]
         rows = conn.execute(
@@ -105,11 +136,11 @@ def fetch_audio_sessions_page(
                        COALESCE(sc.segment_count, 0) AS segment_count,
                        COALESCE(sc.duration_seconds, 0) AS duration_seconds
                 {base}
-                ORDER BY s.s_id ASC
+                {order_clause}
                 LIMIT ? OFFSET ?""",
             params + [limit, offset],
         ).fetchall()
-    return [dict(r) for r in rows], total
+    return [_normalize_audio_session_row(dict(r)) for r in rows], total
 
 
 def fetch_audio_session_detail(s_id: int) -> dict:
@@ -121,10 +152,10 @@ def fetch_audio_session_detail(s_id: int) -> dict:
             "SELECT * FROM audio_segments WHERE s_id = ? ORDER BY seg_id", (s_id,)
         ).fetchall()
         flags = conn.execute(
-            "SELECT * FROM audio_flags WHERE s_id = ? ORDER BY seg_id, flag_id", (s_id,)
+            "SELECT * FROM audio_flags WHERE s_id = ? ORDER BY COALESCE(ts_start, 1e18), seg_id, flag_id", (s_id,)
         ).fetchall()
     return {
-        "session": dict(session) if session else None,
+        "session": _normalize_audio_session_row(dict(session)) if session else None,
         "segments": [dict(s) for s in segments],
         "flags": [dict(f) for f in flags],
     }
@@ -148,9 +179,9 @@ def recompute_audio_session_verdict(s_id: int, conn) -> str:
     from engine.verdict_rules import get_db_verdict_for_flags, get_db_confidence_for_verdict
 
     rows = conn.execute(
-        "SELECT flag_id, intent, parent_flag_id FROM audio_flags WHERE s_id = ?", (s_id,)
+        "SELECT flag_id, intent, status, parent_flag_id FROM audio_flags WHERE s_id = ?", (s_id,)
     ).fetchall()
-    codes = [r["intent"] for r in _active_audio_flag_rows(rows) if r["intent"]]
+    codes = [r["intent"] for r in _active_audio_flag_rows(rows) if r["intent"] and r["status"] != "DISMISSED"]
     verdict    = get_db_verdict_for_flags(codes)
     confidence = get_db_confidence_for_verdict(verdict)
     conn.execute(
@@ -171,7 +202,7 @@ def get_audio_flag_summary(s_id: int) -> dict:
         ).fetchall()
     active = _active_audio_flag_rows(rows)
     total = len(active)
-    actioned = sum(1 for r in active if r["status"] == "CONFIRMED")
+    actioned = sum(1 for r in active if r["status"] in ("CONFIRMED", "DISMISSED"))
     return {
         "total_flags":      total,
         "actioned_flags":   actioned,
