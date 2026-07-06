@@ -33,6 +33,8 @@ export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelect
   const [status,  setStatus]  = useState('');
   const [search,  setSearch]  = useState('');
   const [page,    setPage]    = useState(0);
+  const [sortCol, setSortCol] = useState('s_id');
+  const [sortDir, setSortDir] = useState('asc');
   const [loading, setLoading] = useState(true);
   const [error,   setError]   = useState('');
 
@@ -43,6 +45,7 @@ export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelect
       getAudioSessions({
         status, search,
         reviewer_name: reviewerName, reviewer_role: reviewerRole,
+        sort_col: sortCol, sort_dir: sortDir,
         limit: PAGE_SIZE, offset: page * PAGE_SIZE,
       }),
       getAudioStats({ reviewer_name: reviewerName, reviewer_role: reviewerRole }),
@@ -54,7 +57,7 @@ export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelect
       })
       .catch((e) => setError(String(e.message || e)))
       .finally(() => setLoading(false));
-  }, [status, search, page, reviewerName, reviewerRole]);
+  }, [status, search, page, sortCol, sortDir, reviewerName, reviewerRole]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -75,6 +78,29 @@ export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelect
   ];
 
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+
+  const handleSort = (col) => {
+    if (sortCol === col) {
+      setSortDir(sortDir === 'asc' ? 'desc' : 'asc');
+    } else {
+      setSortCol(col);
+      setSortDir('asc');
+    }
+  };
+
+  const TABLE_COLUMNS = [
+    { key: 's_id', label: 'Session', sortable: true },
+    { key: 'lang', label: 'Language', sortable: false },
+    { key: 'duration', label: 'Duration', sortable: true },
+    { key: 'segments', label: 'Segments', sortable: true },
+    { key: 'flags', label: 'Flags', sortable: true },
+    { key: 'roles', label: 'Speaker Roles', sortable: false },
+    { key: 'assigned_to', label: 'Assigned To', sortable: false },
+    { key: 'reviewer', label: 'Reviewer', sortable: false },
+    { key: 'verdict', label: 'Verdict', sortable: true },
+    { key: 'status', label: 'Status', sortable: true },
+    { key: 'action', label: 'Action', sortable: false },
+  ];
 
   return (
     <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
@@ -195,14 +221,30 @@ export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelect
           <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
             <thead>
               <tr style={{ background: C.bgMuted }}>
-                {['Session', 'Language', 'Duration', 'Segments', 'Flags', 'Speaker Roles', 'Assigned To', 'Reviewer', 'Verdict', 'Status', 'Action'].map((h) => (
-                  <th key={h} style={{
-                    textAlign: 'left', padding: '10px 14px',
-                    fontSize: 11, fontFamily: MONO, textTransform: 'uppercase',
-                    letterSpacing: '0.05em', color: C.textSecondary,
-                    borderBottom: `1px solid ${C.border}`,
-                  }}>
-                    {h}
+                {TABLE_COLUMNS.map((col) => (
+                  <th
+                    key={col.key}
+                    onClick={() => col.sortable && handleSort(col.key)}
+                    style={{
+                      textAlign: 'left', padding: '10px 14px',
+                      fontSize: 11, fontFamily: MONO, textTransform: 'uppercase',
+                      letterSpacing: '0.05em', color: C.textSecondary,
+                      borderBottom: `1px solid ${C.border}`,
+                      cursor: col.sortable ? 'pointer' : 'default',
+                      userSelect: 'none',
+                    }}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                      {col.label}
+                      {col.sortable && (
+                        <span style={{
+                          opacity: sortCol === col.key ? 1 : 0.3,
+                          fontSize: 10,
+                        }}>
+                          {sortCol === col.key ? (sortDir === 'asc' ? '↑' : '↓') : '↕'}
+                        </span>
+                      )}
+                    </div>
                   </th>
                 ))}
               </tr>
@@ -220,8 +262,7 @@ export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelect
               ) : rows.map((r) => (
                 <tr
                   key={r.s_id}
-                  onClick={() => onSelectSession(r.s_id)}
-                  style={{ cursor: 'pointer', borderBottom: `1px solid ${C.borderLight}` }}
+                  style={{ borderBottom: `1px solid ${C.borderLight}` }}
                   onMouseEnter={(e) => { e.currentTarget.style.background = C.bgMuted; }}
                   onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; }}
                 >

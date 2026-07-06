@@ -156,6 +156,8 @@ export function getAudioSessions(filters = {}) {
   if (filters.reviewer_name) params.append('reviewer_name', filters.reviewer_name);
   if (filters.reviewer_role) params.append('reviewer_role', filters.reviewer_role);
   if (filters.assigned_to)   params.append('assigned_to', filters.assigned_to);
+  if (filters.sort_col)      params.append('sort_col', filters.sort_col);
+  if (filters.sort_dir)      params.append('sort_dir', filters.sort_dir);
   if (filters.limit  != null) params.append('limit',  filters.limit);
   if (filters.offset != null) params.append('offset', filters.offset);
   const qs = params.toString() ? `?${params}` : '';

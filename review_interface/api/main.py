@@ -957,6 +957,8 @@ def audio_sessions(
     reviewer_name: Optional[str] = None,
     reviewer_role: Optional[str] = None,
     assigned_to:   Optional[str] = None,
+    sort_col: Optional[str] = None,
+    sort_dir: Optional[str] = None,
     limit:  int = Query(default=50, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
 ):
@@ -964,6 +966,7 @@ def audio_sessions(
         status=status, search=search,
         reviewer_role=reviewer_role, reviewer_name=reviewer_name,
         assigned_to=assigned_to,
+        sort_col=sort_col, sort_dir=sort_dir,
         limit=limit, offset=offset,
     )
     return {"rows": rows, "total": total}

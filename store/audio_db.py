@@ -59,6 +59,8 @@ def fetch_audio_sessions_page(
     reviewer_role: str = None,
     reviewer_name: str = None,
     assigned_to: str = None,
+    sort_col: str = None,
+    sort_dir: str = None,
     limit: int = 50,
     offset: int = 0,
 ) -> tuple[list[dict], int]:
@@ -97,6 +99,22 @@ def fetch_audio_sessions_page(
         ) sc ON sc.s_id = s.s_id
         WHERE {where_sql}
     """
+    # Safe columns for sorting
+    valid_cols = {
+        's_id': 's.s_id',
+        'duration': 'duration_seconds',
+        'segments': 'segment_count',
+        'flags': 'flag_count',
+        'verdict': 's.overall_verdict',
+        'status': 's.review_status',
+    }
+    
+    order_clause = "ORDER BY s.s_id ASC"
+    if sort_col and sort_col in valid_cols:
+        col_expr = valid_cols[sort_col]
+        direction = "DESC" if sort_dir == "desc" else "ASC"
+        order_clause = f"ORDER BY {col_expr} {direction}, s.s_id ASC"
+
     with get_audio_connection() as conn:
         total = conn.execute(f"SELECT COUNT(*) {base}", params).fetchone()[0]
         rows = conn.execute(
@@ -105,7 +123,7 @@ def fetch_audio_sessions_page(
                        COALESCE(sc.segment_count, 0) AS segment_count,
                        COALESCE(sc.duration_seconds, 0) AS duration_seconds
                 {base}
-                ORDER BY s.s_id ASC
+                {order_clause}
                 LIMIT ? OFFSET ?""",
             params + [limit, offset],
         ).fetchall()
