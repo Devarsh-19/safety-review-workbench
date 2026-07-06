@@ -101,6 +101,34 @@ def ingest_session(conn, obj: dict) -> tuple[int, int, int]:
     n_flags = 0
     for flag in flags:
         seg_id = flag.get("segment_id") or flag.get("seg_id")
+        
+        # If seg_id is missing, try to link it using speaker or timestamp
+        if not seg_id and segments:
+            # Match by speaker first
+            speaker = flag.get("speaker")
+            if speaker:
+                for seg in segments:
+                    if seg.get("speaker") == speaker:
+                        seg_id = seg.get("segment_id") or seg.get("seg_id")
+                        break
+            
+            # If still no seg_id, match by timestamp overlap
+            if not seg_id and flag.get("ts_start") is not None:
+                f_ts = hms_to_seconds(flag.get("ts_start"))
+                for seg in segments:
+                    s_start = hms_to_seconds(seg.get("ts_start"))
+                    s_end = hms_to_seconds(seg.get("ts_end"))
+                    if s_start <= f_ts <= s_end:
+                        seg_id = seg.get("segment_id") or seg.get("seg_id")
+                        break
+            
+            # If still nothing, just attach to the first segment so it doesn't vanish
+            if not seg_id:
+                seg_id = segments[0].get("segment_id") or segments[0].get("seg_id")
+
+        if seg_id is not None:
+            seg_id = int(seg_id)
+        
         conn.execute(
             """INSERT INTO audio_flags (s_id, seg_id, intent, severity, conf, transcript, source)
                VALUES (?, ?, ?, ?, ?, ?, 'LLM')""",
