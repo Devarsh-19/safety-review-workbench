@@ -208,6 +208,8 @@ export default function SessionQueue({ reviewerName, reviewerRole, onSelectSessi
   const locked           = stats?.count_locked              ?? 0;
   const submitted        = stats?.count_submitted           ?? 0;
   const flaggedByBoth    = stats?.count_flagged_by_both     ?? 0;
+  const astroFlagged     = stats?.count_astrotalk_flagged   ?? 0;
+  const astroClean       = stats?.count_astrotalk_clean     ?? 0;
   const falsePos         = stats?.count_false_positive      ?? 0;
   const falsePosPct      = stats?.pct_false_positive        ?? 0;
   const falseNeg         = stats?.count_false_negative      ?? 0;
@@ -229,6 +231,11 @@ export default function SessionQueue({ reviewerName, reviewerRole, onSelectSessi
       value: <>{falseNeg} <span style={{ fontSize: 9 }}>({falseNegPct}%)</span></>,
       color: '#A32D2D' },
     { label: 'Total sessions',    value: total,                               color: C.textPrimary },
+    { label: 'Flagged / Unflagged',
+      value: <><span style={{ color: C.severeText }}>{astroFlagged}</span>
+        <span style={{ color: C.textMuted }}> / </span>
+        <span style={{ color: C.cleanText }}>{astroClean}</span></>,
+      color: C.textPrimary },
     { label: 'Pending L1 Review', value: pending,                             color: C.accent      },
   ];
 
@@ -498,8 +505,8 @@ export default function SessionQueue({ reviewerName, reviewerRole, onSelectSessi
       {/* Stats strip */}
       <div style={{ flexShrink: 0, display: 'flex', alignItems: 'stretch', background: C.bgStatsrow, borderBottom: `1px solid ${C.border}` }}>
         {statCells.map((cell) => (
-          <div key={cell.label} style={{ flex: 1, padding: '10px 20px',
-            borderRight: `1px solid ${C.border}` }}>
+          <div key={cell.label} style={{ flex: 1, padding: '10px 16px',
+            borderRight: `1px solid ${C.border}`, whiteSpace: 'nowrap' }}>
             <div style={{ fontSize: 18, fontFamily: MONO, fontWeight: 500, color: cell.color }}>
               {cell.value}
             </div>
