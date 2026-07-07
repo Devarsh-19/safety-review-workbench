@@ -85,7 +85,6 @@ IntentId = Literal[
     "PERSONAL_DATA_COLLECTION",
     "FEAR_MANIPULATION",
     "COMPETITOR_PROMOTION",
-    "OTHER",
 ]
 ToneLabel = Literal[
     "NEUTRAL",
@@ -132,7 +131,7 @@ class LongPause(TimestampedModel):
 class DiarizedSegment(TimestampedModel):
     segment_id: int = Field(ge=1, description="Sequential segment identifier within this audio.")
     speaker: str = Field(description="Stable numbered speaker label such as Speaker 1, Speaker 2, etc.")
-    intents: list[IntentId] = Field(description="Matching AstroTalk policy intent IDs for this segment, or [] if clean.")
+    flags: list[SegmentFlag] = Field(default_factory=list, description="Violation flags for this segment.")
     tone: ToneLabel = Field(description="Dominant tone heard in this segment.")
 
     @field_validator("speaker")
@@ -141,26 +140,13 @@ class DiarizedSegment(TimestampedModel):
         return normalize_speaker_label(value)
 
 
-class FlagEntry(TimestampedModel):
-    segment_id: int | None = Field(default=None, ge=1, description="Matching segment_id when the flag maps to a segment.")
+class SegmentFlag(BaseModel):
     intent: IntentId = Field(description="The matching Intent ID string from the taxonomy.")
     s: Literal["RED", "AMBER"] = Field(description="Severity label.")
     conf: float = Field(ge=0.0, le=1.0, description="Confidence rating from 0.0 to 1.0.")
     transcript_excerpt: str = Field(
         description="Short exact words or ambient event that triggered the flag; not a full transcript."
     )
-    speaker: str | None = Field(
-        default=None,
-        description="Stable numbered speaker label for speech-attributable flags, or null if not attributable.",
-    )
-    tone: ToneLabel | None = Field(default=None, description="Tone heard during this violation, if attributable.")
-
-    @field_validator("speaker")
-    @classmethod
-    def validate_optional_speaker(cls, value: str | None) -> str | None:
-        if value is None or str(value).strip() == "":
-            return None
-        return normalize_speaker_label(value)
 
 
 class AstroTalkAudioReport(BaseModel):
@@ -169,7 +155,6 @@ class AstroTalkAudioReport(BaseModel):
     review: bool = Field(description="True when any pause/no-speech span is at least 60 seconds.")
     long_pauses: list[LongPause] = Field(description="All pause/no-speech spans of 60 seconds or more.")
     segments: list[DiarizedSegment] = Field(description="Diarized timestamp/tone/intent metadata segments in order.")
-    flags: list[FlagEntry] = Field(description="Exhaustive list of isolated violations.")
 
 
 def load_env_file(path: Path) -> None:
@@ -344,23 +329,20 @@ def long_pauses_to_json(long_pauses: list[LongPause]) -> str:
 def build_audio_prompt(
     session_id: str,
     audio_duration_seconds: float,
-    local_long_pauses: list[LongPause],
     *,
     retry_compact: bool = False,
 ) -> str:
     prompt = (
         f"audio_duration_seconds: {audio_duration_seconds}\n"
         "All ts_start and ts_end values must be seconds from the beginning "
-        "of this audio and must be within the audio duration.\n"
-        f"local_long_pause_candidates_json: {long_pauses_to_json(local_long_pauses)}\n"
-        "If local_long_pause_candidates_json is not empty, include those spans in long_pauses "
-        "and set review to true.\n\n"
+        "of this audio and must be within the audio duration.\n\n"
         + prompts.USER_MESSAGE.replace("{s_id}", session_id)
     )
     if retry_compact:
         retry_user_message = getattr(prompts, "RETRY_USER_MESSAGE", "").strip() or FALLBACK_RETRY_USER_MESSAGE
         prompt += "\n\n" + retry_user_message
     return prompt
+
 
 
 def gemini_safety_settings() -> list[types.SafetySetting]:
@@ -560,151 +542,6 @@ def _segment_overlap_seconds(
     return max(0.0, min(flag_ts_end, float(segment.ts_end)) - max(flag_ts_start, float(segment.ts_start)))
 
 
-def _ordered_segment_candidates(
-    segments: list[DiarizedSegment],
-    *,
-    speaker: str | None,
-    flag_ts_start: float | None,
-    flag_ts_end: float | None,
-) -> list[DiarizedSegment]:
-    if not segments:
-        return []
-
-    if flag_ts_start is None and flag_ts_end is None:
-        if speaker:
-            same_speaker = [segment for segment in segments if segment.speaker == speaker]
-            if same_speaker:
-                return same_speaker
-        return segments
-
-    if flag_ts_start is None:
-        flag_ts_start = flag_ts_end
-    if flag_ts_end is None:
-        flag_ts_end = flag_ts_start
-
-    assert flag_ts_start is not None
-    assert flag_ts_end is not None
-
-    def sort_key(segment: DiarizedSegment) -> tuple[float, float, int]:
-        overlap = _segment_overlap_seconds(flag_ts_start, flag_ts_end, segment)
-        start_distance = min(
-            abs(float(segment.ts_start) - flag_ts_start),
-            abs(float(segment.ts_end) - flag_ts_start),
-        )
-        return (-overlap, start_distance, int(segment.segment_id))
-
-    def ordered(pool: list[DiarizedSegment]) -> list[DiarizedSegment]:
-        if not pool:
-            return []
-        containing_start = [
-            segment
-            for segment in pool
-            if float(segment.ts_start) - 0.001 <= flag_ts_start <= float(segment.ts_end) + 0.001
-        ]
-        if containing_start:
-            return sorted(containing_start, key=sort_key)
-        overlapping = [
-            segment
-            for segment in pool
-            if _segment_overlap_seconds(flag_ts_start, flag_ts_end, segment) > 0
-        ]
-        if overlapping:
-            return sorted(overlapping, key=sort_key)
-        return sorted(pool, key=sort_key)
-
-    if speaker:
-        same_speaker = [segment for segment in segments if segment.speaker == speaker]
-        speaker_matches = ordered(same_speaker)
-        if speaker_matches:
-            return speaker_matches
-
-    return ordered(segments)
-
-
-def resolve_flag_segment(
-    flag: FlagEntry,
-    ordered_segments: list[DiarizedSegment],
-) -> DiarizedSegment | None:
-    if flag.segment_id is not None:
-        exact_match = next(
-            (segment for segment in ordered_segments if int(segment.segment_id) == int(flag.segment_id)),
-            None,
-        )
-        if exact_match is not None:
-            return exact_match
-
-    candidates = _ordered_segment_candidates(
-        ordered_segments,
-        speaker=flag.speaker,
-        flag_ts_start=float(flag.ts_start),
-        flag_ts_end=float(flag.ts_end),
-    )
-    return candidates[0] if candidates else None
-
-
-def _localize_flag_span_to_segment(
-    flag: FlagEntry,
-    segment: DiarizedSegment | None,
-) -> tuple[float, float]:
-    if segment is None:
-        return float(flag.ts_start), float(flag.ts_end)
-
-    seg_start = float(segment.ts_start)
-    seg_end = float(segment.ts_end)
-    localized_start = max(float(flag.ts_start), seg_start)
-    localized_end = min(float(flag.ts_end), seg_end)
-    if localized_end < localized_start:
-        return seg_start, seg_end
-    return localized_start, localized_end
-
-
-def normalize_flag_entries(
-    flags: list[FlagEntry],
-    ordered_segments: list[DiarizedSegment],
-) -> list[FlagEntry]:
-    normalized_flags: list[FlagEntry] = []
-    for flag in flags:
-        matched_segment = resolve_flag_segment(flag, ordered_segments)
-        localized_start, localized_end = _localize_flag_span_to_segment(flag, matched_segment)
-        update: dict[str, Any] = {
-            "ts_start": round(localized_start, 3),
-            "ts_end": round(localized_end, 3),
-        }
-        if matched_segment is not None:
-            update["segment_id"] = int(matched_segment.segment_id)
-            if flag.speaker is None:
-                update["speaker"] = matched_segment.speaker
-            if flag.tone is None:
-                update["tone"] = matched_segment.tone
-        normalized_flags.append(flag.model_copy(update=update))
-
-    normalized_flags.sort(key=lambda item: (float(item.ts_start), float(item.ts_end), int(item.segment_id or 0), item.intent))
-    return normalized_flags
-
-
-def normalize_segment_intents(
-    ordered_segments: list[DiarizedSegment],
-    normalized_flags: list[FlagEntry],
-) -> list[DiarizedSegment]:
-    intents_by_segment: dict[int, list[IntentId]] = {int(segment.segment_id): [] for segment in ordered_segments}
-    segment_by_id = {int(segment.segment_id): segment for segment in ordered_segments}
-
-    for flag in normalized_flags:
-        matched_segment = segment_by_id.get(int(flag.segment_id)) if flag.segment_id is not None else None
-        if matched_segment is None:
-            matched_segment = resolve_flag_segment(flag, ordered_segments)
-        if matched_segment is None:
-            continue
-        segment_intents = intents_by_segment[int(matched_segment.segment_id)]
-        if flag.intent not in segment_intents:
-            segment_intents.append(flag.intent)
-
-    return [
-        segment.model_copy(update={"intents": intents_by_segment.get(int(segment.segment_id), [])})
-        for segment in ordered_segments
-    ]
-
-
 def normalize_audio_report(
     report: AstroTalkAudioReport,
     session_id: str,
@@ -714,8 +551,7 @@ def normalize_audio_report(
         report.segments,
         key=lambda segment: (float(segment.ts_start), float(segment.ts_end), int(segment.segment_id)),
     )
-    normalized_flags = normalize_flag_entries(report.flags, ordered_segments)
-    normalized_segments = normalize_segment_intents(ordered_segments, normalized_flags)
+    normalized_segments = ordered_segments
     merged_pauses = [
         normalize_long_pause_duration(pause)
         for pause in report.long_pauses
@@ -732,7 +568,6 @@ def normalize_audio_report(
             "review": bool(merged_pauses),
             "long_pauses": merged_pauses,
             "segments": normalized_segments,
-            "flags": normalized_flags,
         }
     )
 
@@ -787,7 +622,7 @@ def evaluate_audio(
             return response, round(time.perf_counter() - start_time, 3)
 
         response, latency_seconds = generate_with_prompt(
-            build_audio_prompt(session_id, audio_duration_seconds, local_long_pauses)
+            build_audio_prompt(session_id, audio_duration_seconds)
         )
         try:
             parsed_report = parse_audio_report(response, session_id)
@@ -800,7 +635,6 @@ def evaluate_audio(
                 build_audio_prompt(
                     session_id,
                     audio_duration_seconds,
-                    local_long_pauses,
                     retry_compact=True,
                 )
             )
@@ -857,7 +691,17 @@ def flatten_result(
     error: str | None = None,
     has_video: bool | None = None,
 ) -> dict[str, Any]:
-    flags = [flag.model_dump() for flag in report.flags] if report else []
+    flags = []
+    if report:
+        for seg in report.segments:
+            for flag in seg.flags:
+                f_dump = flag.model_dump()
+                f_dump["ts_start"] = seg.ts_start
+                f_dump["ts_end"] = seg.ts_end
+                f_dump["segment_id"] = seg.segment_id
+                f_dump["speaker"] = seg.speaker
+                f_dump["tone"] = seg.tone
+                flags.append(f_dump)
     segments = [segment.model_dump() for segment in report.segments] if report else []
     if report:
         long_pauses = [pause.model_dump() for pause in report.long_pauses]
@@ -1070,6 +914,7 @@ def run_batch(args: argparse.Namespace) -> pd.DataFrame:
                         duration_seconds,
                         local_long_pauses,
                         cache_name,
+                        args.thinking_level,
                     )
                     raw_json_path = write_raw_response(raw_json_dir, session_id, response_json)
                     append_raw_json(
