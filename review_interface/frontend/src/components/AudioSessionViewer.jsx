@@ -7,7 +7,6 @@ import StatusBadge from './StatusBadge';
 import VerdictBadge from './VerdictBadge';
 import LoadingSpinner from './LoadingSpinner';
 import HasVideoBadge, { getHasVideoState } from './HasVideoBadge';
-import HasVideoBadge, { getHasVideoState } from './HasVideoBadge';
 import {
   getAudioSessionDetail,
   saveSpeakerRoles,
@@ -78,7 +77,6 @@ const INTENT_TAXONOMY = [
 ];
 
 export default function AudioSessionViewer({ sId, sessionList, reviewerName, reviewerRole, onBack, onNavigate }) {
-export default function AudioSessionViewer({ sId, sessionList, reviewerName, reviewerRole, onBack, onNavigate }) {
   const [detail, setDetail] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -88,7 +86,6 @@ export default function AudioSessionViewer({ sId, sessionList, reviewerName, rev
   const [editingFlag, setEditingFlag] = useState(null);   // flag_id being edited
   const [dismissingFlagId, setDismissingFlagId] = useState(null);
   const [editIntent, setEditIntent] = useState('');
-  const [editSeverity, setEditSeverity] = useState('RED');
   const [editSeverity, setEditSeverity] = useState('RED');
   const [editReasoning, setEditReasoning] = useState('');
 
@@ -219,9 +216,6 @@ export default function AudioSessionViewer({ sId, sessionList, reviewerName, rev
     setEditingFlag(f.flag_id);
     setEditIntent(f.intent || '');
     // Normalize legacy severity values (HIGH/SEVERE→RED, MEDIUM/FLAGGED→AMBER)
-    const sev = (f.severity || '').toUpperCase();
-    const normalizedSev = ['RED', 'SEVERE', 'HIGH'].includes(sev) ? 'RED' : 'AMBER';
-    setEditSeverity(normalizedSev);
     // Normalize legacy severity values (HIGH/SEVERE→RED, MEDIUM/FLAGGED→AMBER)
     const sev = (f.severity || '').toUpperCase();
     const normalizedSev = ['RED', 'SEVERE', 'HIGH'].includes(sev) ? 'RED' : 'AMBER';
@@ -521,18 +515,12 @@ export default function AudioSessionViewer({ sId, sessionList, reviewerName, rev
                   }}>
                     <div style={{ display: 'flex', gap: 6, marginBottom: 6 }}>
                       <select
-                      <select
                         value={editIntent}
                         onChange={(e) => setEditIntent(e.target.value)}
                         style={{
                           flex: 1, padding: '6px 8px', fontSize: 12, fontFamily: MONO,
                           borderRadius: 4, border: `1px solid ${C.border}`, cursor: 'pointer',
-                          borderRadius: 4, border: `1px solid ${C.border}`, cursor: 'pointer',
                         }}
-                      >
-                        <option value="" disabled>Select Intent</option>
-                        {INTENT_TAXONOMY.map((i) => <option key={i} value={i}>{i}</option>)}
-                      </select>
                       >
                         <option value="" disabled>Select Intent</option>
                         {INTENT_TAXONOMY.map((i) => <option key={i} value={i}>{i}</option>)}
