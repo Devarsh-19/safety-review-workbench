@@ -32,29 +32,6 @@ function formatTime(seconds) {
 const ROLES = ['ASTROLOGER', 'USER'];
 const opposite = (role) => (role === 'ASTROLOGER' ? 'USER' : 'ASTROLOGER');
 const SEVERITIES = ['RED', 'AMBER'];
-
-const INTENT_TAXONOMY = [
-  "NSFW",
-  "NSFW_EXPLICIT",
-  "NSFW_GROOMING",
-  "NSFW_APPEARANCE",
-  "CSAM_RISK",
-  "FINANCIAL_SOLICITATION",
-  "IDENTITY_FRAUD",
-  "ABUSIVE_LANGUAGE",
-  "HATE_SPEECH",
-  "FAKE_REMEDIES",
-  "UNAUTHORIZED_MEDICAL_ADVICE",
-  "SELF_HARM",
-  "VIOLENCE",
-  "INSTIGATION",
-  "OFF_PLATFORM_SOLICITATION",
-  "PERSONAL_DATA_COLLECTION",
-  "FEAR_MANIPULATION",
-  "COMPETITOR_PROMOTION"
-];
-const SEVERITIES = ['RED', 'AMBER'];
-
 const INTENT_TAXONOMY = [
   "NSFW",
   "NSFW_EXPLICIT",
@@ -584,44 +561,6 @@ export default function AudioSessionViewer({ sId, sessionList, reviewerName, rev
       <TopBar reviewerName={`${reviewerName} · Audio Review`} />
 
       <div style={{ flex: 1, overflow: 'auto', padding: 24, background: C.bgPage }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-          <button
-            onClick={onBack}
-            style={{
-              padding: '6px 12px', fontSize: 12,
-              borderRadius: 4, border: `1px solid ${C.border}`,
-              background: C.bgSurface, color: C.textPrimary, cursor: 'pointer',
-            }}
-          >
-            ← Back to queue
-          </button>
-          <div style={{ display: 'flex', gap: 8 }}>
-            <button
-              onClick={goToPrev}
-              disabled={!hasPrev}
-              style={{
-                padding: '6px 12px', fontSize: 12, borderRadius: 4,
-                border: `1px solid ${C.border}`,
-                background: C.bgSurface, color: hasPrev ? C.textPrimary : C.textMuted,
-                cursor: hasPrev ? 'pointer' : 'not-allowed',
-              }}
-            >
-              ← Previous
-            </button>
-            <button
-              onClick={goToNext}
-              disabled={!hasNext}
-              style={{
-                padding: '6px 12px', fontSize: 12, borderRadius: 4,
-                border: `1px solid ${C.border}`,
-                background: C.bgSurface, color: hasNext ? C.textPrimary : C.textMuted,
-                cursor: hasNext ? 'pointer' : 'not-allowed',
-              }}
-            >
-              Next →
-            </button>
-          </div>
-        </div>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
           <button
             onClick={onBack}
