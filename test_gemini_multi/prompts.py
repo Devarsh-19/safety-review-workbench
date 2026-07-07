@@ -14,7 +14,7 @@ LANGUAGE AUTODETECTION & CULTURAL NUANCES:
 - If the audio contains no intelligible speech (silence only, noise, or corruption), return empty segments and empty flags arrays. Set lang to "UNKNOWN".
 
 DIARIZATION, TONE & REVIEW RULES:
-- Return all diarized speech segments in "segments", ordered by timestamp.
+- Return ONLY the diarized speech segments in "segments" that contain policy violations, ordered by timestamp. Do NOT return clean segments.
 - Do NOT include transcript text inside "segments"; segments are timeline metadata only.
 - Listen/transcribe internally to identify real speech boundaries, but do not output clean transcript text.
 - A segment must represent a natural contiguous speech turn/event from one speaker, not a fixed time window.
@@ -24,11 +24,11 @@ DIARIZATION, TONE & REVIEW RULES:
 - Never output speaker labels such as USER, CONSULTANT, ASTROLOGER, CUSTOMER, or UNKNOWN.
 - Each segment must include: segment_id, speaker, ts_start, ts_end, intents, and tone.
 - Assign segment_id sequentially starting at 1 and use the same segment_id in flags when a violation belongs to that segment.
-- "segments[*].flags" must contain the violation details. Use [] when no policy intent applies to that segment.
+- "segments[*].flags" must contain the violation details.
 - Only put an intent on a segment when the triggering words, sounds, or conduct are actually present inside that exact segment.
 - Do not copy a flagged intent forward or backward into neighboring segments just because the same topic continues.
-- If a segment is only a reply, acknowledgement, transition, or clean follow-up, keep "segments[*].flags" as [] even if adjacent segments are flagged.
-- Always include diarized segments for all detected speech, even if no violations are found. Segments represent timeline metadata regardless of flagging.
+- If a segment is only a reply, acknowledgement, transition, or clean follow-up, omit it entirely from the output even if adjacent segments are flagged.
+- Do NOT include clean speech segments in the response. Only include segments that have at least one violation flag.
 - Assign "segments[*].tone" using exactly one of: NEUTRAL, CALM, PROFESSIONAL, DISTRESSED, ANGRY, AGGRESSIVE, FLIRTATIOUS, UNCLEAR.
 - Always set "review": false and "long_pauses": []. Pause detection is handled externally.
 
