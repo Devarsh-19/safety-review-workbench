@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import subprocess
@@ -44,6 +45,8 @@ DEFAULT_MODEL_ID = "gemini-3-flash-preview"
 DEFAULT_THINKING_LEVEL = "minimal"
 LONG_PAUSE_THRESHOLD_SECONDS = 60.0
 SILENCE_NOISE_THRESHOLD = "-45dB"
+MAX_PLAUSIBLE_TRANSCRIPT_WORDS_PER_SECOND = 7.0
+MIN_WORDS_FOR_TIMESTAMP_REPAIR = 4
 FALLBACK_RETRY_USER_MESSAGE = (
     "Your previous response did not validate. Retry once with a compact reply and return only one valid JSON "
     "object that matches the schema exactly, with no markdown or extra commentary."
@@ -583,11 +586,235 @@ def _segment_overlap_seconds(
     return max(0.0, min(flag_ts_end, float(segment.ts_end)) - max(flag_ts_start, float(segment.ts_start)))
 
 
+def count_transcript_words(text: str | None) -> int:
+    if not text:
+        return 0
+    return len(re.findall(r"\S+", text.strip()))
+
+
+def minimum_plausible_transcript_duration(text: str | None) -> float:
+    word_count = count_transcript_words(text)
+    if word_count < MIN_WORDS_FOR_TIMESTAMP_REPAIR:
+        return 0.0
+    return word_count / MAX_PLAUSIBLE_TRANSCRIPT_WORDS_PER_SECOND
+
+
+def decimal_mmss_to_seconds(value: float, audio_duration_seconds: float) -> float | None:
+    """Treat values like 12.23 as 12m23s when the surrounding evidence requires it."""
+    if not math.isfinite(value) or value < 0:
+        return None
+    if abs(value - round(value, 2)) > 0.000001:
+        return None
+
+    minutes = int(value)
+    seconds = int(round((value - minutes) * 100))
+    if seconds >= 60:
+        return None
+
+    converted = float((minutes * 60) + seconds)
+    if converted > audio_duration_seconds + 0.001:
+        return None
+    return converted
+
+
+def compact_mmss_to_seconds(value: float, audio_duration_seconds: float) -> float | None:
+    """Treat values like 212.0 as 2m12s and 2146.5 as 21m46.5s."""
+    if not math.isfinite(value) or value < 100:
+        return None
+
+    whole = int(value)
+    fraction = float(value) - whole
+    minutes = whole // 100
+    seconds = (whole % 100) + fraction
+    if seconds >= 60:
+        return None
+
+    converted = float((minutes * 60) + seconds)
+    if converted > audio_duration_seconds + 0.001:
+        return None
+    if abs(converted - value) <= 0.001:
+        return None
+    return converted
+
+
+def compact_mmss_span_to_seconds(
+    ts_start: float,
+    ts_end: float,
+    audio_duration_seconds: float,
+) -> tuple[float, float] | None:
+    converted_start = compact_mmss_to_seconds(float(ts_start), audio_duration_seconds)
+    converted_end = compact_mmss_to_seconds(float(ts_end), audio_duration_seconds)
+    if converted_start is None or converted_end is None:
+        return None
+    if converted_end < converted_start:
+        return None
+    return round(converted_start, 3), round(converted_end, 3)
+
+
+def decimal_mmss_span_to_seconds(
+    ts_start: float,
+    ts_end: float,
+    audio_duration_seconds: float,
+) -> tuple[float, float] | None:
+    converted_start = decimal_mmss_to_seconds(float(ts_start), audio_duration_seconds)
+    converted_end = decimal_mmss_to_seconds(float(ts_end), audio_duration_seconds)
+    if converted_start is None or converted_end is None:
+        return None
+    if converted_end < converted_start:
+        return None
+    if abs(converted_start - ts_start) <= 0.001 and abs(converted_end - ts_end) <= 0.001:
+        return None
+    return round(converted_start, 3), round(converted_end, 3)
+
+
+def needs_decimal_mmss_repair(
+    ts_start: float,
+    ts_end: float,
+    transcript_excerpt: str | None,
+    audio_duration_seconds: float,
+) -> bool:
+    min_duration = minimum_plausible_transcript_duration(transcript_excerpt)
+    if min_duration <= 0:
+        return False
+
+    current_duration = max(0.0, float(ts_end) - float(ts_start))
+    if current_duration + 0.001 >= min_duration:
+        return False
+
+    converted_span = decimal_mmss_span_to_seconds(ts_start, ts_end, audio_duration_seconds)
+    if converted_span is None:
+        return False
+
+    converted_duration = max(0.0, converted_span[1] - converted_span[0])
+    return converted_duration + 0.001 >= min_duration
+
+
+def timestamp_span_repair_to_seconds(
+    ts_start: float,
+    ts_end: float,
+    transcript_excerpt: str | None,
+    audio_duration_seconds: float,
+) -> tuple[float, float] | None:
+    compact_span = compact_mmss_span_to_seconds(ts_start, ts_end, audio_duration_seconds)
+    if compact_span is not None:
+        return compact_span
+
+    if needs_decimal_mmss_repair(ts_start, ts_end, transcript_excerpt, audio_duration_seconds):
+        return decimal_mmss_span_to_seconds(ts_start, ts_end, audio_duration_seconds)
+    return None
+
+
+def repair_likely_display_timestamps(
+    report: AstroTalkAudioReport,
+    audio_duration_seconds: float | None,
+) -> tuple[AstroTalkAudioReport, int]:
+    if audio_duration_seconds is None or audio_duration_seconds < 60:
+        return report, 0
+
+    repaired_segments: list[DiarizedSegment] = []
+    repair_count = 0
+
+    for segment in report.segments:
+        original_segment_start = float(segment.ts_start)
+        original_segment_end = float(segment.ts_end)
+        segment_transcript = " ".join(flag.transcript_excerpt for flag in segment.flags)
+        segment_repaired_span = timestamp_span_repair_to_seconds(
+            original_segment_start,
+            original_segment_end,
+            segment_transcript,
+            audio_duration_seconds,
+        )
+
+        flag_repairs: list[tuple[SegmentFlag, tuple[float, float] | None]] = []
+        any_flag_needs_repair = False
+        for flag in segment.flags:
+            effective_start = float(flag.ts_start) if flag.ts_start is not None else original_segment_start
+            effective_end = float(flag.ts_end) if flag.ts_end is not None else original_segment_end
+            repaired_flag_span = timestamp_span_repair_to_seconds(
+                effective_start,
+                effective_end,
+                flag.transcript_excerpt,
+                audio_duration_seconds,
+            )
+            if repaired_flag_span is not None:
+                any_flag_needs_repair = True
+                flag_repairs.append((flag, repaired_flag_span))
+            else:
+                flag_repairs.append((flag, None))
+
+        if segment_repaired_span is None and any_flag_needs_repair:
+            segment_repaired_span = (
+                compact_mmss_span_to_seconds(
+                    original_segment_start,
+                    original_segment_end,
+                    audio_duration_seconds,
+                )
+                or decimal_mmss_span_to_seconds(
+                    original_segment_start,
+                    original_segment_end,
+                    audio_duration_seconds,
+                )
+            )
+        repaired_segment_span = segment_repaired_span
+
+        repaired_flags: list[SegmentFlag] = []
+        for flag, repaired_flag_span in flag_repairs:
+            if repaired_flag_span is None and repaired_segment_span is not None:
+                effective_start = float(flag.ts_start) if flag.ts_start is not None else original_segment_start
+                effective_end = float(flag.ts_end) if flag.ts_end is not None else original_segment_end
+                if (
+                    abs(effective_start - original_segment_start) <= 0.001
+                    and abs(effective_end - original_segment_end) <= 0.001
+                ):
+                    repaired_flag_span = repaired_segment_span
+
+            if repaired_flag_span is not None:
+                repaired_flags.append(
+                    flag.model_copy(
+                        update={
+                            "ts_start": repaired_flag_span[0],
+                            "ts_end": repaired_flag_span[1],
+                        }
+                    )
+                )
+                repair_count += 1
+            else:
+                repaired_flags.append(flag)
+
+        if repaired_segment_span is not None:
+            repaired_segments.append(
+                segment.model_copy(
+                    update={
+                        "ts_start": repaired_segment_span[0],
+                        "ts_end": repaired_segment_span[1],
+                        "flags": repaired_flags,
+                    }
+                )
+            )
+            repair_count += 1
+        elif repaired_flags != segment.flags:
+            repaired_segments.append(segment.model_copy(update={"flags": repaired_flags}))
+        else:
+            repaired_segments.append(segment)
+
+    if repair_count == 0:
+        return report, 0
+    return report.model_copy(update={"segments": repaired_segments}), repair_count
+
+
 def normalize_audio_report(
     report: AstroTalkAudioReport,
     session_id: str,
     local_long_pauses: list[LongPause],
+    audio_duration_seconds: float | None = None,
 ) -> AstroTalkAudioReport:
+    report, timestamp_repair_count = repair_likely_display_timestamps(report, audio_duration_seconds)
+    if timestamp_repair_count:
+        print(
+            f"[WARN] session {session_id}: repaired {timestamp_repair_count} likely display-format timestamp "
+            "value(s) to seconds"
+        )
+
     ordered_segments = sorted(
         report.segments,
         key=lambda segment: (float(segment.ts_start), float(segment.ts_end), int(segment.segment_id)),
@@ -682,7 +909,7 @@ def evaluate_audio(
             latency_seconds = round(latency_seconds + retry_latency_seconds, 3)
             parsed_report = parse_audio_report(response, session_id)
 
-        report = normalize_audio_report(parsed_report, session_id, local_long_pauses)
+        report = normalize_audio_report(parsed_report, session_id, local_long_pauses, audio_duration_seconds)
         telemetry = usage_to_telemetry(response.usage_metadata) if response.usage_metadata else {}
         response_json = report.model_dump_json()
         return report, telemetry, latency_seconds, response_json
