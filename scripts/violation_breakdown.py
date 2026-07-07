@@ -19,6 +19,11 @@ Prints twelve breakdowns:
   11. astrotalk_flagged = 1 x ASTROLOGER only
   12. astrotalk_flagged = 1 x BOTH
 
+The astrotalk_flagged = 0 x speaker breakdowns (7-9) exclude the low-signal
+categories FAKE_REMEDIES, INSTIGATION, FEAR_MANIPULATION,
+FINANCIAL_SOLICITATION and OFF_PLATFORM_SOLICITATION from counting; all
+other breakdowns still include them.
+
 Who committed a violation comes from the speaker of the flagged turn
 (flags.turn_id -> turns.speaker). The speaker buckets are mutually
 exclusive: a session goes to USER only, ASTROLOGER only, or BOTH, never
@@ -53,17 +58,32 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from store.db import get_connection, DB_PATH  # noqa: E402
 
 
+# Low-signal categories (same list the dashboard treats as drop-only).
+# These are excluded ONLY from the astrotalk_flagged = 0 x speaker counts
+# (astro_0_user / astro_0_astrologer / astro_0_both); every other column
+# still counts them.
+_LOW_SIGNAL_CATEGORIES = (
+    "fake_remedies",
+    "instigation",
+    "fear_manipulation",
+    "financial_solicitation",
+    "off_platform_solicitation",
+)
+_LOW_SIGNAL_LIST = ",".join(f"'{c}'" for c in _LOW_SIGNAL_CATEGORIES)
+_NORM_CAT = "LOWER(REPLACE(REPLACE(f.category_code,'-','_'),' ','_'))"
+
 # Same base query as GET /stats/violations, with per-astrotalk_flagged and
 # per-speaker splits. Speaker comes from the turn the flag points at.
 # The inner query collapses each (session, category) to one row with
 # has_user/has_astrologer, so the speaker buckets below are mutually
 # exclusive (USER only / ASTROLOGER only / BOTH) and each session counts once.
-BREAKDOWN_SQL = """
+BREAKDOWN_SQL = f"""
     WITH sc AS (
         SELECT
             f.session_id,
             f.category_code,
             s.astrotalk_flagged,
+            MAX(CASE WHEN {_NORM_CAT} IN ({_LOW_SIGNAL_LIST}) THEN 1 ELSE 0 END) AS low_signal,
             MAX(CASE WHEN t.speaker = 'USER'       THEN 1 ELSE 0 END) AS has_user,
             MAX(CASE WHEN t.speaker = 'ASTROLOGER' THEN 1 ELSE 0 END) AS has_astrologer
         FROM flags f
@@ -80,9 +100,9 @@ BREAKDOWN_SQL = """
         COUNT(CASE WHEN has_user = 1 AND has_astrologer = 0 THEN 1 END) AS by_user,
         COUNT(CASE WHEN has_user = 0 AND has_astrologer = 1 THEN 1 END) AS by_astrologer,
         COUNT(CASE WHEN has_user = 1 AND has_astrologer = 1 THEN 1 END) AS by_both,
-        COUNT(CASE WHEN astrotalk_flagged = 0 AND has_user = 1 AND has_astrologer = 0 THEN 1 END) AS astro_0_user,
-        COUNT(CASE WHEN astrotalk_flagged = 0 AND has_user = 0 AND has_astrologer = 1 THEN 1 END) AS astro_0_astrologer,
-        COUNT(CASE WHEN astrotalk_flagged = 0 AND has_user = 1 AND has_astrologer = 1 THEN 1 END) AS astro_0_both,
+        COUNT(CASE WHEN astrotalk_flagged = 0 AND low_signal = 0 AND has_user = 1 AND has_astrologer = 0 THEN 1 END) AS astro_0_user,
+        COUNT(CASE WHEN astrotalk_flagged = 0 AND low_signal = 0 AND has_user = 0 AND has_astrologer = 1 THEN 1 END) AS astro_0_astrologer,
+        COUNT(CASE WHEN astrotalk_flagged = 0 AND low_signal = 0 AND has_user = 1 AND has_astrologer = 1 THEN 1 END) AS astro_0_both,
         COUNT(CASE WHEN astrotalk_flagged = 1 AND has_user = 1 AND has_astrologer = 0 THEN 1 END) AS astro_1_user,
         COUNT(CASE WHEN astrotalk_flagged = 1 AND has_user = 0 AND has_astrologer = 1 THEN 1 END) AS astro_1_astrologer,
         COUNT(CASE WHEN astrotalk_flagged = 1 AND has_user = 1 AND has_astrologer = 1 THEN 1 END) AS astro_1_both
@@ -91,13 +111,18 @@ BREAKDOWN_SQL = """
     ORDER BY overall DESC
 """
 
-SESSION_TOTALS_SQL = """
+# hu_ns / ha_ns are the speaker booleans computed over non-low-signal flags
+# only; they drive the astro_0 x speaker totals so those match the
+# per-category table above.
+SESSION_TOTALS_SQL = f"""
     WITH ss AS (
         SELECT
             f.session_id,
             s.astrotalk_flagged,
             MAX(CASE WHEN t.speaker = 'USER'       THEN 1 ELSE 0 END) AS has_user,
-            MAX(CASE WHEN t.speaker = 'ASTROLOGER' THEN 1 ELSE 0 END) AS has_astrologer
+            MAX(CASE WHEN t.speaker = 'ASTROLOGER' THEN 1 ELSE 0 END) AS has_astrologer,
+            MAX(CASE WHEN t.speaker = 'USER'       AND {_NORM_CAT} NOT IN ({_LOW_SIGNAL_LIST}) THEN 1 ELSE 0 END) AS hu_ns,
+            MAX(CASE WHEN t.speaker = 'ASTROLOGER' AND {_NORM_CAT} NOT IN ({_LOW_SIGNAL_LIST}) THEN 1 ELSE 0 END) AS ha_ns
         FROM flags f
         JOIN sessions s ON s.session_id = f.session_id
         LEFT JOIN turns t ON t.session_id = f.session_id AND t.turn_id = f.turn_id
@@ -112,9 +137,9 @@ SESSION_TOTALS_SQL = """
         COUNT(CASE WHEN has_user = 0 AND has_astrologer = 1 THEN 1 END) AS by_astrologer,
         COUNT(CASE WHEN has_user = 1 AND has_astrologer = 1 THEN 1 END) AS by_both,
         COUNT(CASE WHEN has_user = 0 AND has_astrologer = 0 THEN 1 END) AS unattributed,
-        COUNT(CASE WHEN astrotalk_flagged = 0 AND has_user = 1 AND has_astrologer = 0 THEN 1 END) AS astro_0_user,
-        COUNT(CASE WHEN astrotalk_flagged = 0 AND has_user = 0 AND has_astrologer = 1 THEN 1 END) AS astro_0_astrologer,
-        COUNT(CASE WHEN astrotalk_flagged = 0 AND has_user = 1 AND has_astrologer = 1 THEN 1 END) AS astro_0_both,
+        COUNT(CASE WHEN astrotalk_flagged = 0 AND hu_ns = 1 AND ha_ns = 0 THEN 1 END) AS astro_0_user,
+        COUNT(CASE WHEN astrotalk_flagged = 0 AND hu_ns = 0 AND ha_ns = 1 THEN 1 END) AS astro_0_astrologer,
+        COUNT(CASE WHEN astrotalk_flagged = 0 AND hu_ns = 1 AND ha_ns = 1 THEN 1 END) AS astro_0_both,
         COUNT(CASE WHEN astrotalk_flagged = 1 AND has_user = 1 AND has_astrologer = 0 THEN 1 END) AS astro_1_user,
         COUNT(CASE WHEN astrotalk_flagged = 1 AND has_user = 0 AND has_astrologer = 1 THEN 1 END) AS astro_1_astrologer,
         COUNT(CASE WHEN astrotalk_flagged = 1 AND has_user = 1 AND has_astrologer = 1 THEN 1 END) AS astro_1_both
