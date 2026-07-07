@@ -128,6 +128,15 @@ class LongPause(TimestampedModel):
     duration_seconds: float = Field(ge=0.0, description="Length of the no-speech/silence span in seconds.")
 
 
+class SegmentFlag(BaseModel):
+    intent: IntentId = Field(description="The matching Intent ID string from the taxonomy.")
+    s: Literal["RED", "AMBER"] = Field(description="Severity label.")
+    conf: float = Field(ge=0.0, le=1.0, description="Confidence rating from 0.0 to 1.0.")
+    transcript_excerpt: str = Field(
+        description="Short exact words or ambient event that triggered the flag; not a full transcript."
+    )
+
+
 class DiarizedSegment(TimestampedModel):
     segment_id: int = Field(ge=1, description="Sequential segment identifier within this audio.")
     speaker: str = Field(description="Stable numbered speaker label such as Speaker 1, Speaker 2, etc.")
@@ -140,20 +149,11 @@ class DiarizedSegment(TimestampedModel):
         return normalize_speaker_label(value)
 
 
-class SegmentFlag(BaseModel):
-    intent: IntentId = Field(description="The matching Intent ID string from the taxonomy.")
-    s: Literal["RED", "AMBER"] = Field(description="Severity label.")
-    conf: float = Field(ge=0.0, le=1.0, description="Confidence rating from 0.0 to 1.0.")
-    transcript_excerpt: str = Field(
-        description="Short exact words or ambient event that triggered the flag; not a full transcript."
-    )
-
-
 class AstroTalkAudioReport(BaseModel):
     s_id: str = Field(description="The identifier of the processed session.")
     lang: str = Field(description="Auto-detected language(s).")
-    review: bool = Field(description="True when any pause/no-speech span is at least 60 seconds.")
-    long_pauses: list[LongPause] = Field(description="All pause/no-speech spans of 60 seconds or more.")
+    review: bool = Field(description="Always false. Pause-based review is computed externally after LLM evaluation.")
+    long_pauses: list[LongPause] = Field(description="Always empty. Long pause detection is handled externally.")
     segments: list[DiarizedSegment] = Field(description="Diarized timestamp/tone/intent metadata segments in order.")
 
 

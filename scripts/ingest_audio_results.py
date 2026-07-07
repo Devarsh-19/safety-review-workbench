@@ -181,9 +181,21 @@ def ingest_session(conn, obj: dict) -> tuple[int, int, int]:
     segments = obj.get("segments") or []
     # Same verdict rules as the chat DB: SEVERE / FLAGGED / CLEAN from the
     # intent codes, including flagged-combination escalations.
+    #
+    # Flags may be top-level (flattened batch output) or nested inside
+    # segments (raw Gemini JSON).  Support both shapes so either source
+    # can be ingested without silent data loss.
     flags = obj.get("flags") or []
-    intent_codes = [f.get("intent") for f in flags if f.get("intent")]
-    flags = obj.get("flags") or []
+    if not flags and segments:
+        for seg in segments:
+            seg_flags = seg.get("flags") or []
+            for sf in seg_flags:
+                sf = dict(sf)
+                sf.setdefault("segment_id", seg.get("segment_id") or seg.get("seg_id"))
+                sf.setdefault("speaker", seg.get("speaker"))
+                sf.setdefault("ts_start", seg.get("ts_start"))
+                sf.setdefault("ts_end", seg.get("ts_end"))
+                flags.append(sf)
     intent_codes = [f.get("intent") for f in flags if f.get("intent")]
     verdict    = get_db_verdict_for_flags(intent_codes)
     confidence = get_db_confidence_for_verdict(verdict)
