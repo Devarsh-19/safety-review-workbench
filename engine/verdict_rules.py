@@ -20,6 +20,12 @@ from typing import Iterable, Mapping, Any
 
 # ---------------------------------------------------------------------------
 # SEVERE single flags — any one of these alone → verdict = SEVERE
+#
+# NOTE: nsfw_appearance is classified here as SEVERE at the *session* level,
+# even though the LLM prompt taxonomy labels it "Amber Severity" per-flag.
+# This is intentional — the per-flag severity (RED/AMBER) reflects the prompt
+# taxonomy, while session verdicts use escalation rules where any NSFW-class
+# intent triggers SEVERE.
 # ---------------------------------------------------------------------------
 SEVERE_FLAGS = {
     # Sexual content

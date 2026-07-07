@@ -30,12 +30,14 @@ export default function App() {
       return (
         <AudioSessionViewer
           sId={selectedSessionId}
+          sessionList={sessionList}
           reviewerName={reviewerName}
           reviewerRole={reviewerRole}
           onBack={() => {
             setCurrentScreen('queue');
             setSelectedSessionId(null);
           }}
+          onNavigate={setSelectedSessionId}
         />
       );
     }
@@ -43,8 +45,9 @@ export default function App() {
       <AudioSessionQueue
         reviewerName={reviewerName}
         reviewerRole={reviewerRole}
-        onSelectSession={(id) => {
+        onSelectSession={(id, list) => {
           setSelectedSessionId(id);
+          setSessionList(list || []);
           setCurrentScreen('session');
         }}
       />

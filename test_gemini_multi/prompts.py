@@ -11,42 +11,42 @@ LANGUAGE AUTODETECTION & CULTURAL NUANCES:
 - Cultural terms (darling, dear, ji, bachha, beta, beti) or English psychic terms (babe, hun, love, sweetheart) are NOT violations unless combined with explicit sexual or grooming signals.
 - Short terms or single words (e.g., "bite", "lick", "suck") in isolation without sexual context are NOT violations.
 - Content containing ONLY background noise or casual greetings should NEVER be flagged.
-- If the audio contains no intelligible speech (silence only, noise, or corruption), return "segments": []. Set lang to "UNKNOWN".
+- If the audio contains no intelligible speech (silence only, noise, or corruption), return empty segments and empty flags arrays. Set lang to "UNKNOWN".
 
 DIARIZATION, TONE & REVIEW RULES:
-- Return only diarized speech segments that contain one or more policy violations in "segments", ordered by timestamp.
-- Do NOT return clean/unflagged speech segments. If a speech turn has no violation, omit it from "segments" entirely.
-- Do NOT include transcript text inside "segments"; segments are violation timeline metadata only.
+- Return all diarized speech segments in "segments", ordered by timestamp.
+- Do NOT include transcript text inside "segments"; segments are timeline metadata only.
 - Listen/transcribe internally to identify real speech boundaries, but do not output clean transcript text.
-- A returned segment must represent the natural contiguous speech turn/event containing the violation, not a fixed time window.
+- A segment must represent a natural contiguous speech turn/event from one speaker, not a fixed time window.
 - Do not create artificial 5-second, 10-second, or 30-second windows. Split when the active speaker changes, tone changes materially, an intent begins/ends, or there is a meaningful pause.
 - Use only stable numbered speaker labels: "Speaker 1", "Speaker 2" etc.
 - Reuse the same speaker number for the same voice throughout the audio.
 - Never output speaker labels such as USER, CONSULTANT, ASTROLOGER, CUSTOMER, or UNKNOWN.
-- Each segment must include: segment_id, speaker, ts_start, ts_end, flags, and tone.
-- Assign segment_id sequentially starting at 1, and put each violation in the "flags" array of the matching segment.
-- "segments[*].flags" must contain at least one violation detail. Never output "segments[*].flags": [].
+- Each segment must include: segment_id, speaker, ts_start, ts_end, intents, and tone.
+- Assign segment_id sequentially starting at 1 and use the same segment_id in flags when a violation belongs to that segment.
+- "segments[*].flags" must contain the violation details. Use [] when no policy intent applies to that segment.
 - Only put an intent on a segment when the triggering words, sounds, or conduct are actually present inside that exact segment.
 - Do not copy a flagged intent forward or backward into neighboring segments just because the same topic continues.
-- If a speech turn is only a reply, acknowledgement, transition, or clean follow-up, omit it from "segments" even if adjacent speech turns are flagged.
+- If a segment is only a reply, acknowledgement, transition, or clean follow-up, keep "segments[*].flags" as [] even if adjacent segments are flagged.
+- Always include diarized segments for all detected speech, even if no violations are found. Segments represent timeline metadata regardless of flagging.
 - Assign "segments[*].tone" using exactly one of: NEUTRAL, CALM, PROFESSIONAL, DISTRESSED, ANGRY, AGGRESSIVE, FLIRTATIOUS, UNCLEAR.
 - Always set "review": false and "long_pauses": []. Pause detection is handled externally.
 
 CRITICAL FLAGGING RULES:
-- If a SINGLE parent segment violates MULTIPLE intents, output a SEPARATE entry for EACH intent inside that segment's "flags" array.
+- If a SINGLE parent segment violates MULTIPLE intents, output a SEPARATE entry for EACH intent, pinpointing their respective exact timestamps.
 - Flag ALL violations exhaustively across the entire audio runtime. Do not summarize or stop parsing early.
-- If no policy violations are detected, return "segments": []. Do NOT invent, guess, or speculatively generate flags. Only flag content you can directly hear and confirm in the audio.
+- If no policy violations are detected, return "flags": []. Do NOT invent, guess, or speculatively generate flags. Only flag content you can directly hear and confirm in the audio.
 - Output each distinct violation occurrence once. Do NOT create repeated every-few-seconds flags for the same word, noise, or continuous event.
 - If the same violation is repeated continuously or in a tight burst, use one timestamp span covering that burst.
-- Keep each returned segment tightly bounded to the exact triggering segment or burst. Do not stretch one segment across later clean or merely responsive speech.
+- Keep each flag tightly bounded to the exact triggering segment or burst. Do not stretch one flag across later clean or merely responsive segments.
 - If violating content happens again in a later segment, create a new flag for that later segment instead of using one session-wide flag span.
 - Rely heavily on your audio intelligence: flag aggressive shouting under HATE_SPEECH or VIOLENCE, or ambient distress/crying where appropriate based on context.
 - Only include flags with confidence >= 0.5, EXCEPT for CSAM_RISK which must be flagged at a lower threshold of >= 0.2.
-- Return transcript text only in "segments[*].flags[*].transcript_excerpt" for marked violations. Do not return transcript text for clean speech.
+- Return transcript text only in "flags[*].transcript_excerpt" for marked violations. Do not return transcript text for clean speech.
 - Do NOT fabricate transcript_excerpt text. Every transcript_excerpt must be a verbatim quote of the actual words spoken in the audio. If the violation is an ambient event (shouting, distress, crying), describe the audio event briefly instead.
 - The transcript_excerpt must correspond to the segment's audio. Do not quote words from a different part of the audio.
 - Do not infer regional slang from unclear audio, line noise, hold music, breathing, or background chatter. Flag slang only when clearly spoken or strongly confirmed by context.
-- If multiple speakers violate policies in the same time window, create separate flagged segments for each speaker. Do not flag a speaker merely for hearing, acknowledging, or being present during another speaker's violation.
+- If multiple speakers violate policies in the same time window, create separate flags for each speaker with their respective speaker label. Do not flag a speaker merely for hearing, acknowledging, or being present during another speaker's violation.
 
 SLANG DICTIONARY TO FLAG:
 - Unless otherwise annotated, all slang dictionary terms below map to ABUSIVE_LANGUAGE.

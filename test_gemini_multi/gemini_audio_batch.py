@@ -48,7 +48,6 @@ FALLBACK_RETRY_USER_MESSAGE = (
     "Your previous response did not validate. Retry once with a compact reply and return only one valid JSON "
     "object that matches the schema exactly, with no markdown or extra commentary."
 )
-TIMESTAMP_FIELDS = {"ts_start", "ts_end"}
 
 
 # Gemini 3 Flash Preview standard paid rates, USD per 1M tokens.
@@ -153,9 +152,9 @@ class DiarizedSegment(TimestampedModel):
 class AstroTalkAudioReport(BaseModel):
     s_id: str = Field(description="The identifier of the processed session.")
     lang: str = Field(description="Auto-detected language(s).")
-    review: bool = Field(description="True when any pause/no-speech span is at least 60 seconds.")
-    long_pauses: list[LongPause] = Field(description="All pause/no-speech spans of 60 seconds or more.")
-    segments: list[DiarizedSegment] = Field(description="Diarized timestamp/tone/flagged segments in order.")
+    review: bool = Field(description="Always false. Pause-based review is computed externally after LLM evaluation.")
+    long_pauses: list[LongPause] = Field(description="Always empty. Long pause detection is handled externally.")
+    segments: list[DiarizedSegment] = Field(description="Diarized timestamp/tone/intent metadata segments in order.")
 
 
 def load_env_file(path: Path) -> None:
@@ -543,14 +542,6 @@ def _segment_overlap_seconds(
     return max(0.0, min(flag_ts_end, float(segment.ts_end)) - max(flag_ts_start, float(segment.ts_start)))
 
 
-def flagged_segments_only(segments: list[DiarizedSegment]) -> list[DiarizedSegment]:
-    flagged_segments = [segment for segment in segments if segment.flags]
-    return [
-        segment.model_copy(update={"segment_id": segment_id})
-        for segment_id, segment in enumerate(flagged_segments, start=1)
-    ]
-
-
 def normalize_audio_report(
     report: AstroTalkAudioReport,
     session_id: str,
@@ -560,7 +551,7 @@ def normalize_audio_report(
         report.segments,
         key=lambda segment: (float(segment.ts_start), float(segment.ts_end), int(segment.segment_id)),
     )
-    normalized_segments = flagged_segments_only(ordered_segments)
+    normalized_segments = ordered_segments
     merged_pauses = [
         normalize_long_pause_duration(pause)
         for pause in report.long_pauses
@@ -588,103 +579,6 @@ def parse_audio_report(response: Any, session_id: str) -> AstroTalkAudioReport:
     elif not isinstance(report, AstroTalkAudioReport):
         report = AstroTalkAudioReport.model_validate(report)
     return report.model_copy(update={"s_id": str(session_id)})
-
-
-def report_flags(report: AstroTalkAudioReport | None) -> list[dict[str, Any]]:
-    flags: list[dict[str, Any]] = []
-    if report is None:
-        return flags
-
-    for segment in report.segments:
-        for flag in segment.flags:
-            flag_dump = flag.model_dump()
-            flag_dump["ts_start"] = segment.ts_start
-            flag_dump["ts_end"] = segment.ts_end
-            flag_dump["segment_id"] = segment.segment_id
-            flag_dump["speaker"] = segment.speaker
-            flag_dump["tone"] = segment.tone
-            flags.append(flag_dump)
-    return flags
-
-
-def seconds_to_hms(value: Any) -> str:
-    if isinstance(value, str) and ":" in value:
-        return value
-    try:
-        seconds = max(0.0, float(value))
-    except (TypeError, ValueError):
-        return str(value)
-    hours = int(seconds // 3600)
-    minutes = int((seconds % 3600) // 60)
-    whole_seconds = int(seconds % 60)
-    milliseconds = int(round((seconds - int(seconds)) * 1000))
-
-    if milliseconds == 1000:
-        whole_seconds += 1
-        milliseconds = 0
-        if whole_seconds == 60:
-            minutes += 1
-            whole_seconds = 0
-            if minutes == 60:
-                hours += 1
-                minutes = 0
-
-    base = f"{hours:02}:{minutes:02}:{whole_seconds:02}"
-    if milliseconds:
-        return f"{base}.{milliseconds:03d}".rstrip("0").rstrip(".")
-    return base
-
-
-def format_timestamps_for_output(value: Any) -> Any:
-    if isinstance(value, list):
-        return [format_timestamps_for_output(item) for item in value]
-    if isinstance(value, dict):
-        formatted: dict[str, Any] = {}
-        for key, item in value.items():
-            if key in TIMESTAMP_FIELDS and item is not None:
-                formatted[key] = seconds_to_hms(item)
-            else:
-                formatted[key] = format_timestamps_for_output(item)
-        return formatted
-    return value
-
-
-def report_output_json(report: AstroTalkAudioReport) -> str:
-    payload = report.model_dump()
-    payload["flags"] = report_flags(report)
-    payload = format_timestamps_for_output(payload)
-    return json.dumps(payload, ensure_ascii=False)
-
-
-def yes_no(value: bool) -> str:
-    return "Yes" if value else "No"
-
-
-def normalize_yes_no(value: Any) -> str:
-    if value is None:
-        return ""
-    try:
-        if pd.isna(value):
-            return ""
-    except (TypeError, ValueError):
-        pass
-
-    raw_value = str(value).strip()
-    normalized = raw_value.lower()
-    if normalized in {"yes", "y", "true", "1", "flagged"}:
-        return "Yes"
-    if normalized in {"no", "n", "false", "0", "clean"}:
-        return "No"
-    return raw_value
-
-
-def yes_no_to_bool(value: Any) -> bool | None:
-    normalized = normalize_yes_no(value)
-    if normalized == "Yes":
-        return True
-    if normalized == "No":
-        return False
-    return None
 
 
 def evaluate_audio(
@@ -749,7 +643,7 @@ def evaluate_audio(
 
         report = normalize_audio_report(parsed_report, session_id, local_long_pauses)
         telemetry = usage_to_telemetry(response.usage_metadata) if response.usage_metadata else {}
-        response_json = report_output_json(report)
+        response_json = report.model_dump_json()
         return report, telemetry, latency_seconds, response_json
     finally:
         if uploaded_file:
@@ -797,7 +691,17 @@ def flatten_result(
     error: str | None = None,
     has_video: bool | None = None,
 ) -> dict[str, Any]:
-    flags = report_flags(report)
+    flags = []
+    if report:
+        for seg in report.segments:
+            for flag in seg.flags:
+                f_dump = flag.model_dump()
+                f_dump["ts_start"] = seg.ts_start
+                f_dump["ts_end"] = seg.ts_end
+                f_dump["segment_id"] = seg.segment_id
+                f_dump["speaker"] = seg.speaker
+                f_dump["tone"] = seg.tone
+                flags.append(f_dump)
     segments = [segment.model_dump() for segment in report.segments] if report else []
     if report:
         long_pauses = [pause.model_dump() for pause in report.long_pauses]
@@ -805,18 +709,14 @@ def flatten_result(
     else:
         long_pauses = [pause.model_dump() for pause in detected_long_pauses or []]
         review = bool(long_pauses)
-    flagged = bool(flags)
 
     invalid_flags = invalid_timestamp_records(flags, audio_duration_seconds)
     invalid_segments = invalid_timestamp_records(segments, audio_duration_seconds)
     invalid_long_pauses = invalid_timestamp_records(long_pauses, audio_duration_seconds)
 
     result = row.to_dict()
-    db_flagged = normalize_yes_no(result.get("flagged"))
     result.update(
         {
-            "db_flagged": db_flagged,
-            "flagged": yes_no(flagged),
             "status": status,
             "error": error or "",
             "processed_at_utc": datetime.now(UTC).isoformat(),
@@ -827,26 +727,23 @@ def flatten_result(
             "detected_languages": report.lang if report else "",
             "review": review,
             "long_pause_count": len(long_pauses),
-            "long_pauses_json": json.dumps(format_timestamps_for_output(long_pauses), ensure_ascii=False),
+            "long_pauses_json": json.dumps(long_pauses, ensure_ascii=False),
             "long_pauses_timestamp_valid": not invalid_long_pauses,
             "long_pauses_timestamp_error_count": len(invalid_long_pauses),
             "long_pauses_max_ts_end": max_ts_end(long_pauses),
-            "invalid_long_pauses_json": json.dumps(
-                format_timestamps_for_output(invalid_long_pauses),
-                ensure_ascii=False,
-            ),
+            "invalid_long_pauses_json": json.dumps(invalid_long_pauses, ensure_ascii=False),
             "segment_count": len(segments),
-            "segments_json": json.dumps(format_timestamps_for_output(segments), ensure_ascii=False),
+            "segments_json": json.dumps(segments, ensure_ascii=False),
             "segments_timestamp_valid": not invalid_segments,
             "segments_timestamp_error_count": len(invalid_segments),
             "segments_max_ts_end": max_ts_end(segments),
-            "invalid_segments_json": json.dumps(format_timestamps_for_output(invalid_segments), ensure_ascii=False),
+            "invalid_segments_json": json.dumps(invalid_segments, ensure_ascii=False),
             "flag_count": len(flags),
-            "flags_json": json.dumps(format_timestamps_for_output(flags), ensure_ascii=False),
+            "flags_json": json.dumps(flags, ensure_ascii=False),
             "flags_timestamp_valid": not invalid_flags,
             "flags_timestamp_error_count": len(invalid_flags),
             "flags_max_ts_end": max_ts_end(flags),
-            "invalid_flags_json": json.dumps(format_timestamps_for_output(invalid_flags), ensure_ascii=False),
+            "invalid_flags_json": json.dumps(invalid_flags, ensure_ascii=False),
             "response_json": response_json or "",
             "raw_json_path": str(raw_json_path) if raw_json_path else "",
             "latency_seconds": latency_seconds,
@@ -870,7 +767,6 @@ def write_outputs(results: list[dict[str, Any]], output_csv: Path, output_jsonl:
 def append_raw_json(response_json: str, recording_url: str, at_flag: Any, has_video: bool | None) -> None:
     output_file = DEFAULT_JSON_DIR / "audio_response.json"
     output_file.parent.mkdir(parents=True, exist_ok=True)
-    at_flag_bool = at_flag if isinstance(at_flag, bool) else yes_no_to_bool(at_flag)
 
     if output_file.exists():
         try:
@@ -890,12 +786,12 @@ def append_raw_json(response_json: str, recording_url: str, at_flag: Any, has_vi
         new_record = {"raw_response": response_json}
     if isinstance(new_record, dict):
         new_record["audio_url"] = recording_url
-        new_record["at_flag"] = at_flag_bool
+        new_record["at_flag"] = at_flag
         new_record["has_video"] = has_video
     elif isinstance(new_record, list):
         new_record = {
             "audio_url": recording_url,
-            "at_flag": at_flag_bool,
+            "at_flag": at_flag,
             "has_video": has_video,
             "response_data": new_record
         }
@@ -1024,7 +920,7 @@ def run_batch(args: argparse.Namespace) -> pd.DataFrame:
                     append_raw_json(
                         response_json=response_json,
                         recording_url=recording_url,
-                        at_flag=yes_no_to_bool(row.get("flagged", "")),
+                        at_flag=row.get("flagged", ""),
                         has_video=has_video,
                     )
                     record = flatten_result(

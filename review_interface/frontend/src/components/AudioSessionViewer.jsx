@@ -6,6 +6,7 @@ import Footer from './Footer';
 import StatusBadge from './StatusBadge';
 import VerdictBadge from './VerdictBadge';
 import LoadingSpinner from './LoadingSpinner';
+import HasVideoBadge, { getHasVideoState } from './HasVideoBadge';
 import {
   getAudioSessionDetail,
   saveSpeakerRoles,
@@ -28,50 +29,32 @@ function formatTime(seconds) {
   return `${pad(h)}:${pad(m)}:${pad(sec)}`;
 }
 
-function getHasVideoState(value) {
-  if (value === null || value === undefined || value === '') return null;
-  if (typeof value === 'string') {
-    const normalized = value.trim().toLowerCase();
-    if (!normalized) return null;
-    if (['true', '1', 'yes'].includes(normalized)) return true;
-    if (['false', '0', 'no'].includes(normalized)) return false;
-  }
-  return Boolean(value);
-}
-
-function HasVideoBadge({ value }) {
-  const hasVideo = getHasVideoState(value);
-  const label = hasVideo == null ? 'Video Unknown' : hasVideo ? 'Video Present' : 'Audio Only';
-  const palette = hasVideo == null
-    ? { bg: C.bgMuted, border: C.border, text: C.textSecondary }
-    : hasVideo
-      ? { bg: C.flaggedBg, border: C.flaggedBorder, text: C.flaggedText }
-      : { bg: C.cleanBg, border: C.cleanBorder, text: C.cleanText };
-
-  return (
-    <span style={{
-      display: 'inline-flex',
-      alignItems: 'center',
-      padding: '3px 10px',
-      borderRadius: 999,
-      border: `1px solid ${palette.border}`,
-      background: palette.bg,
-      color: palette.text,
-      fontSize: 11,
-      fontFamily: MONO,
-      textTransform: 'uppercase',
-      letterSpacing: '0.04em',
-    }}>
-      {label}
-    </span>
-  );
-}
-
 const ROLES = ['ASTROLOGER', 'USER'];
 const opposite = (role) => (role === 'ASTROLOGER' ? 'USER' : 'ASTROLOGER');
-const SEVERITIES = ['LOW', 'MEDIUM', 'HIGH'];
+const SEVERITIES = ['RED', 'AMBER'];
 
-export default function AudioSessionViewer({ sId, reviewerName, reviewerRole, onBack }) {
+const INTENT_TAXONOMY = [
+  "NSFW",
+  "NSFW_EXPLICIT",
+  "NSFW_GROOMING",
+  "NSFW_APPEARANCE",
+  "CSAM_RISK",
+  "FINANCIAL_SOLICITATION",
+  "IDENTITY_FRAUD",
+  "ABUSIVE_LANGUAGE",
+  "HATE_SPEECH",
+  "FAKE_REMEDIES",
+  "UNAUTHORIZED_MEDICAL_ADVICE",
+  "SELF_HARM",
+  "VIOLENCE",
+  "INSTIGATION",
+  "OFF_PLATFORM_SOLICITATION",
+  "PERSONAL_DATA_COLLECTION",
+  "FEAR_MANIPULATION",
+  "COMPETITOR_PROMOTION"
+];
+
+export default function AudioSessionViewer({ sId, sessionList, reviewerName, reviewerRole, onBack, onNavigate }) {
   const [detail, setDetail] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -81,8 +64,37 @@ export default function AudioSessionViewer({ sId, reviewerName, reviewerRole, on
   const [editingFlag, setEditingFlag] = useState(null);   // flag_id being edited
   const [dismissingFlagId, setDismissingFlagId] = useState(null);
   const [editIntent, setEditIntent] = useState('');
-  const [editSeverity, setEditSeverity] = useState('MEDIUM');
+  const [editSeverity, setEditSeverity] = useState('RED');
   const [editReasoning, setEditReasoning] = useState('');
+
+  const currentIndex = sessionList?.findIndex((r) => r.s_id === sId) ?? -1;
+  const isSevere = (v) => ['SEVERE', 'RED', 'HIGH'].includes(v);
+
+  let prevIndex = -1;
+  if (currentIndex > 0 && sessionList) {
+    for (let i = currentIndex - 1; i >= 0; i--) {
+      if (sessionList[i].review_status === 'PENDING' && isSevere(sessionList[i].overall_verdict)) {
+        prevIndex = i;
+        break;
+      }
+    }
+  }
+
+  let nextIndex = -1;
+  if (currentIndex >= 0 && sessionList) {
+    for (let i = currentIndex + 1; i < sessionList.length; i++) {
+      if (sessionList[i].review_status === 'PENDING' && isSevere(sessionList[i].overall_verdict)) {
+        nextIndex = i;
+        break;
+      }
+    }
+  }
+
+  const hasPrev = prevIndex !== -1;
+  const hasNext = nextIndex !== -1;
+
+  const goToPrev = () => { if (hasPrev && onNavigate) onNavigate(sessionList[prevIndex].s_id); };
+  const goToNext = () => { if (hasNext && onNavigate) onNavigate(sessionList[nextIndex].s_id); };
   const audioRef = useRef(null);
   const hlsRef = useRef(null);
 
@@ -181,7 +193,10 @@ export default function AudioSessionViewer({ sId, reviewerName, reviewerRole, on
   const startEdit = (f) => {
     setEditingFlag(f.flag_id);
     setEditIntent(f.intent || '');
-    setEditSeverity(f.severity || 'MEDIUM');
+    // Normalize legacy severity values (HIGH/SEVERE→RED, MEDIUM/FLAGGED→AMBER)
+    const sev = (f.severity || '').toUpperCase();
+    const normalizedSev = ['RED', 'SEVERE', 'HIGH'].includes(sev) ? 'RED' : 'AMBER';
+    setEditSeverity(normalizedSev);
     setEditReasoning('');
   };
 
@@ -476,15 +491,17 @@ export default function AudioSessionViewer({ sId, reviewerName, reviewerRole, on
                     background: C.bgSurface, border: `1px solid ${C.border}`,
                   }}>
                     <div style={{ display: 'flex', gap: 6, marginBottom: 6 }}>
-                      <input
+                      <select
                         value={editIntent}
                         onChange={(e) => setEditIntent(e.target.value)}
-                        placeholder="Intent (e.g. FEAR_MANIPULATION)"
                         style={{
                           flex: 1, padding: '6px 8px', fontSize: 12, fontFamily: MONO,
-                          borderRadius: 4, border: `1px solid ${C.border}`,
+                          borderRadius: 4, border: `1px solid ${C.border}`, cursor: 'pointer',
                         }}
-                      />
+                      >
+                        <option value="" disabled>Select Intent</option>
+                        {INTENT_TAXONOMY.map((i) => <option key={i} value={i}>{i}</option>)}
+                      </select>
                       <select
                         value={editSeverity}
                         onChange={(e) => setEditSeverity(e.target.value)}
@@ -544,16 +561,44 @@ export default function AudioSessionViewer({ sId, reviewerName, reviewerRole, on
       <TopBar reviewerName={`${reviewerName} · Audio Review`} />
 
       <div style={{ flex: 1, overflow: 'auto', padding: 24, background: C.bgPage }}>
-        <button
-          onClick={onBack}
-          style={{
-            marginBottom: 16, padding: '6px 12px', fontSize: 12,
-            borderRadius: 4, border: `1px solid ${C.border}`,
-            background: C.bgSurface, color: C.textPrimary, cursor: 'pointer',
-          }}
-        >
-          ← Back to queue
-        </button>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+          <button
+            onClick={onBack}
+            style={{
+              padding: '6px 12px', fontSize: 12,
+              borderRadius: 4, border: `1px solid ${C.border}`,
+              background: C.bgSurface, color: C.textPrimary, cursor: 'pointer',
+            }}
+          >
+            ← Back to queue
+          </button>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button
+              onClick={goToPrev}
+              disabled={!hasPrev}
+              style={{
+                padding: '6px 12px', fontSize: 12, borderRadius: 4,
+                border: `1px solid ${C.border}`,
+                background: C.bgSurface, color: hasPrev ? C.textPrimary : C.textMuted,
+                cursor: hasPrev ? 'pointer' : 'not-allowed',
+              }}
+            >
+              ← Previous
+            </button>
+            <button
+              onClick={goToNext}
+              disabled={!hasNext}
+              style={{
+                padding: '6px 12px', fontSize: 12, borderRadius: 4,
+                border: `1px solid ${C.border}`,
+                background: C.bgSurface, color: hasNext ? C.textPrimary : C.textMuted,
+                cursor: hasNext ? 'pointer' : 'not-allowed',
+              }}
+            >
+              Next →
+            </button>
+          </div>
+        </div>
 
         {loading && !detail ? <LoadingSpinner /> : !session ? (
           <div style={{ color: C.textSecondary }}>Session not found.</div>
@@ -693,7 +738,7 @@ export default function AudioSessionViewer({ sId, reviewerName, reviewerRole, on
                       whiteSpace: 'nowrap',
                     }}
                   >
-                    Submit for Review
+                    Submit for L2 Review
                   </button>
                 </>
               )}

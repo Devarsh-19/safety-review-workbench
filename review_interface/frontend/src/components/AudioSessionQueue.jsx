@@ -5,6 +5,7 @@ import Footer from './Footer';
 import StatusBadge from './StatusBadge';
 import VerdictBadge from './VerdictBadge';
 import LoadingSpinner from './LoadingSpinner';
+import HasVideoBadge from './HasVideoBadge';
 import { getAudioSessions, getAudioStats, lockAudioSession } from '../api';
 
 const PAGE_SIZE = 50;
@@ -16,47 +17,6 @@ function formatDuration(seconds) {
   const sec = s % 60;
   const pad = (n) => String(n).padStart(2, '0');
   return `${pad(h)}:${pad(m)}:${pad(sec)}`;
-}
-
-function getHasVideoState(value) {
-  if (value === null || value === undefined || value === '') return null;
-  if (typeof value === 'string') {
-    const normalized = value.trim().toLowerCase();
-    if (!normalized) return null;
-    if (['true', '1', 'yes'].includes(normalized)) return true;
-    if (['false', '0', 'no'].includes(normalized)) return false;
-  }
-  return Boolean(value);
-}
-
-function HasVideoBadge({ value }) {
-  const hasVideo = getHasVideoState(value);
-  const label = hasVideo == null ? 'Unknown' : hasVideo ? 'Yes' : 'No';
-  const palette = hasVideo == null
-    ? { bg: C.bgMuted, border: C.border, text: C.textSecondary }
-    : hasVideo
-      ? { bg: C.flaggedBg, border: C.flaggedBorder, text: C.flaggedText }
-      : { bg: C.cleanBg, border: C.cleanBorder, text: C.cleanText };
-
-  return (
-    <span style={{
-      display: 'inline-flex',
-      alignItems: 'center',
-      justifyContent: 'center',
-      minWidth: 44,
-      padding: '2px 8px',
-      borderRadius: 999,
-      border: `1px solid ${palette.border}`,
-      background: palette.bg,
-      color: palette.text,
-      fontSize: 11,
-      fontFamily: MONO,
-      textTransform: 'uppercase',
-      letterSpacing: '0.04em',
-    }}>
-      {label}
-    </span>
-  );
 }
 
 const STATUS_FILTERS = [
@@ -134,11 +94,12 @@ export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelect
     { key: 'has_video', label: 'Video', sortable: false },
     { key: 'lang', label: 'Language', sortable: false },
     { key: 'duration', label: 'Duration', sortable: true },
-    { key: 'segments', label: 'Segments', sortable: true },
     { key: 'flags', label: 'Flags', sortable: true },
     { key: 'roles', label: 'Speaker Roles', sortable: false },
-    { key: 'assigned_to', label: 'Assigned To', sortable: false },
-    ...(reviewerRole === 'L2' ? [{ key: 'reviewer', label: 'Reviewer', sortable: false }] : []),
+    ...(reviewerRole === 'L2' ? [
+      { key: 'assigned_to', label: 'Assigned To', sortable: false },
+      { key: 'reviewer', label: 'Reviewer', sortable: false },
+    ] : []),
     { key: 'verdict', label: 'LLM Verdict', sortable: true },
     { key: 'astrotalk_verdict', label: 'Astrotalk', sortable: false },
     { key: 'status', label: 'Status', sortable: true },
@@ -294,10 +255,10 @@ export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelect
             </thead>
             <tbody>
               {loading ? (
-                <tr><td colSpan={reviewerRole === 'L2' ? 13 : 12} style={{ padding: 32, textAlign: 'center' }}><LoadingSpinner /></td></tr>
+                <tr><td colSpan={TABLE_COLUMNS.length} style={{ padding: 32, textAlign: 'center' }}><LoadingSpinner /></td></tr>
               ) : rows.length === 0 ? (
                 <tr>
-                  <td colSpan={reviewerRole === 'L2' ? 13 : 12} style={{ padding: 32, textAlign: 'center', color: C.textSecondary }}>
+                  <td colSpan={TABLE_COLUMNS.length} style={{ padding: 32, textAlign: 'center', color: C.textSecondary }}>
                     No audio sessions. Ingest results with scripts/ingest_audio_results.py
                     {reviewerRole === 'L1' ? ' — or none are assigned to you yet (scripts/assign_audio_sessions.py).' : '.'}
                   </td>
@@ -310,10 +271,9 @@ export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelect
                   onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; }}
                 >
                   <td style={{ padding: '10px 14px', fontFamily: MONO }}>{r.s_id}</td>
-                  <td style={{ padding: '10px 14px' }}><HasVideoBadge value={r.has_video} /></td>
+                  <td style={{ padding: '10px 14px' }}><HasVideoBadge value={r.has_video} compact /></td>
                   <td style={{ padding: '10px 14px' }}>{r.lang || '—'}</td>
                   <td style={{ padding: '10px 14px', fontFamily: MONO }}>{formatDuration(r.duration_seconds)}</td>
-                  <td style={{ padding: '10px 14px', fontFamily: MONO }}>{r.segment_count}</td>
                   <td style={{
                     padding: '10px 14px', fontFamily: MONO,
                     color: r.flag_count > 0 ? C.severeText : C.textSecondary,
@@ -326,9 +286,11 @@ export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelect
                       ? `S1: ${r.speaker1_role} · S2: ${r.speaker2_role}`
                       : 'Not assigned'}
                   </td>
-                  <td style={{ padding: '10px 14px', fontSize: 12, color: C.textSecondary }}>
-                    {r.assigned_to || '—'}
-                  </td>
+                  {reviewerRole === 'L2' && (
+                    <td style={{ padding: '10px 14px', fontSize: 12, color: C.textSecondary }}>
+                      {r.assigned_to || '—'}
+                    </td>
+                  )}
                   {reviewerRole === 'L2' && (
                     <td style={{ padding: '10px 14px', fontSize: 12, color: C.textSecondary }}>
                       {r.submitted_by || r.reviewer_id || '—'}
@@ -352,7 +314,7 @@ export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelect
                         </button>
                       )}
                       <button
-                        onClick={(e) => { e.stopPropagation(); onSelectSession(r.s_id); }}
+                        onClick={(e) => { e.stopPropagation(); onSelectSession(r.s_id, rows); }}
                         style={{
                           padding: '5px 14px', fontSize: 12, fontWeight: 500,
                           background: r.review_status === 'LOCKED' ? C.bgStatsrow : C.accent,
