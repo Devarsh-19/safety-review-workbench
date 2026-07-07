@@ -32,7 +32,6 @@ function formatTime(seconds) {
 const ROLES = ['ASTROLOGER', 'USER'];
 const opposite = (role) => (role === 'ASTROLOGER' ? 'USER' : 'ASTROLOGER');
 const SEVERITIES = ['RED', 'AMBER'];
-
 const INTENT_TAXONOMY = [
   "NSFW",
   "NSFW_EXPLICIT",
@@ -69,7 +68,7 @@ export default function AudioSessionViewer({ sId, sessionList, reviewerName, rev
 
   const currentIndex = sessionList?.findIndex((r) => r.s_id === sId) ?? -1;
   const isSevere = (v) => ['SEVERE', 'RED', 'HIGH'].includes(v);
-
+  
   let prevIndex = -1;
   if (currentIndex > 0 && sessionList) {
     for (let i = currentIndex - 1; i >= 0; i--) {
@@ -152,7 +151,7 @@ export default function AudioSessionViewer({ sId, sessionList, reviewerName, rev
       audio.removeAttribute('src');
       audio.load();
     };
-  }, [audioUrl]);
+  }, [audioUrl, session?.has_video]);
 
   const seekTo = (seconds) => {
     const audio = audioRef.current;
@@ -193,6 +192,7 @@ export default function AudioSessionViewer({ sId, sessionList, reviewerName, rev
   const startEdit = (f) => {
     setEditingFlag(f.flag_id);
     setEditIntent(f.intent || '');
+    // Normalize legacy severity values (HIGH/SEVERE→RED, MEDIUM/FLAGGED→AMBER)
     // Normalize legacy severity values (HIGH/SEVERE→RED, MEDIUM/FLAGGED→AMBER)
     const sev = (f.severity || '').toUpperCase();
     const normalizedSev = ['RED', 'SEVERE', 'HIGH'].includes(sev) ? 'RED' : 'AMBER';
@@ -322,7 +322,7 @@ export default function AudioSessionViewer({ sId, sessionList, reviewerName, rev
               }}>
                 <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
                   <button
-                    onClick={() => seekTo(seg?.ts_start)}
+                    onClick={() => seekTo(f.ts_start ?? seg?.ts_start)}
                     disabled={!audioUrl}
                     title={audioUrl ? 'Play from this timestamp' : 'No recording attached'}
                     style={{
@@ -333,7 +333,7 @@ export default function AudioSessionViewer({ sId, sessionList, reviewerName, rev
                       textDecoration: audioUrl ? 'underline' : 'none',
                     }}
                   >
-                    {audioUrl ? '▶ ' : ''}{formatTime(seg?.ts_start)} – {formatTime(seg?.ts_end)}
+                    {audioUrl ? '▶ ' : ''}{formatTime(f.ts_start ?? seg?.ts_start)} – {formatTime(f.ts_end ?? seg?.ts_end)}
                   </button>
                   <VerdictBadge verdict={f.severity} />
                   <span style={{
@@ -655,7 +655,11 @@ export default function AudioSessionViewer({ sId, sessionList, reviewerName, rev
                       ? 'contains a video stream'
                       : 'audio only'}
                 </div>
-                <audio ref={audioRef} controls preload="metadata" style={{ width: '100%' }} />
+                {getHasVideoState(session.has_video) ? (
+                  <video ref={audioRef} controls preload="metadata" style={{ width: '100%', maxHeight: 480, display: 'block' }} />
+                ) : (
+                  <audio ref={audioRef} controls preload="metadata" style={{ width: '100%', display: 'block' }} />
+                )}
                 {playerError && (
                   <div style={{ fontSize: 12, color: C.severeText, marginTop: 6 }}>
                     {playerError}
