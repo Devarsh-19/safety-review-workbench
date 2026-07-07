@@ -152,7 +152,7 @@ export default function AudioSessionViewer({ sId, sessionList, reviewerName, rev
       audio.removeAttribute('src');
       audio.load();
     };
-  }, [audioUrl]);
+  }, [audioUrl, session?.has_video]);
 
   const seekTo = (seconds) => {
     const audio = audioRef.current;
@@ -655,7 +655,11 @@ export default function AudioSessionViewer({ sId, sessionList, reviewerName, rev
                       ? 'contains a video stream'
                       : 'audio only'}
                 </div>
-                <audio ref={audioRef} controls preload="metadata" style={{ width: '100%' }} />
+                {getHasVideoState(session.has_video) ? (
+                  <video ref={audioRef} controls preload="metadata" style={{ width: '100%', maxHeight: 480, display: 'block' }} />
+                ) : (
+                  <audio ref={audioRef} controls preload="metadata" style={{ width: '100%', display: 'block' }} />
+                )}
                 {playerError && (
                   <div style={{ fontSize: 12, color: C.severeText, marginTop: 6 }}>
                     {playerError}
