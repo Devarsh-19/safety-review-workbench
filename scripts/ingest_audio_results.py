@@ -8,10 +8,12 @@ directory of .json files; each file holds one session object or a list of them.
 Expected object shape:
   {
     "s_id": 123, "lang": "hindi", "review": true, "pauses": [...],
+    "at_flag": true,
     "audio_url": "https://cdn.example.com/recordings/123.m3u8",   # optional — HLS stream for the in-browser player
     "segments": [
       {"ts_start": 65.0, "ts_end": 72.0, "segment_id": 1,
-       "speaker": "SPEAKER_1", "tone": "AGGRESSIVE", "intents": []}
+       "speaker": "SPEAKER_1", "tone": "AGGRESSIVE",
+       "flags": [{"intent": "...", "s": "RED", "conf": 0.91, "transcript_excerpt": "..."}]}
     ],
     "flags": [{"intent": "...", "s": "RED", "conf": 0.91, "transcript_excerpt": "...", "segment_id": 1}]
   }
@@ -77,6 +79,21 @@ def optional_bool(value) -> bool | None:
         return True
     if normalized in {"false", "0", "no", "n"}:
         return False
+    return None
+
+
+def parse_astrotalk_verdict(value) -> str | None:
+    flagged = optional_bool(value)
+    if flagged is True:
+        return "FLAGGED"
+    if flagged is False:
+        return "CLEAN"
+
+    normalized = "" if value is None else str(value).strip().upper()
+    if normalized in {"FLAGGED", "SEVERE"}:
+        return "FLAGGED"
+    if normalized == "CLEAN":
+        return "CLEAN"
     return None
 
 
@@ -173,6 +190,28 @@ def localize_flag_span_to_segment(
     return localized_start, localized_end
 
 
+def flags_from_segments(segments: list[dict]) -> list[dict]:
+    flags: list[dict] = []
+    for seg in segments:
+        seg_id = seg.get("segment_id") or seg.get("seg_id")
+        for flag in seg.get("flags") or []:
+            if not isinstance(flag, dict):
+                continue
+            flattened_flag = dict(flag)
+            flattened_flag.setdefault("segment_id", seg_id)
+            flattened_flag.setdefault("speaker", seg.get("speaker"))
+            flattened_flag.setdefault("tone", seg.get("tone"))
+            flattened_flag.setdefault("ts_start", seg.get("ts_start"))
+            flattened_flag.setdefault("ts_end", seg.get("ts_end"))
+            flags.append(flattened_flag)
+    return flags
+
+
+def session_flags(obj: dict, segments: list[dict]) -> list[dict]:
+    flags = obj.get("flags") or []
+    return flags if flags else flags_from_segments(segments)
+
+
 def ingest_session(conn, obj: dict) -> tuple[int, int, int]:
     """Insert/replace one session object. Returns (s_id, n_segments, n_flags)."""
     from engine.verdict_rules import get_db_verdict_for_flags, get_db_confidence_for_verdict
@@ -181,18 +220,13 @@ def ingest_session(conn, obj: dict) -> tuple[int, int, int]:
     segments = obj.get("segments") or []
     # Same verdict rules as the chat DB: SEVERE / FLAGGED / CLEAN from the
     # intent codes, including flagged-combination escalations.
-    flags = obj.get("flags") or []
+    flags = session_flags(obj, segments)
     intent_codes = [f.get("intent") for f in flags if f.get("intent")]
     verdict    = get_db_verdict_for_flags(intent_codes)
     confidence = get_db_confidence_for_verdict(verdict)
 
     # Parse astrotalk verdict
-    astrotalk_val = obj.get("at_flag")
-    astrotalk_verdict = None
-    if astrotalk_val == 0:
-        astrotalk_verdict = 'CLEAN'
-    elif astrotalk_val == 1:
-        astrotalk_verdict = 'FLAGGED'
+    astrotalk_verdict = parse_astrotalk_verdict(obj.get("at_flag"))
     has_video = optional_bool(obj.get("has_video"))
     has_video_value = None if has_video is None else int(has_video)
 
