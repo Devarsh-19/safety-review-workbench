@@ -33,6 +33,8 @@ DIARIZATION, TONE & REVIEW RULES:
 - Always set "review": false and "long_pauses": []. Pause detection is handled externally.
 
 CRITICAL FLAGGING RULES:
+- CONTEXTUAL FLAGGING: Do not flag based on a single isolated word. You must evaluate the proper context of nearby words and the overall conversation. Friendly banter, harmless astrological terms, casual complaints, or slang used playfully without malicious intent are NOT violations.
+- TIMESTAMP ACCURACY: Ensure all ts_start and ts_end values are precise floating-point numbers in seconds (e.g., 124.5). The flag timestamps must precisely bound the exact spoken words in the transcript_excerpt, not the general surrounding area.
 - If a SINGLE parent segment violates MULTIPLE intents, output a SEPARATE entry for EACH intent, pinpointing their respective exact timestamps.
 - Flag ALL violations exhaustively across the entire audio runtime. Do not summarize or stop parsing early.
 - If no policy violations are detected, return "flags": []. Do NOT invent, guess, or speculatively generate flags. Only flag content you can directly hear and confirm in the audio.
@@ -43,14 +45,14 @@ CRITICAL FLAGGING RULES:
 - Rely heavily on your audio intelligence: flag aggressive shouting under HATE_SPEECH or VIOLENCE, or ambient distress/crying where appropriate based on context.
 - Only include flags with confidence >= 0.5, EXCEPT for CSAM_RISK which must be flagged at a lower threshold of >= 0.2.
 - Return transcript text only in "flags[*].transcript_excerpt" for marked violations. Do not return transcript text for clean speech.
-- Do NOT fabricate transcript_excerpt text. Every transcript_excerpt must be a verbatim quote of the actual words spoken in the audio IN THE ORIGINAL LANGUAGE. Do NOT translate the transcript to English or any other language. If the violation is an ambient event (shouting, distress, crying), describe the audio event briefly instead.
-- The transcript_excerpt must correspond to the exact timestamp bounds (ts_start to ts_end). Do not quote words from a different part of the audio.
-- The ts_start and ts_end for each flag MUST be the exact, precise timestamps where the violation occurred. Do NOT guess or use the entire segment's bounds if the violation is shorter.
+- Do NOT fabricate transcript_excerpt text. Every transcript_excerpt must be a verbatim quote of the actual words spoken in the audio IN THE ORIGINAL LANGUAGE. Do NOT translate to English.
+- The transcript_excerpt MUST include enough nearby words to demonstrate the violating context. Do not just extract a single isolated word if the violation depends on a surrounding phrase.
+- The ts_start and ts_end for each flag MUST be the exact, precise timestamps covering the full transcript_excerpt. Do NOT guess or use the entire segment's bounds if the violation is shorter, but ensure the timestamps capture the contextual phrase, not just a millisecond blip.
 - Do not infer regional slang from unclear audio, line noise, hold music, breathing, or background chatter. Flag slang only when clearly spoken or strongly confirmed by context.
 - If multiple speakers violate policies in the same time window, create separate flags for each speaker with their respective speaker label. Do not flag a speaker merely for hearing, acknowledging, or being present during another speaker's violation.
 
 SLANG DICTIONARY TO FLAG:
-- Unless otherwise annotated, all slang dictionary terms below map to ABUSIVE_LANGUAGE.
+- Unless otherwise annotated, all slang dictionary terms below map to ABUSIVE_LANGUAGE. Pay attention to the intent of the speaker. Do not flag dictionary terms if used neutrally, playfully, or without hostility.
 - HINDI/HINGLISH: "bc", "mc", "bsdk", "chu", "chutiya", "chut", "saali", "saala", "kamina", "kamini", "pagal", "bewakoof", "gadha", "g marao", "g mara", "panauti", "manhus", "marwani hai", "marwana", "marwa" (NSFW_EXPLICIT), "w kar", "W kar" (OFF_PLATFORM_SOLICITATION), "number de", "no dai" (PERSONAL_DATA_COLLECTION), "ghar aa kar", "ghar aaunga" (VIOLENCE).
 - TAMIL: "thevdiya", "thevidiya", "thevadiya", "otha", "otha mavan", "soothu", "soothadi", "punda", "pundamavan", "pundek", "koothi", "loosu", "loosu payale", "naaye", "naay", "sunni", "okka", "ombhu".
 - TELUGU: "lanja", "lanjodaka", "lanjodaki", "dengey", "dengu", "dengina", "pukumunda", "gudda", "erri puka", "kukka", "kukkanayyala", "donga", "sulle".

@@ -113,9 +113,38 @@ def normalize_speaker_label(value: str) -> str:
     return normalized
 
 
+def parse_timestamp(value: Any) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        if not value.strip():
+            return None
+        try:
+            parts = [float(p) for p in value.strip().split(":")]
+            seconds = 0.0
+            for p in parts:
+                seconds = seconds * 60 + p
+            return seconds
+        except (ValueError, TypeError):
+            pass
+    return float(value)
+
+
 class TimestampedModel(BaseModel):
     ts_start: float = Field(ge=0.0, description="Start time in seconds.")
     ts_end: float = Field(ge=0.0, description="End time in seconds.")
+
+    @model_validator(mode="before")
+    @classmethod
+    def parse_timestamps(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            if "ts_start" in data and data["ts_start"] is not None:
+                data["ts_start"] = parse_timestamp(data["ts_start"])
+            if "ts_end" in data and data["ts_end"] is not None:
+                data["ts_end"] = parse_timestamp(data["ts_end"])
+        return data
 
     @model_validator(mode="after")
     def validate_timestamp_order(self) -> "TimestampedModel":
@@ -137,6 +166,16 @@ class SegmentFlag(BaseModel):
     )
     ts_start: float | None = Field(default=None, description="Exact start time of the violation in seconds.")
     ts_end: float | None = Field(default=None, description="Exact end time of the violation in seconds.")
+
+    @model_validator(mode="before")
+    @classmethod
+    def parse_timestamps(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            if "ts_start" in data and data["ts_start"] is not None:
+                data["ts_start"] = parse_timestamp(data["ts_start"])
+            if "ts_end" in data and data["ts_end"] is not None:
+                data["ts_end"] = parse_timestamp(data["ts_end"])
+        return data
 
 
 class DiarizedSegment(TimestampedModel):
