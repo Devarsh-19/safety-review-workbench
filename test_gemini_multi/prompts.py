@@ -79,7 +79,9 @@ You must reply with ONLY a valid JSON object matching this schema. Do NOT wrap t
                     "intent": "<intent ID from taxonomy, e.g. NSFW, CSAM_RISK, etc.>",
                     "s": "RED" | "AMBER",
                     "conf": <value between 0.5 and 1.0, except CSAM_RISK may be 0.2 to 1.0>,
-                    "transcript_excerpt": "<short exact words or ambient event that triggered the flag; not a full transcript>"
+                    "transcript_excerpt": "<short exact words or ambient event that triggered the flag; not a full transcript>",
+                    "ts_start": <exact start timestamp of violation in seconds, optional>,
+                    "ts_end": <exact end timestamp of violation in seconds, optional>
                 }
             ],
             "tone": "NEUTRAL" | "CALM" | "PROFESSIONAL" | "DISTRESSED" | "ANGRY" | "AGGRESSIVE" | "FLIRTATIOUS" | "UNCLEAR"

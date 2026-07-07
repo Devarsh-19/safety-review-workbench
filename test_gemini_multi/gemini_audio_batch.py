@@ -135,6 +135,8 @@ class SegmentFlag(BaseModel):
     transcript_excerpt: str = Field(
         description="Short exact words or ambient event that triggered the flag; not a full transcript."
     )
+    ts_start: float | None = Field(default=None, description="Exact start time of the violation in seconds.")
+    ts_end: float | None = Field(default=None, description="Exact end time of the violation in seconds.")
 
 
 class DiarizedSegment(TimestampedModel):
@@ -696,8 +698,10 @@ def flatten_result(
         for seg in report.segments:
             for flag in seg.flags:
                 f_dump = flag.model_dump()
-                f_dump["ts_start"] = seg.ts_start
-                f_dump["ts_end"] = seg.ts_end
+                if f_dump.get("ts_start") is None:
+                    f_dump["ts_start"] = seg.ts_start
+                if f_dump.get("ts_end") is None:
+                    f_dump["ts_end"] = seg.ts_end
                 f_dump["segment_id"] = seg.segment_id
                 f_dump["speaker"] = seg.speaker
                 f_dump["tone"] = seg.tone

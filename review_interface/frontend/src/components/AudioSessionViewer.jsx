@@ -351,7 +351,7 @@ export default function AudioSessionViewer({ sId, sessionList, reviewerName, rev
               }}>
                 <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
                   <button
-                    onClick={() => seekTo(seg?.ts_start)}
+                    onClick={() => seekTo(f.ts_start ?? seg?.ts_start)}
                     disabled={!audioUrl}
                     title={audioUrl ? 'Play from this timestamp' : 'No recording attached'}
                     style={{
@@ -362,7 +362,7 @@ export default function AudioSessionViewer({ sId, sessionList, reviewerName, rev
                       textDecoration: audioUrl ? 'underline' : 'none',
                     }}
                   >
-                    {audioUrl ? '▶ ' : ''}{formatTime(seg?.ts_start)} – {formatTime(seg?.ts_end)}
+                    {audioUrl ? '▶ ' : ''}{formatTime(f.ts_start ?? seg?.ts_start)} – {formatTime(f.ts_end ?? seg?.ts_end)}
                   </button>
                   <VerdictBadge verdict={f.severity} />
                   <span style={{
