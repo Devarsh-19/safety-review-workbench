@@ -7,7 +7,7 @@ Analyse all speakers neutrally. Violations can come from any speaker, but do not
 
 LANGUAGE AUTODETECTION & CULTURAL NUANCES:
 - The audio can be spoken in ANY Indian language including English, Hindi, Hinglish, Tamil, Telugu, Punjabi, Marathi, Bengali, Kannada, Malayalam, Gujarati, etc.
-- Auto-detect the languages used. Understand cultural and linguistic nuances, mentally translating to English to detect policy violations accurately.
+- Auto-detect the languages used. Understand cultural and linguistic nuances, mentally translating to English to detect policy violations accurately, but the final transcript_excerpt MUST remain in the original spoken language.
 - Cultural terms (darling, dear, ji, bachha, beta, beti) or English psychic terms (babe, hun, love, sweetheart) are NOT violations unless combined with explicit sexual or grooming signals.
 - Short terms or single words (e.g., "bite", "lick", "suck") in isolation without sexual context are NOT violations.
 - Content containing ONLY background noise or casual greetings should NEVER be flagged.
@@ -43,8 +43,9 @@ CRITICAL FLAGGING RULES:
 - Rely heavily on your audio intelligence: flag aggressive shouting under HATE_SPEECH or VIOLENCE, or ambient distress/crying where appropriate based on context.
 - Only include flags with confidence >= 0.5, EXCEPT for CSAM_RISK which must be flagged at a lower threshold of >= 0.2.
 - Return transcript text only in "flags[*].transcript_excerpt" for marked violations. Do not return transcript text for clean speech.
-- Do NOT fabricate transcript_excerpt text. Every transcript_excerpt must be a verbatim quote of the actual words spoken in the audio. If the violation is an ambient event (shouting, distress, crying), describe the audio event briefly instead.
-- The transcript_excerpt must correspond to the segment's audio. Do not quote words from a different part of the audio.
+- Do NOT fabricate transcript_excerpt text. Every transcript_excerpt must be a verbatim quote of the actual words spoken in the audio IN THE ORIGINAL LANGUAGE. Do NOT translate the transcript to English or any other language. If the violation is an ambient event (shouting, distress, crying), describe the audio event briefly instead.
+- The transcript_excerpt must correspond to the exact timestamp bounds (ts_start to ts_end). Do not quote words from a different part of the audio.
+- The ts_start and ts_end for each flag MUST be the exact, precise timestamps where the violation occurred. Do NOT guess or use the entire segment's bounds if the violation is shorter.
 - Do not infer regional slang from unclear audio, line noise, hold music, breathing, or background chatter. Flag slang only when clearly spoken or strongly confirmed by context.
 - If multiple speakers violate policies in the same time window, create separate flags for each speaker with their respective speaker label. Do not flag a speaker merely for hearing, acknowledging, or being present during another speaker's violation.
 
@@ -79,9 +80,9 @@ You must reply with ONLY a valid JSON object matching this schema. Do NOT wrap t
                     "intent": "<intent ID from taxonomy, e.g. NSFW, CSAM_RISK, etc.>",
                     "s": "RED" | "AMBER",
                     "conf": <value between 0.5 and 1.0, except CSAM_RISK may be 0.2 to 1.0>,
-                    "transcript_excerpt": "<short exact words or ambient event that triggered the flag; not a full transcript>",
-                    "ts_start": <exact start timestamp of violation in seconds, optional>,
-                    "ts_end": <exact end timestamp of violation in seconds, optional>
+                    "transcript_excerpt": "<short exact verbatim quote of the triggering words IN ORIGINAL LANGUAGE; not a full transcript>",
+                    "ts_start": <exact start timestamp of violation in seconds>,
+                    "ts_end": <exact end timestamp of violation in seconds>
                 }
             ],
             "tone": "NEUTRAL" | "CALM" | "PROFESSIONAL" | "DISTRESSED" | "ANGRY" | "AGGRESSIVE" | "FLIRTATIOUS" | "UNCLEAR"
