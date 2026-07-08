@@ -19,9 +19,9 @@ Output columns (one row per session):
     verdict               - overall_verdict (CLEAN / FLAGGED / SEVERE, blank if unreviewed)
     reviewed_by           - submitted_by, fallback reviewer_id
     astrotalk_flagged     - platform's own flag (0/1)
-    astrotalk_flag_category
     is_flagged            - 1 if the session has any active flag, else 0
     n_active_flags        - number of active flags on the session
+    flag_categories       - active flag counts per category, e.g. {NSFW:3,CSAM:4}
     flag_sources          - distinct active flag sources (LLM/REGEX/MANUAL), ';'-joined
 
 Read-only — never modifies the database.
@@ -47,8 +47,8 @@ from store.db import get_connection  # noqa: E402
 CSV_COLUMNS = [
     "session_id", "session_date", "session_type", "duration_minutes", "n_turns",
     "review_status", "verdict", "reviewed_by",
-    "astrotalk_flagged", "astrotalk_flag_category",
-    "is_flagged", "n_active_flags", "flag_sources",
+    "astrotalk_flagged",
+    "is_flagged", "n_active_flags", "flag_categories", "flag_sources",
 ]
 
 
@@ -58,7 +58,8 @@ def _active_flag_summaries(conn) -> dict[str, dict]:
     Single pass over the whole flags table — no per-session queries.
     """
     rows = conn.execute(
-        """SELECT flag_id, parent_flag_id, session_id, source, detection_layer
+        """SELECT flag_id, parent_flag_id, session_id, source, detection_layer,
+                  category_code
            FROM flags"""
     ).fetchall()
 
@@ -72,12 +73,21 @@ def _active_flag_summaries(conn) -> dict[str, dict]:
         )
         if not is_active:
             continue
-        s = summaries.setdefault(r["session_id"], {"n": 0, "sources": set()})
+        s = summaries.setdefault(r["session_id"], {"n": 0, "sources": set(), "categories": {}})
         s["n"] += 1
         src = r["source"] or r["detection_layer"]
         if src:
             s["sources"].add(src)
+        cat = r["category_code"] or "UNKNOWN"
+        s["categories"][cat] = s["categories"].get(cat, 0) + 1
     return summaries
+
+
+def _format_categories(categories: dict[str, int]) -> str:
+    """Render category counts as a compact dict string, e.g. {NSFW:3,CSAM:4}."""
+    if not categories:
+        return ""
+    return "{" + ",".join(f"{k}:{v}" for k, v in sorted(categories.items())) + "}"
 
 
 def export(out_path: Path) -> None:
@@ -105,7 +115,7 @@ def export(out_path: Path) -> None:
         for s in conn.execute(
             """SELECT session_id, session_date, session_type, duration_minutes,
                       review_status, overall_verdict, submitted_by, reviewer_id,
-                      astrotalk_flagged, astrotalk_flag_category
+                      astrotalk_flagged
                FROM sessions ORDER BY session_id"""
         ):
             n_sessions += 1
@@ -122,9 +132,9 @@ def export(out_path: Path) -> None:
                 "verdict":                 s["overall_verdict"] or "",
                 "reviewed_by":             s["submitted_by"] or s["reviewer_id"] or "",
                 "astrotalk_flagged":       s["astrotalk_flagged"],
-                "astrotalk_flag_category": s["astrotalk_flag_category"] or "",
                 "is_flagged":              1 if fs else 0,
                 "n_active_flags":          fs["n"] if fs else 0,
+                "flag_categories":         _format_categories(fs["categories"]) if fs else "",
                 "flag_sources":            ";".join(sorted(fs["sources"])) if fs else "",
             })
 
