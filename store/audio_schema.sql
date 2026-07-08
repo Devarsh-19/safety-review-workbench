@@ -45,7 +45,7 @@ CREATE TABLE IF NOT EXISTS audio_flags (
     conf                REAL,
     transcript          TEXT,
     source              TEXT    DEFAULT 'LLM',              -- 'LLM' | 'MANUAL'
-    status              TEXT    DEFAULT 'ACTIVE',           -- 'ACTIVE' | 'CONFIRMED'
+    status              TEXT    DEFAULT 'ACTIVE',           -- 'ACTIVE' | 'CONFIRMED' | 'DISMISSED' (soft-dismiss, restorable via undismiss)
     parent_flag_id      INTEGER,                            -- set on amendment rows
     created_at          TEXT    DEFAULT (datetime('now')),
     FOREIGN KEY (s_id) REFERENCES audio_sessions(s_id)

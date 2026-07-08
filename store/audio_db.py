@@ -44,6 +44,7 @@ def initialise_audio_db() -> None:
         "ALTER TABLE audio_flags ADD COLUMN confirmed_by TEXT",
         "ALTER TABLE audio_flags ADD COLUMN confirmed_at TEXT",
         "ALTER TABLE audio_flags ADD COLUMN created_by TEXT",           # reviewer who made an amendment
+        "ALTER TABLE audio_sessions ADD COLUMN duration_seconds REAL",  # real audio duration from the pipeline (ffprobe)
     ]
     with get_audio_connection() as conn:
         for migration in migrations:
@@ -99,13 +100,17 @@ def fetch_audio_sessions_page(
         where.append("CAST(s.s_id AS TEXT) LIKE ?"); params.append(f"%{search}%")
     where_sql = " AND ".join(where)
 
+    # flag_count excludes DISMISSED rows so it matches the chat DB, where a
+    # dismissed flag is hard-deleted and disappears from the queue count.
     base = f"""
         FROM audio_sessions s
         LEFT JOIN (
-            SELECT s_id, COUNT(*) AS flag_count FROM audio_flags GROUP BY s_id
+            SELECT s_id, COUNT(*) AS flag_count FROM audio_flags
+            WHERE status != 'DISMISSED' OR status IS NULL
+            GROUP BY s_id
         ) fc ON fc.s_id = s.s_id
         LEFT JOIN (
-            SELECT s_id, COUNT(*) AS segment_count, MAX(ts_end) AS duration_seconds
+            SELECT s_id, COUNT(*) AS segment_count, MAX(ts_end) AS max_ts_end
             FROM audio_segments GROUP BY s_id
         ) sc ON sc.s_id = s.s_id
         WHERE {where_sql}
@@ -113,7 +118,7 @@ def fetch_audio_sessions_page(
     # Safe columns for sorting
     valid_cols = {
         's_id': 's.s_id',
-        'duration': 'duration_seconds',
+        'duration': 'COALESCE(s.duration_seconds, sc.max_ts_end, 0)',
         'segments': 'segment_count',
         'flags': 'flag_count',
         'verdict': 's.overall_verdict',
@@ -134,7 +139,7 @@ def fetch_audio_sessions_page(
             f"""SELECT s.*,
                        COALESCE(fc.flag_count, 0)    AS flag_count,
                        COALESCE(sc.segment_count, 0) AS segment_count,
-                       COALESCE(sc.duration_seconds, 0) AS duration_seconds
+                       COALESCE(s.duration_seconds, sc.max_ts_end, 0) AS duration_seconds
                 {base}
                 {order_clause}
                 LIMIT ? OFFSET ?""",
@@ -193,8 +198,10 @@ def recompute_audio_session_verdict(s_id: int, conn) -> str:
 
 def get_audio_flag_summary(s_id: int) -> dict:
     """Flag counts for the submit gate — same semantics as the chat workflow:
-    a session can be submitted only when every active flag is CONFIRMED
-    (dismissed flags are deleted, so they don't count)."""
+    a session can be submitted only when every active flag is actioned.
+    Unlike chat (where dismissal hard-deletes the row), audio keeps dismissed
+    flags with status = 'DISMISSED' so they can be restored; both CONFIRMED
+    and DISMISSED count as actioned."""
     with get_audio_connection() as conn:
         rows = conn.execute(
             "SELECT flag_id, status, parent_flag_id FROM audio_flags WHERE s_id = ?",
@@ -226,6 +233,10 @@ def set_speaker_roles(s_id: int, speaker1_role: str, speaker2_role: str) -> None
 
 def submit_audio_session(s_id: int, reviewer_id: str, note: str = None) -> None:
     with get_audio_connection() as conn:
+        # Recompute the verdict from active flags first — same as the chat DB's
+        # submit_session_for_review, so the stored verdict always reflects the
+        # flag state at the moment of submission.
+        recompute_audio_session_verdict(s_id, conn)
         conn.execute(
             """UPDATE audio_sessions
                SET review_status = 'SUBMITTED_FOR_REVIEW',
