@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import io
+import os
 import sys
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -51,6 +52,20 @@ from store.audio_db import (
 )
 from store.writer import write_review_action
 from engine.verdict_rules import get_db_verdict_for_flags
+
+# Reviewers allowed to lock/unlock/finalise sessions (L2). Comma-separated
+# override via the L2_REVIEWERS env var; keep in sync with the frontend
+# LoginScreen roster when adding a second L2.
+L2_REVIEWERS = {
+    name.strip()
+    for name in os.getenv("L2_REVIEWERS", "Amogh").split(",")
+    if name.strip()
+}
+
+
+def _require_l2(reviewer_id: str, action: str) -> None:
+    if reviewer_id not in L2_REVIEWERS:
+        raise HTTPException(status_code=403, detail=f"Only L2 reviewer can {action}")
 
 
 # ---------------------------------------------------------------------------
@@ -497,11 +512,7 @@ def manual_flag(session_id: str, body: ManualFlagRequest):
 
 @app.post("/sessions/{session_id}/lock")
 def lock_session_endpoint(session_id: str, body: LockRequest):
-    if body.reviewer_id != "Amogh":
-        raise HTTPException(
-            status_code=403,
-            detail="Only L2 reviewer can lock sessions",
-        )
+    _require_l2(body.reviewer_id, "lock sessions")
     try:
         lock_session(session_id, body.reviewer_id)
         return {"success": True, "locked_by": body.reviewer_id}
@@ -792,11 +803,7 @@ def submit_session(session_id: str, body: SubmitRequest):
 
 @app.post("/sessions/{session_id}/needs-final-review")
 def needs_final_review(session_id: str, body: LockRequest):
-    if body.reviewer_id != "Amogh":
-        raise HTTPException(
-            status_code=403,
-            detail="Only L2 reviewer can mark needs final review",
-        )
+    _require_l2(body.reviewer_id, "mark needs final review")
     try:
         mark_needs_final_review(session_id, body.reviewer_id)
         return {"success": True}
@@ -1264,8 +1271,7 @@ def audio_submit(s_id: int, body: SubmitRequest):
 
 @app.post("/audio/sessions/{s_id}/lock")
 def audio_lock(s_id: int, body: LockRequest):
-    if body.reviewer_id != "Amogh":
-        raise HTTPException(status_code=403, detail="Only L2 reviewer can lock sessions")
+    _require_l2(body.reviewer_id, "lock sessions")
     try:
         lock_audio_session(s_id, body.reviewer_id)
         return {"success": True, "locked_by": body.reviewer_id}
@@ -1275,8 +1281,7 @@ def audio_lock(s_id: int, body: LockRequest):
 
 @app.post("/audio/sessions/{s_id}/unlock")
 def audio_unlock(s_id: int, body: LockRequest):
-    if body.reviewer_id != "Amogh":
-        raise HTTPException(status_code=403, detail="Only L2 reviewer can unlock sessions")
+    _require_l2(body.reviewer_id, "unlock sessions")
     try:
         unlock_audio_session(s_id)
         return {"success": True}

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { C, MONO } from '../tokens';
 import TopBar from './TopBar';
 import Footer from './Footer';
@@ -32,14 +32,28 @@ export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelect
   const [total, setTotal] = useState(0);
   const [stats, setStats] = useState(null);
   const [status, setStatus] = useState('');
-  const [search, setSearch] = useState('');
+  const [searchInput, setSearchInput] = useState('');  // raw input value
+  const [search, setSearch] = useState('');            // debounced value used for queries
   const [page, setPage] = useState(0);
   const [sortCol, setSortCol] = useState('s_id');
   const [sortDir, setSortDir] = useState('asc');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  // Monotonic id per request — a response only lands if it is still the
+  // latest one, so slow/out-of-order responses can't overwrite fresh rows.
+  const requestIdRef = useRef(0);
+
+  // Debounce the search box: query 300ms after the user stops typing.
+  useEffect(() => {
+    const t = setTimeout(() => {
+      setSearch(searchInput);
+      setPage(0);
+    }, 300);
+    return () => clearTimeout(t);
+  }, [searchInput]);
 
   const load = useCallback(() => {
+    const reqId = ++requestIdRef.current;
     setLoading(true);
     setError('');
     Promise.all([
@@ -52,18 +66,23 @@ export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelect
       getAudioStats({ reviewer_name: reviewerName, reviewer_role: reviewerRole }),
     ])
       .then(([list, st]) => {
+        if (reqId !== requestIdRef.current) return;  // stale response
         setRows(list.rows || []);
         setTotal(list.total || 0);
         setStats(st);
       })
-      .catch((e) => setError(String(e.message || e)))
-      .finally(() => setLoading(false));
+      .catch((e) => {
+        if (reqId !== requestIdRef.current) return;
+        setError(String(e.message || e));
+      })
+      .finally(() => {
+        if (reqId === requestIdRef.current) setLoading(false);
+      });
   }, [status, search, page, sortCol, sortDir, reviewerName, reviewerRole]);
 
   useEffect(() => { load(); }, [load]);
 
-  const handleLock = (e, sId) => {
-    e.stopPropagation();   // don't trigger the row's open-session click
+  const handleLock = (sId) => {
     lockAudioSession(sId, reviewerName)
       .then(load)
       .catch((err) => setError(String(err.message || err)));
@@ -153,8 +172,8 @@ export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelect
             ))}
           </select>
           <input
-            value={search}
-            onChange={(e) => { setSearch(e.target.value); setPage(0); }}
+            value={searchInput}
+            onChange={(e) => setSearchInput(e.target.value)}
             placeholder="Search session id…"
             style={{
               flex: 1, maxWidth: 260, padding: '8px 12px', fontSize: 13,
@@ -303,7 +322,7 @@ export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelect
                     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'stretch', gap: 5 }}>
                       {reviewerRole === 'L2' && ['SUBMITTED_FOR_REVIEW', 'REVIEWED'].includes(r.review_status) && (
                         <button
-                          onClick={(e) => handleLock(e, r.s_id)}
+                          onClick={() => handleLock(r.s_id)}
                           style={{
                             padding: '5px 10px', fontSize: 11, background: C.bgSurface,
                             border: `1px solid ${C.accent}`, borderRadius: 4,
@@ -314,7 +333,7 @@ export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelect
                         </button>
                       )}
                       <button
-                        onClick={(e) => { e.stopPropagation(); onSelectSession(r.s_id, rows); }}
+                        onClick={() => onSelectSession(r.s_id, rows)}
                         style={{
                           padding: '5px 14px', fontSize: 12, fontWeight: 500,
                           background: r.review_status === 'LOCKED' ? C.bgStatsrow : C.accent,

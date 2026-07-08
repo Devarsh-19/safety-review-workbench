@@ -168,6 +168,11 @@ export default function AudioSessionViewer({ sId, sessionList, reviewerName, rev
   );
   const unactionedCount = activeFlags.filter((f) => f.status !== 'CONFIRMED' && f.status !== 'DISMISSED').length;
 
+  // Mirrors the backend submit gate: speaker roles must be assigned before a
+  // session WITH flags can be submitted. Pre-checking here disables the button
+  // with a hint instead of surfacing a raw HTTP 400 after the click.
+  const rolesMissing = flags.length > 0 && !(session?.speaker1_role && session?.speaker2_role);
+
   const byStartTime = (a, b) => {
     const aStart = Number(a.ts_start ?? segById[a.seg_id]?.ts_start ?? Number.MAX_SAFE_INTEGER);
     const bStart = Number(b.ts_start ?? segById[b.seg_id]?.ts_start ?? Number.MAX_SAFE_INTEGER);
@@ -503,7 +508,7 @@ export default function AudioSessionViewer({ sId, sessionList, reviewerName, rev
                       </button>
                       <button
                         disabled={busy}
-                        onClick={() => setDismissingFlagId(null)}
+                        onClick={() => { setDismissingFlagId(null); setDismissReason(''); }}
                         style={{
                           padding: '6px 12px', fontSize: 12, fontWeight: 500, borderRadius: 3,
                           border: `1px solid ${C.border}`, background: '#FFFFFF', color: C.textPrimary,
@@ -656,9 +661,9 @@ export default function AudioSessionViewer({ sId, sessionList, reviewerName, rev
               {/* Review trail — who did what, when (chat parity) */}
               {(session.submitted_by || session.reviewer_id || session.locked_by) && (
                 <span style={{ fontSize: 12, color: C.textSecondary, fontFamily: MONO }}>
-                  {session.submitted_by && `submitted by ${session.submitted_by}${session.submitted_at ? ` at ${session.submitted_at}` : ''}`}
-                  {!session.submitted_by && session.reviewer_id && `reviewed by ${session.reviewer_id}${session.reviewed_at ? ` at ${session.reviewed_at}` : ''}`}
-                  {session.locked_by && ` · locked by ${session.locked_by}${session.locked_at ? ` at ${session.locked_at}` : ''}`}
+                  {session.submitted_by && `submitted by ${session.submitted_by}${session.submitted_at ? ` on ${String(session.submitted_at).slice(0, 10)}` : ''}`}
+                  {!session.submitted_by && session.reviewer_id && `reviewed by ${session.reviewer_id}${session.reviewed_at ? ` on ${String(session.reviewed_at).slice(0, 10)}` : ''}`}
+                  {session.locked_by && ` · locked by ${session.locked_by}${session.locked_at ? ` on ${String(session.locked_at).slice(0, 10)}` : ''}`}
                 </span>
               )}
               {session.reviewer_note && (
@@ -716,13 +721,14 @@ export default function AudioSessionViewer({ sId, sessionList, reviewerName, rev
               </div>
             )}
 
-            {/* Two speaker lanes */}
-            {speakerLabels.length === 0 ? (
+            {/* Speaker lanes — one per distinct speaker, plus an "Unassigned"
+                lane so orphaned flags stay visible and actionable */}
+            {speakerLabels.length === 0 && orphanFlags.length === 0 ? (
               <div style={{ color: C.textSecondary, fontSize: 13 }}>No segments in this session.</div>
             ) : (
-              <div style={{ display: 'flex', gap: 16, alignItems: 'flex-start' }}>
-                {renderLane(label1, 0)}
-                {renderLane(label2, 1)}
+              <div style={{ display: 'flex', gap: 16, alignItems: 'flex-start', flexWrap: 'wrap' }}>
+                {speakerLabels.map((label, idx) => renderLane(label, idx))}
+                {renderLane(UNASSIGNED_LANE, -1)}
               </div>
             )}
 
@@ -760,22 +766,29 @@ export default function AudioSessionViewer({ sId, sessionList, reviewerName, rev
                     </button>
                   )}
                   <button
-                    disabled={busy || unactionedCount > 0}
+                    disabled={busy || unactionedCount > 0 || rolesMissing}
                     title={unactionedCount > 0
                       ? `${unactionedCount} flag(s) must be confirmed, edited or dismissed first`
-                      : 'Submit this session for L2 review'}
+                      : rolesMissing
+                        ? 'Assign speaker roles (astrologer/user) before submitting'
+                        : 'Submit this session for L2 review'}
                     onClick={() => doAction(() => submitAudioSession(sId, reviewerName, note))}
                     style={{
                       padding: '9px 16px', fontSize: 13, fontWeight: 500,
                       borderRadius: 5, border: 'none',
-                      background: (busy || unactionedCount > 0) ? '#D4D0C9' : C.accent,
-                      color: (busy || unactionedCount > 0) ? C.textMuted : '#FFFFFF',
-                      cursor: (busy || unactionedCount > 0) ? 'not-allowed' : 'pointer',
+                      background: (busy || unactionedCount > 0 || rolesMissing) ? '#D4D0C9' : C.accent,
+                      color: (busy || unactionedCount > 0 || rolesMissing) ? C.textMuted : '#FFFFFF',
+                      cursor: (busy || unactionedCount > 0 || rolesMissing) ? 'not-allowed' : 'pointer',
                       whiteSpace: 'nowrap',
                     }}
                   >
                     Submit for L2 Review
                   </button>
+                  {rolesMissing && unactionedCount === 0 && (
+                    <span style={{ fontSize: 12, color: C.flaggedText, whiteSpace: 'nowrap' }}>
+                      Assign speaker roles first
+                    </span>
+                  )}
                 </>
               )}
               {reviewerRole === 'L2' && !locked && (
