@@ -920,6 +920,51 @@ def confirm_all_flags_endpoint(session_id: str, body: LockRequest):
         conn.close()
 
 
+@app.post("/sessions/{session_id}/dismiss-all-flags")
+def dismiss_all_flags_endpoint(session_id: str, body: LockRequest):
+    """
+    Dismiss ALL active, not-yet-confirmed flags for a session in one request.
+
+    Batched equivalent of /flags/{flag_id}/dismiss: hard-deletes each
+    unconfirmed active flag (the amendment row plus its original, if any),
+    leaves already-confirmed flags untouched, and recomputes the session
+    verdict ONCE.
+    """
+    conn = get_connection()
+    try:
+        with conn:
+            rows = conn.execute(
+                "SELECT flag_id, parent_flag_id, status FROM flags WHERE session_id = ?",
+                (session_id,),
+            ).fetchall()
+
+            # Active = amendment rows + original rows that have no amendment.
+            amended_parents = {
+                r["parent_flag_id"] for r in rows if r["parent_flag_id"] is not None
+            }
+            active = [
+                r for r in rows
+                if (r["parent_flag_id"] is not None)
+                or (r["flag_id"] not in amended_parents)
+            ]
+            to_dismiss = [r for r in active if r["status"] != "CONFIRMED"]
+
+            for r in to_dismiss:
+                original_id = r["parent_flag_id"] if r["parent_flag_id"] else r["flag_id"]
+                conn.execute("DELETE FROM flags WHERE parent_flag_id = ?", (original_id,))
+                conn.execute("DELETE FROM flags WHERE flag_id = ?", (original_id,))
+
+            recompute_session_verdict(session_id, conn)
+
+        return {"success": True, "dismissed_count": len(to_dismiss)}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        conn.close()
+
+
 # ---------------------------------------------------------------------------
 # Endpoints — session submission workflow
 # ---------------------------------------------------------------------------

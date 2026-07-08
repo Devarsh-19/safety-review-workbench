@@ -4,7 +4,7 @@ import VerdictBadge from './VerdictBadge';
 import {
   getSessionDetail, getSessionFlags, submitReview,
   manualFlag, saveSessionNote,
-  confirmFlag, confirmAllFlags, submitSession, markNeedsFinalReview,
+  confirmFlag, confirmAllFlags, dismissAllFlags, submitSession, markNeedsFinalReview,
 } from '../api';
 
 // ---------------------------------------------------------------------------
@@ -256,6 +256,7 @@ export default function SessionViewer({ sessionId, sessionList, reviewerName, re
   const [dismissSaving,      setDismissSaving]      = useState(false);
   const [confirmingFlagId,   setConfirmingFlagId]   = useState(null);
   const [confirmingAll,      setConfirmingAll]      = useState(false);
+  const [dismissingAll,      setDismissingAll]      = useState(false);
   const [flagCardHoverId,    setFlagCardHoverId]    = useState(null);
 
   // Workflow state
@@ -484,6 +485,23 @@ export default function SessionViewer({ sessionId, sessionList, reviewerName, re
     } catch (_) {
     } finally {
       setConfirmingAll(false);
+    }
+  };
+
+  // ── Dismiss-all handler: dismiss every unconfirmed active flag at once ──────
+  const handleDismissAll = async (count) => {
+    if (dismissingAll) return;
+    // eslint-disable-next-line no-alert
+    if (!window.confirm(`Dismiss all ${count} flag${count === 1 ? '' : 's'} for this session? This permanently deletes them.`)) return;
+    setDismissingAll(true);
+    try {
+      const res = await dismissAllFlags(sessionId, reviewerName);
+      await refreshSessionAndFlags();
+      setToast(`Dismissed ${res?.dismissed_count ?? count} flags`);
+      setTimeout(() => setToast(null), 2000);
+    } catch (_) {
+    } finally {
+      setDismissingAll(false);
     }
   };
 
@@ -1020,21 +1038,36 @@ export default function SessionViewer({ sessionId, sessionList, reviewerName, re
               </div>
             )}
 
-            {/* Confirm-all: one click confirms every unconfirmed active flag */}
+            {/* Confirm-all / Dismiss-all: bulk-action every unconfirmed active flag */}
             {!loading && unactionedFlagCount >= 2 && (
-              <div style={{ marginBottom: 14 }}>
+              <div style={{ marginBottom: 14, display: 'flex', gap: 8 }}>
                 <button
                   onClick={() => handleConfirmAll(unactionedFlagCount)}
-                  disabled={confirmingAll}
+                  disabled={confirmingAll || dismissingAll}
                   style={{
                     fontSize: 12, fontFamily: MONO, fontWeight: 600,
                     padding: '6px 14px', borderRadius: 4,
-                    cursor: confirmingAll ? 'default' : 'pointer',
+                    cursor: confirmingAll || dismissingAll ? 'default' : 'pointer',
                     background: C.accent, color: '#FFFFFF',
-                    border: `1px solid ${C.accent}`, opacity: confirmingAll ? 0.6 : 1,
+                    border: `1px solid ${C.accent}`,
+                    opacity: confirmingAll || dismissingAll ? 0.6 : 1,
                   }}
                 >
                   {confirmingAll ? 'Confirming…' : `Confirm All (${unactionedFlagCount})`}
+                </button>
+                <button
+                  onClick={() => handleDismissAll(unactionedFlagCount)}
+                  disabled={confirmingAll || dismissingAll}
+                  style={{
+                    fontSize: 12, fontFamily: MONO, fontWeight: 600,
+                    padding: '6px 14px', borderRadius: 4,
+                    cursor: confirmingAll || dismissingAll ? 'default' : 'pointer',
+                    background: '#A32D2D', color: '#FFFFFF',
+                    border: '1px solid #A32D2D',
+                    opacity: confirmingAll || dismissingAll ? 0.6 : 1,
+                  }}
+                >
+                  {dismissingAll ? 'Dismissing…' : `Dismiss All (${unactionedFlagCount})`}
                 </button>
               </div>
             )}

@@ -122,6 +122,14 @@ export function confirmAllFlags(sessionId, reviewerId) {
   });
 }
 
+export function dismissAllFlags(sessionId, reviewerId) {
+  return request(`/sessions/${encodeURIComponent(sessionId)}/dismiss-all-flags`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ reviewer_id: reviewerId }),
+  });
+}
+
 // ── Workflow actions ───────────────────────────────────────────────────────
 
 export function submitSession(sessionId, reviewerId, note) {
