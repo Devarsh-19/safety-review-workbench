@@ -91,7 +91,6 @@ _EXCLUDED_CATEGORIES = (
     "personal_data_collection",
 )
 _DROP_ONLY_CATEGORIES = (
-    "fake_remedies",
     "instigation",
     "fear_manipulation",
     "financial_solicitation",
