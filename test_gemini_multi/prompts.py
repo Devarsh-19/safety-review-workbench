@@ -22,7 +22,8 @@ DIARIZATION, TONE & REVIEW RULES:
 - Use only stable numbered speaker labels: "Speaker 1", "Speaker 2" etc.
 - Reuse the same speaker number for the same voice throughout the audio.
 - Never output speaker labels such as USER, CONSULTANT, ASTROLOGER, CUSTOMER, or UNKNOWN.
-- Each segment must include: segment_id, speaker, ts_start, ts_end, intents, and tone.
+- If the user message contains a SPEAKER CHANNEL MAP, it is AUTHORITATIVE: it lists the exact time spans in which each speaker talks, derived from the separated recording channels. Attribute every segment to the speaker whose mapped spans cover that time. Do not invent speakers beyond the map and do not swap labels mid-conversation.
+- Each segment must include: segment_id, speaker, ts_start, ts_end, flags, and tone.
 - Assign segment_id sequentially starting at 1 and use the same segment_id in flags when a violation belongs to that segment.
 - "segments[*].flags" must contain the violation details.
 - Only put an intent on a segment when the triggering words, sounds, or conduct are actually present inside that exact segment.
@@ -30,11 +31,10 @@ DIARIZATION, TONE & REVIEW RULES:
 - If a segment is only a reply, acknowledgement, transition, or clean follow-up, omit it entirely from the output even if adjacent segments are flagged.
 - Do NOT include clean speech segments in the response. Only include segments that have at least one violation flag.
 - Assign "segments[*].tone" using exactly one of: NEUTRAL, CALM, PROFESSIONAL, DISTRESSED, ANGRY, AGGRESSIVE, FLIRTATIOUS, UNCLEAR.
-- Always set "review": false and "long_pauses": []. Pause detection is handled externally.
 
 CRITICAL FLAGGING RULES:
 - CONTEXTUAL FLAGGING: Do not flag based on a single isolated word. You must evaluate the proper context of nearby words and the overall conversation. Friendly banter, harmless astrological terms, casual complaints, or slang used playfully without malicious intent are NOT violations.
-- TIMESTAMP ACCURACY: Ensure all ts_start and ts_end values are precise floating-point numbers in seconds (e.g., 124.5). The flag timestamps must precisely bound the exact spoken words in the transcript_excerpt, not the general surrounding area.
+- TIMESTAMP ACCURACY: Every ts_start and ts_end value MUST be a string in "MM:SS" or "MM:SS.d" format measured from the very beginning of the audio (e.g., "02:04.5" for 2 minutes 4.5 seconds). Never output raw second counts (e.g., "124.5") and never omit the colon. The flag timestamps must precisely bound the exact spoken words in the transcript_excerpt, not the general surrounding area.
 - If a SINGLE parent segment violates MULTIPLE intents, output a SEPARATE entry for EACH intent, pinpointing their respective exact timestamps.
 - Flag ALL violations exhaustively across the entire audio runtime. Do not summarize or stop parsing early.
 - If no policy violations are detected, return "flags": []. Do NOT invent, guess, or speculatively generate flags. Only flag content you can directly hear and confirm in the audio.
@@ -69,22 +69,20 @@ You must reply with ONLY a valid JSON object matching this schema. Do NOT wrap t
 {
     "s_id": "<session_id>",
     "lang": "<comma-separated list of detected languages in UPPERCASE, e.g. HINDI, ENGLISH, HINGLISH>",
-    "review": false,
-    "long_pauses": [],
     "segments": [
         {
             "segment_id": <sequential integer starting at 1>,
             "speaker": "Speaker 1" | "Speaker 2" | "...",
-            "ts_start": <segment start timestamp in seconds>,
-            "ts_end": <segment end timestamp in seconds>,
+            "ts_start": "<segment start as MM:SS or MM:SS.d string, e.g. \\"02:04.5\\">",
+            "ts_end": "<segment end as MM:SS or MM:SS.d string>",
             "flags": [
                 {
                     "intent": "<intent ID from taxonomy, e.g. NSFW, CSAM_RISK, etc.>",
                     "s": "RED" | "AMBER",
                     "conf": <value between 0.5 and 1.0, except CSAM_RISK may be 0.2 to 1.0>,
                     "transcript_excerpt": "<short exact verbatim quote of the triggering words IN ORIGINAL LANGUAGE; not a full transcript>",
-                    "ts_start": <exact start timestamp of violation in seconds>,
-                    "ts_end": <exact end timestamp of violation in seconds>
+                    "ts_start": "<exact violation start as MM:SS or MM:SS.d string>",
+                    "ts_end": "<exact violation end as MM:SS or MM:SS.d string>"
                 }
             ],
             "tone": "NEUTRAL" | "CALM" | "PROFESSIONAL" | "DISTRESSED" | "ANGRY" | "AGGRESSIVE" | "FLIRTATIOUS" | "UNCLEAR"

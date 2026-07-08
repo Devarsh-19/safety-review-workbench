@@ -15,7 +15,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-import math
 import os
 import random
 import re
@@ -55,8 +54,9 @@ RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
 BACKOFF_MAX_RETRIES = 6
 BACKOFF_BASE_SECONDS = 2.0
 BACKOFF_MAX_SECONDS = 60.0
-MAX_PLAUSIBLE_TRANSCRIPT_WORDS_PER_SECOND = 7.0
-MIN_WORDS_FOR_TIMESTAMP_REPAIR = 4
+# Per-channel speech-span detection for stereo (one-party-per-channel) calls.
+CHANNEL_SPAN_MIN_SILENCE_SECONDS = 0.6
+CHANNEL_SPAN_MIN_SPEECH_SECONDS = 0.4
 FALLBACK_RETRY_USER_MESSAGE = (
     "Your previous response did not validate. Retry once with a compact reply and return only one valid JSON "
     "object that matches the schema exactly, with no markdown or extra commentary."
@@ -212,6 +212,42 @@ class AstroTalkAudioReport(BaseModel):
     segments: list[DiarizedSegment] = Field(description="Diarized timestamp/tone/intent metadata segments in order.")
 
 
+# Wire models define the response schema sent to Gemini. Timestamps are
+# "MM:SS"/"MM:SS.d" strings because Gemini's audio understanding is trained on
+# MM:SS positions; forcing float seconds made it emit an ambiguous mix of
+# formats. parse_timestamp() converts the strings into float seconds when the
+# wire report is validated into the internal AstroTalkAudioReport.
+_TS_STRING_DESCRIPTION = (
+    'Timestamp as an "MM:SS" or "MM:SS.d" string measured from the beginning of the audio, e.g. "02:04.5".'
+)
+
+
+class WireSegmentFlag(BaseModel):
+    intent: IntentId = Field(description="The matching Intent ID string from the taxonomy.")
+    s: Literal["RED", "AMBER"] = Field(description="Severity label.")
+    conf: float = Field(ge=0.0, le=1.0, description="Confidence rating from 0.0 to 1.0.")
+    transcript_excerpt: str = Field(
+        description="Short exact words or ambient event that triggered the flag; not a full transcript."
+    )
+    ts_start: str = Field(description=f"Exact violation start. {_TS_STRING_DESCRIPTION}")
+    ts_end: str = Field(description=f"Exact violation end. {_TS_STRING_DESCRIPTION}")
+
+
+class WireDiarizedSegment(BaseModel):
+    segment_id: int = Field(ge=1, description="Sequential segment identifier within this audio.")
+    speaker: str = Field(description="Stable numbered speaker label such as Speaker 1, Speaker 2, etc.")
+    ts_start: str = Field(description=f"Segment start. {_TS_STRING_DESCRIPTION}")
+    ts_end: str = Field(description=f"Segment end. {_TS_STRING_DESCRIPTION}")
+    flags: list[WireSegmentFlag] = Field(description="Violation flags for this segment.")
+    tone: ToneLabel = Field(description="Dominant tone heard in this segment.")
+
+
+class WireAudioReport(BaseModel):
+    s_id: str = Field(description="The identifier of the processed session.")
+    lang: str = Field(description="Auto-detected language(s).")
+    segments: list[WireDiarizedSegment] = Field(description="Diarized timestamp/tone/intent metadata segments in order.")
+
+
 def load_env_file(path: Path) -> None:
     """Load simple KEY=VALUE pairs without overriding the process environment."""
     if not path.exists():
@@ -248,8 +284,12 @@ def _safe_audio_stem(row: pd.Series) -> str:
     return str(row["session_id"])
 
 
-def convert_to_mp3(recording_url: str, output_path: Path, force: bool = False) -> None:
-    """Convert an M3U8/audio URL to a mono 16k MP3 using ffmpeg."""
+def convert_to_mp3(recording_url: str, output_path: Path, force: bool = False, channels: int = 1) -> None:
+    """Convert an M3U8/audio URL to a 16k MP3 using ffmpeg.
+
+    Stereo call recordings keep both channels (one party per channel) so
+    speaker turns can be derived per channel; everything else is mono.
+    """
     if output_path.exists() and output_path.stat().st_size > 0 and not force:
         return
 
@@ -264,7 +304,7 @@ def convert_to_mp3(recording_url: str, output_path: Path, force: bool = False) -
         recording_url,
         "-vn",
         "-ac",
-        "1",
+        "2" if channels >= 2 else "1",
         "-ar",
         "16000",
         "-codec:a",
@@ -297,6 +337,30 @@ def probe_has_video(media_source: str) -> bool | None:
         print(f"[WARN] ffprobe video probe failed for {media_source}: {result.stderr.strip()}")
         return None
     return any(line.strip() for line in result.stdout.splitlines())
+
+
+def probe_audio_channels(media_source: str) -> int | None:
+    """Best-effort channel count for the first audio stream."""
+    cmd = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-select_streams",
+        "a:0",
+        "-show_entries",
+        "stream=channels",
+        "-of",
+        "default=noprint_wrappers=1:nokey=1",
+        media_source,
+    ]
+    result = _run_subprocess(cmd)
+    if result.returncode != 0:
+        print(f"[WARN] ffprobe channel probe failed for {media_source}: {result.stderr.strip()}")
+        return None
+    try:
+        return int(result.stdout.strip().splitlines()[0])
+    except (ValueError, IndexError):
+        return None
 
 
 def probe_audio_duration(audio_path: Path) -> float:
@@ -381,18 +445,103 @@ def long_pauses_to_json(long_pauses: list[LongPause]) -> str:
     return json.dumps([pause.model_dump() for pause in long_pauses], ensure_ascii=False)
 
 
+def seconds_to_mmss(seconds: float) -> str:
+    total = round(max(0.0, float(seconds)), 1)
+    minutes = int(total // 60)
+    secs = round(total - minutes * 60, 1)
+    if secs >= 60.0:
+        minutes += 1
+        secs = 0.0
+    return f"{minutes:02d}:{secs:04.1f}"
+
+
+def detect_channel_speech_spans(
+    audio_path: Path,
+    channel_index: int,
+    audio_duration_seconds: float,
+    min_silence_seconds: float = CHANNEL_SPAN_MIN_SILENCE_SECONDS,
+    min_speech_seconds: float = CHANNEL_SPAN_MIN_SPEECH_SECONDS,
+) -> list[tuple[float, float]]:
+    """Speech spans for one channel of a stereo call, via inverted silencedetect."""
+    cmd = [
+        "ffmpeg",
+        "-hide_banner",
+        "-nostats",
+        "-i",
+        str(audio_path),
+        "-af",
+        (
+            f"pan=mono|c0=c{channel_index},"
+            f"silencedetect=noise={SILENCE_NOISE_THRESHOLD}:d={min_silence_seconds}"
+        ),
+        "-f",
+        "null",
+        "-",
+    ]
+    result = _run_subprocess(cmd)
+    if result.returncode != 0:
+        raise RuntimeError(f"ffmpeg channel silence detection failed: {result.stderr.strip()}")
+
+    silences: list[tuple[float, float]] = []
+    pending_start: float | None = None
+    output = f"{result.stderr}\n{result.stdout}"
+    for line in output.splitlines():
+        start_match = re.search(r"silence_start:\s*([0-9.]+)", line)
+        if start_match:
+            pending_start = float(start_match.group(1))
+        end_match = re.search(r"silence_end:\s*([0-9.]+)", line)
+        if end_match and pending_start is not None:
+            silences.append((pending_start, float(end_match.group(1))))
+            pending_start = None
+    if pending_start is not None:
+        silences.append((pending_start, audio_duration_seconds))
+
+    spans: list[tuple[float, float]] = []
+    cursor = 0.0
+    for silence_start, silence_end in silences:
+        if silence_start - cursor >= min_speech_seconds:
+            spans.append((round(cursor, 3), round(silence_start, 3)))
+        cursor = max(cursor, silence_end)
+    if audio_duration_seconds - cursor >= min_speech_seconds:
+        spans.append((round(cursor, 3), round(audio_duration_seconds, 3)))
+    return spans
+
+
+def build_speaker_turn_map(spans_by_channel: list[list[tuple[float, float]]]) -> str | None:
+    """Render per-channel speech spans as the SPEAKER CHANNEL MAP prompt block."""
+    if not any(spans_by_channel):
+        return None
+    channel_names = ("left channel", "right channel")
+    lines = [
+        "SPEAKER CHANNEL MAP (authoritative; each party of this call was recorded on a separate channel):",
+    ]
+    for index, spans in enumerate(spans_by_channel):
+        rendered = ", ".join(f"{seconds_to_mmss(start)}-{seconds_to_mmss(end)}" for start, end in spans)
+        channel_name = channel_names[index] if index < len(channel_names) else f"channel {index + 1}"
+        lines.append(f"Speaker {index + 1} ({channel_name}) speaks during: {rendered or 'never'}")
+    lines.append(
+        "Attribute each segment and flag to the speaker whose spans cover its time range; "
+        "keep these speaker labels consistent for the whole audio."
+    )
+    return "\n".join(lines)
+
+
 def build_audio_prompt(
     session_id: str,
     audio_duration_seconds: float,
     *,
+    speaker_turn_map: str | None = None,
     retry_compact: bool = False,
 ) -> str:
     prompt = (
-        f"audio_duration_seconds: {audio_duration_seconds}\n"
-        "All ts_start and ts_end values must be seconds from the beginning "
-        "of this audio and must be within the audio duration.\n\n"
-        + prompts.USER_MESSAGE.replace("{s_id}", session_id)
+        f"audio_duration: {seconds_to_mmss(audio_duration_seconds)} "
+        f"({audio_duration_seconds} seconds total)\n"
+        'All ts_start and ts_end values must be "MM:SS" or "MM:SS.d" strings measured '
+        "from the beginning of this audio and must not exceed the audio duration.\n"
     )
+    if speaker_turn_map:
+        prompt += "\n" + speaker_turn_map + "\n"
+    prompt += "\n" + prompts.USER_MESSAGE.replace("{s_id}", session_id)
     if retry_compact:
         retry_user_message = getattr(prompts, "RETRY_USER_MESSAGE", "").strip() or FALLBACK_RETRY_USER_MESSAGE
         prompt += "\n\n" + retry_user_message
@@ -609,243 +758,11 @@ def normalize_long_pause_duration(pause: LongPause) -> LongPause:
     return pause
 
 
-def _segment_overlap_seconds(
-    flag_ts_start: float,
-    flag_ts_end: float,
-    segment: DiarizedSegment,
-) -> float:
-    return max(0.0, min(flag_ts_end, float(segment.ts_end)) - max(flag_ts_start, float(segment.ts_start)))
-
-
-def count_transcript_words(text: str | None) -> int:
-    if not text:
-        return 0
-    return len(re.findall(r"\S+", text.strip()))
-
-
-def minimum_plausible_transcript_duration(text: str | None) -> float:
-    word_count = count_transcript_words(text)
-    if word_count < MIN_WORDS_FOR_TIMESTAMP_REPAIR:
-        return 0.0
-    return word_count / MAX_PLAUSIBLE_TRANSCRIPT_WORDS_PER_SECOND
-
-
-def decimal_mmss_to_seconds(value: float, audio_duration_seconds: float) -> float | None:
-    """Treat values like 12.23 as 12m23s when the surrounding evidence requires it."""
-    if not math.isfinite(value) or value < 0:
-        return None
-    if abs(value - round(value, 2)) > 0.000001:
-        return None
-
-    minutes = int(value)
-    seconds = int(round((value - minutes) * 100))
-    if seconds >= 60:
-        return None
-
-    converted = float((minutes * 60) + seconds)
-    if converted > audio_duration_seconds + 0.001:
-        return None
-    return converted
-
-
-def compact_mmss_to_seconds(value: float, audio_duration_seconds: float) -> float | None:
-    """Treat values like 212.0 as 2m12s and 2146.5 as 21m46.5s."""
-    if not math.isfinite(value) or value < 100:
-        return None
-
-    whole = int(value)
-    fraction = float(value) - whole
-    minutes = whole // 100
-    seconds = (whole % 100) + fraction
-    if seconds >= 60:
-        return None
-
-    converted = float((minutes * 60) + seconds)
-    if converted > audio_duration_seconds + 0.001:
-        return None
-    if abs(converted - value) <= 0.001:
-        return None
-    return converted
-
-
-def compact_mmss_span_to_seconds(
-    ts_start: float,
-    ts_end: float,
-    audio_duration_seconds: float,
-) -> tuple[float, float] | None:
-    converted_start = compact_mmss_to_seconds(float(ts_start), audio_duration_seconds)
-    converted_end = compact_mmss_to_seconds(float(ts_end), audio_duration_seconds)
-    if converted_start is None or converted_end is None:
-        return None
-    if converted_end < converted_start:
-        return None
-    return round(converted_start, 3), round(converted_end, 3)
-
-
-def decimal_mmss_span_to_seconds(
-    ts_start: float,
-    ts_end: float,
-    audio_duration_seconds: float,
-) -> tuple[float, float] | None:
-    converted_start = decimal_mmss_to_seconds(float(ts_start), audio_duration_seconds)
-    converted_end = decimal_mmss_to_seconds(float(ts_end), audio_duration_seconds)
-    if converted_start is None or converted_end is None:
-        return None
-    if converted_end < converted_start:
-        return None
-    if abs(converted_start - ts_start) <= 0.001 and abs(converted_end - ts_end) <= 0.001:
-        return None
-    return round(converted_start, 3), round(converted_end, 3)
-
-
-def needs_decimal_mmss_repair(
-    ts_start: float,
-    ts_end: float,
-    transcript_excerpt: str | None,
-    audio_duration_seconds: float,
-) -> bool:
-    min_duration = minimum_plausible_transcript_duration(transcript_excerpt)
-    if min_duration <= 0:
-        return False
-
-    current_duration = max(0.0, float(ts_end) - float(ts_start))
-    if current_duration + 0.001 >= min_duration:
-        return False
-
-    converted_span = decimal_mmss_span_to_seconds(ts_start, ts_end, audio_duration_seconds)
-    if converted_span is None:
-        return False
-
-    converted_duration = max(0.0, converted_span[1] - converted_span[0])
-    return converted_duration + 0.001 >= min_duration
-
-
-def timestamp_span_repair_to_seconds(
-    ts_start: float,
-    ts_end: float,
-    transcript_excerpt: str | None,
-    audio_duration_seconds: float,
-) -> tuple[float, float] | None:
-    compact_span = compact_mmss_span_to_seconds(ts_start, ts_end, audio_duration_seconds)
-    if compact_span is not None:
-        return compact_span
-
-    if needs_decimal_mmss_repair(ts_start, ts_end, transcript_excerpt, audio_duration_seconds):
-        return decimal_mmss_span_to_seconds(ts_start, ts_end, audio_duration_seconds)
-    return None
-
-
-def repair_likely_display_timestamps(
-    report: AstroTalkAudioReport,
-    audio_duration_seconds: float | None,
-) -> tuple[AstroTalkAudioReport, int]:
-    if audio_duration_seconds is None or audio_duration_seconds < 60:
-        return report, 0
-
-    repaired_segments: list[DiarizedSegment] = []
-    repair_count = 0
-
-    for segment in report.segments:
-        original_segment_start = float(segment.ts_start)
-        original_segment_end = float(segment.ts_end)
-        segment_transcript = " ".join(flag.transcript_excerpt for flag in segment.flags)
-        segment_repaired_span = timestamp_span_repair_to_seconds(
-            original_segment_start,
-            original_segment_end,
-            segment_transcript,
-            audio_duration_seconds,
-        )
-
-        flag_repairs: list[tuple[SegmentFlag, tuple[float, float] | None]] = []
-        any_flag_needs_repair = False
-        for flag in segment.flags:
-            effective_start = float(flag.ts_start) if flag.ts_start is not None else original_segment_start
-            effective_end = float(flag.ts_end) if flag.ts_end is not None else original_segment_end
-            repaired_flag_span = timestamp_span_repair_to_seconds(
-                effective_start,
-                effective_end,
-                flag.transcript_excerpt,
-                audio_duration_seconds,
-            )
-            if repaired_flag_span is not None:
-                any_flag_needs_repair = True
-                flag_repairs.append((flag, repaired_flag_span))
-            else:
-                flag_repairs.append((flag, None))
-
-        if segment_repaired_span is None and any_flag_needs_repair:
-            segment_repaired_span = (
-                compact_mmss_span_to_seconds(
-                    original_segment_start,
-                    original_segment_end,
-                    audio_duration_seconds,
-                )
-                or decimal_mmss_span_to_seconds(
-                    original_segment_start,
-                    original_segment_end,
-                    audio_duration_seconds,
-                )
-            )
-        repaired_segment_span = segment_repaired_span
-
-        repaired_flags: list[SegmentFlag] = []
-        for flag, repaired_flag_span in flag_repairs:
-            if repaired_flag_span is None and repaired_segment_span is not None:
-                effective_start = float(flag.ts_start) if flag.ts_start is not None else original_segment_start
-                effective_end = float(flag.ts_end) if flag.ts_end is not None else original_segment_end
-                if (
-                    abs(effective_start - original_segment_start) <= 0.001
-                    and abs(effective_end - original_segment_end) <= 0.001
-                ):
-                    repaired_flag_span = repaired_segment_span
-
-            if repaired_flag_span is not None:
-                repaired_flags.append(
-                    flag.model_copy(
-                        update={
-                            "ts_start": repaired_flag_span[0],
-                            "ts_end": repaired_flag_span[1],
-                        }
-                    )
-                )
-                repair_count += 1
-            else:
-                repaired_flags.append(flag)
-
-        if repaired_segment_span is not None:
-            repaired_segments.append(
-                segment.model_copy(
-                    update={
-                        "ts_start": repaired_segment_span[0],
-                        "ts_end": repaired_segment_span[1],
-                        "flags": repaired_flags,
-                    }
-                )
-            )
-            repair_count += 1
-        elif repaired_flags != segment.flags:
-            repaired_segments.append(segment.model_copy(update={"flags": repaired_flags}))
-        else:
-            repaired_segments.append(segment)
-
-    if repair_count == 0:
-        return report, 0
-    return report.model_copy(update={"segments": repaired_segments}), repair_count
-
-
 def normalize_audio_report(
     report: AstroTalkAudioReport,
     session_id: str,
     local_long_pauses: list[LongPause],
-    audio_duration_seconds: float | None = None,
 ) -> AstroTalkAudioReport:
-    report, timestamp_repair_count = repair_likely_display_timestamps(report, audio_duration_seconds)
-    if timestamp_repair_count:
-        print(
-            f"[WARN] session {session_id}: repaired {timestamp_repair_count} likely display-format timestamp "
-            "value(s) to seconds"
-        )
-
     ordered_segments = sorted(
         report.segments,
         key=lambda segment: (float(segment.ts_start), float(segment.ts_end), int(segment.segment_id)),
@@ -881,11 +798,16 @@ def merge_telemetry(base: dict[str, int | float], extra: dict[str, int | float])
 
 
 def parse_audio_report(response: Any, session_id: str) -> AstroTalkAudioReport:
-    report = getattr(response, "parsed", None)
-    if report is None:
-        report = AstroTalkAudioReport.model_validate_json(response.text)
-    elif not isinstance(report, AstroTalkAudioReport):
-        report = AstroTalkAudioReport.model_validate(report)
+    wire = getattr(response, "parsed", None)
+    if wire is None:
+        wire = WireAudioReport.model_validate_json(response.text)
+    elif not isinstance(wire, WireAudioReport):
+        wire = WireAudioReport.model_validate(wire)
+    # Internal validators convert the wire "MM:SS" strings into float seconds.
+    data = wire.model_dump()
+    data["review"] = False
+    data["long_pauses"] = []
+    report = AstroTalkAudioReport.model_validate(data)
     return report.model_copy(update={"s_id": str(session_id)})
 
 
@@ -898,6 +820,7 @@ async def evaluate_audio(
     local_long_pauses: list[LongPause],
     cache_name: str | None,
     thinking_level: str | None,
+    speaker_turn_map: str | None = None,
 ) -> tuple[AstroTalkAudioReport, dict[str, int | float], float, str]:
     uploaded_file = None
     try:
@@ -925,7 +848,7 @@ async def evaluate_audio(
             "safety_settings": gemini_safety_settings(),
             "max_output_tokens": 16384,
             "response_mime_type": "application/json",
-            "response_schema": AstroTalkAudioReport,
+            "response_schema": WireAudioReport,
             "thinking_config": build_thinking_config(model_id, thinking_level),
         }
         if cache_name:
@@ -952,7 +875,7 @@ async def evaluate_audio(
             return response, round(time.perf_counter() - start_time, 3)
 
         response, latency_seconds = await generate_with_prompt(
-            build_audio_prompt(session_id, audio_duration_seconds)
+            build_audio_prompt(session_id, audio_duration_seconds, speaker_turn_map=speaker_turn_map)
         )
         # Telemetry is captured per call and merged, so a retry's cost includes
         # the failed first attempt's tokens instead of silently dropping them.
@@ -968,6 +891,7 @@ async def evaluate_audio(
                 build_audio_prompt(
                     session_id,
                     audio_duration_seconds,
+                    speaker_turn_map=speaker_turn_map,
                     retry_compact=True,
                 )
             )
@@ -976,7 +900,7 @@ async def evaluate_audio(
                 telemetry = merge_telemetry(telemetry, usage_to_telemetry(response.usage_metadata))
             parsed_report = parse_audio_report(response, session_id)
 
-        report = normalize_audio_report(parsed_report, session_id, local_long_pauses, audio_duration_seconds)
+        report = normalize_audio_report(parsed_report, session_id, local_long_pauses)
         response_json = report.model_dump_json()
         return report, telemetry, latency_seconds, response_json
     finally:
@@ -1301,11 +1225,30 @@ async def process_session(
         if has_video:
             print(f"{tag}: source media contains video")
 
-        await asyncio.to_thread(convert_to_mp3, recording_url, audio_path, args.force_download)
+        source_channels = await asyncio.to_thread(probe_audio_channels, recording_url)
+        await asyncio.to_thread(
+            convert_to_mp3, recording_url, audio_path, args.force_download, source_channels or 1
+        )
         duration_seconds = await asyncio.to_thread(probe_audio_duration, audio_path)
         local_long_pauses = await asyncio.to_thread(detect_long_pauses, audio_path, duration_seconds)
         if local_long_pauses:
             print(f"{tag}: {len(local_long_pauses)} long pause(s) need review")
+
+        # Stereo call recordings carry one party per channel: derive the exact
+        # speaker turn map locally and hand it to Gemini as ground truth
+        # (probe the local file — cached files from older runs may be mono).
+        speaker_turn_map: str | None = None
+        local_channels = await asyncio.to_thread(probe_audio_channels, str(audio_path))
+        if local_channels and local_channels >= 2:
+            spans_by_channel = [
+                await asyncio.to_thread(
+                    detect_channel_speech_spans, audio_path, channel_index, duration_seconds
+                )
+                for channel_index in (0, 1)
+            ]
+            speaker_turn_map = build_speaker_turn_map(spans_by_channel)
+            if speaker_turn_map:
+                print(f"{tag}: stereo source — channel-based speaker map attached")
 
         if args.skip_gemini:
             record = flatten_result(
@@ -1334,6 +1277,7 @@ async def process_session(
                 local_long_pauses,
                 cache_name,
                 args.thinking_level,
+                speaker_turn_map,
             )
             raw_json_path = write_raw_response(raw_json_dir, session_id, response_json)
             # No await between the read and write inside append_raw_json, so
