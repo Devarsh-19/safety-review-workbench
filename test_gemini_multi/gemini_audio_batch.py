@@ -1034,7 +1034,15 @@ def write_outputs(results: list[dict[str, Any]], output_csv: Path, output_jsonl:
 
 
 
+def moderation_json_path(input_csv: Path) -> Path:
+    """Aggregate response file named after the input CSV plus the run date,
+    e.g. sample_audio_2026-07-09_audio_moderation.json."""
+    date_tag = datetime.now().strftime("%Y-%m-%d")
+    return DEFAULT_JSON_DIR / f"{input_csv.stem}_{date_tag}_audio_moderation.json"
+
+
 def append_raw_json(
+    output_file: Path,
     response_json: str,
     recording_url: str,
     at_flag: Any,
@@ -1042,7 +1050,6 @@ def append_raw_json(
     audio_duration_seconds: float | None = None,
     cache_name: str | None = None,
 ) -> None:
-    output_file = DEFAULT_JSON_DIR / "audio_response.json"
     output_file.parent.mkdir(parents=True, exist_ok=True)
 
     if output_file.exists():
@@ -1312,6 +1319,7 @@ async def process_session(
             # No await between the read and write inside append_raw_json, so
             # concurrent workers can't interleave on the shared JSON file.
             append_raw_json(
+                output_file=moderation_json_path(Path(args.input_csv)),
                 response_json=response_json,
                 recording_url=recording_url,
                 at_flag=row.get("flagged", ""),
