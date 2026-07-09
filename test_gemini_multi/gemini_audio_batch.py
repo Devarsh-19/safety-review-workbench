@@ -45,7 +45,6 @@ DEFAULT_RAW_JSON_DIR = BASE_DIR / "data" / "raw_json"
 DEFAULT_JSON_DIR = BASE_DIR / "data"
 DEFAULT_PROCESSING_LOG = BASE_DIR / "data" / "processing_log.json"
 DEFAULT_MODEL_ID = "gemini-3-flash-preview"
-DEFAULT_THINKING_LEVEL = "minimal"
 LONG_PAUSE_THRESHOLD_SECONDS = 60.0
 SILENCE_NOISE_THRESHOLD = "-45dB"
 UPLOAD_PROCESSING_TIMEOUT_SECONDS = 600.0
@@ -604,27 +603,9 @@ def calculate_cache_storage_cost_usd(token_count: int, ttl: str) -> float:
     return token_count * ttl_hours * CACHE_STORAGE_RATE_PER_HOUR
 
 
-def build_thinking_config(
-    model_id: str,
-    thinking_level: str | None = DEFAULT_THINKING_LEVEL,
-    thinking_budget: int | None = None,
-    include_thoughts: bool = False,
-) -> types.ThinkingConfig:
-    del model_id
-
-    config_kwargs: dict[str, Any] = {"include_thoughts": include_thoughts}
-    normalized_level = (thinking_level or "").strip().lower()
-
-    if thinking_budget is not None:
-        config_kwargs["thinking_budget"] = int(thinking_budget)
-    elif normalized_level == "minimal":
-        config_kwargs["thinking_budget"] = 0
-    elif normalized_level:
-        config_kwargs["thinking_level"] = normalized_level
-    else:
-        config_kwargs["thinking_budget"] = 0
-
-    return types.ThinkingConfig(**config_kwargs)
+def build_thinking_config() -> types.ThinkingConfig:
+    """Thinking is always fully off: budget 0, no thought output."""
+    return types.ThinkingConfig(include_thoughts=False, thinking_budget=0)
 
 
 def create_gemini_cache(client: genai.Client, model_id: str, ttl: str) -> GeminiCacheInfo | None:
@@ -974,7 +955,6 @@ async def evaluate_audio(
     audio_duration_seconds: float,
     local_long_pauses: list[LongPause],
     cache_manager: AudioCacheManager | None,
-    thinking_level: str | None,
     speaker_turn_map: str | None = None,
 ) -> tuple[AstroTalkAudioReport, dict[str, int | float], float, str]:
     uploaded_file = None
@@ -1005,7 +985,7 @@ async def evaluate_audio(
                 "max_output_tokens": 16384,
                 "response_mime_type": "application/json",
                 "response_schema": WireAudioReport,
-                "thinking_config": build_thinking_config(model_id, thinking_level),
+                "thinking_config": build_thinking_config(),
             }
             if cache_name:
                 config_kwargs["cached_content"] = cache_name
@@ -1483,7 +1463,6 @@ async def process_session(
                 duration_seconds,
                 local_long_pauses,
                 cache_manager,
-                args.thinking_level,
                 speaker_turn_map,
             )
             raw_json_path = write_raw_response(raw_json_dir, session_id, response_json)
@@ -1642,7 +1621,7 @@ async def run_batch(args: argparse.Namespace) -> pd.DataFrame:
             total_storage = cache_manager.total_storage_cost_usd() if cache_manager else 0.0
             record["cache_storage_cost_usd"] = round(max(0.0, total_storage - cache_storage_cost_recorded), 9)
             cache_storage_cost_recorded = total_storage
-            record["thinking_level"] = args.thinking_level or ""
+            record["thinking_budget"] = 0
             # Drop any stale record for this session (e.g. an old error row
             # kept by --skip-existing) so the outputs never hold duplicates.
             results = [r for r in results if str(r.get("session_id")) != session_id]
@@ -1733,9 +1712,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--delete-cache", action="store_true", help="Delete the Gemini cache after this run.")
     parser.add_argument(
         "--thinking-level",
-        choices=["low", "medium", "high", "minimal"],
-        default=DEFAULT_THINKING_LEVEL,
-        help="Gemini 3 thinking effort. Defaults to 'minimal' for the lowest reasoning setting.",
+        default=None,
+        help="Deprecated no-op: thinking is always disabled (thinking_budget=0).",
     )
     return parser.parse_args()
 
