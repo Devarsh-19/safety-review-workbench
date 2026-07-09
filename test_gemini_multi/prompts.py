@@ -6,7 +6,7 @@ Scan the entire audio timeline and flag all instances that violate any intent fr
 Analyse all speakers neutrally. Violations can come from any speaker, but do not classify speakers as user, consultant, astrologer, or unknown in the output.
 
 LANGUAGE AUTODETECTION & CULTURAL NUANCES:
-- The audio can be spoken in ANY Indian language including English, Hindi, Hinglish, Tamil, Telugu, Punjabi, Marathi, Bengali, Kannada, Malayalam, Gujarati, etc.
+- The audio can be spoken in ANY language including English, Hindi, Hinglish, Tamil, Telugu, Punjabi, Marathi, Bengali, Kannada, Malayalam, Gujarati, etc.
 - Auto-detect the languages used. Understand cultural and linguistic nuances, mentally translating to English to detect policy violations accurately, but the final transcript_excerpt MUST remain in the original spoken language.
 - Cultural terms (darling, dear, ji, bachha, beta, beti) or English psychic terms (babe, hun, love, sweetheart) are NOT violations unless combined with explicit sexual or grooming signals.
 - Short terms or single words (e.g., "bite", "lick", "suck") in isolation without sexual context are NOT violations.
@@ -123,8 +123,8 @@ SEVERITY ENFORCEMENT:
   * text match criteria: Fraudulent claims or banking/sensitive ID requests (e.g., "Main Income Tax officer hoon", bank account passwords).
   * Counter-examples: Standard collection of name, birth details, or place of birth for horoscope calculations.
 
-- ABUSIVE_LANGUAGE (Red Severity): Vulgar, profane, or highly disrespectful regional slang. Flag explicit profanity from the slang dictionaries. For softer insult words such as "pagal" or "bewakoof", flag only when the word is used as a direct insult, humiliation, or hostile put-down rather than playful banter.
-  * text match criteria: Explicit matching of profane terms from regional slang dictionaries, including abbreviations like "bc", "mc", "bsdk", "chu", "g" (when used as a vulgar euphemism), "thevdiya", "punda", "lanja", "zavla", "pencho", "banchod", "sule", "myru", "bhosdi", or hostile insults such as "Tum bilkul bewakoof ho".
+- ABUSIVE_LANGUAGE (Red Severity): Vulgar, profane, or highly disrespectful regional slang. Flag explicit profanity from the slang dictionaries. ignore ofter insults.
+  * text match criteria: Explicit matching of profane terms from regional slang dictionaries, including abbreviations like "bc", "mc", "bsdk", "chutiya", "g" (when used as a vulgar euphemism), "thevdiya", "punda", "lanja", "zavla", "pencho", "banchod", "sule", "myru", "bhosdi", or hostile insults.
   * Counter-examples: "Pagal hai kya" used playfully in friendly banter, or "abbe yaar" as a casual, non-hostile addressed expression.
 
 - HATE_SPEECH (Red Severity): Content promoting hatred, hostility, or discrimination based on religion, caste, gender, or community, including sustained aggressive belittling. Differentiate from ABUSIVE_LANGUAGE: if it targets identity groups or uses sustained belittling without slang profanity, use HATE_SPEECH.

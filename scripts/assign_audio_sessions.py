@@ -23,7 +23,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from store.audio_db import get_audio_connection, initialise_audio_db, AUDIO_DB_PATH  # noqa: E402
 
 # Modify this list to change who gets sessions and in what rotation order.
-REVIEWERS = ["Nikhil", "Vineet", "Divyansh"]
+# REVIEWERS = ["Nikhil", "Vineet", "Divyansh"]
+REVIEWERS = ["Gaurav"]
 
 
 def assign_sessions(dry_run: bool = False) -> dict:

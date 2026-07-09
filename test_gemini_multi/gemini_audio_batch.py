@@ -1061,7 +1061,7 @@ def append_raw_json(
         new_record = {"raw_response": response_json}
     if isinstance(new_record, dict):
         new_record["audio_url"] = recording_url
-        new_record["at_flag"] = at_flag
+        new_record["at_flag"] = True if at_flag == "Yes" else False
         new_record["has_video"] = has_video
         new_record["audio_duration_seconds"] = audio_duration_seconds
     elif isinstance(new_record, list):
@@ -1283,7 +1283,7 @@ async def process_session(
             # No await between the read and write inside append_raw_json, so
             # concurrent workers can't interleave on the shared JSON file.
             append_raw_json(
-                response_json=response_json,
+                response_json=response_json, 
                 recording_url=recording_url,
                 at_flag=row.get("flagged", ""),
                 has_video=has_video,
@@ -1450,7 +1450,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--concurrency",
         type=int,
-        default=4,
+        default=16,
         help="Number of sessions processed in parallel (download + Gemini). Use 1 for the old sequential behaviour.",
     )
     parser.add_argument("--force-download", action="store_true", help="Redownload/reconvert MP3 files.")
@@ -1480,6 +1480,7 @@ def parse_args() -> argparse.Namespace:
 
 
 if __name__ == "__main__":
+    start_time = time.perf_counter()
     final_df = asyncio.run(run_batch(parse_args()))
     if not final_df.empty:
         request_cost = final_df.get("estimated_cost_usd", pd.Series(dtype=float)).fillna(0).sum()
@@ -1491,3 +1492,9 @@ if __name__ == "__main__":
         print(f"Estimated Gemini request cost USD: {request_cost:.6f}")
         print(f"Estimated Gemini cache storage cost USD: {cache_storage_cost:.6f}")
         print(f"Estimated total Gemini cost USD: {total_cost:.6f}")
+
+    end_time = time.perf_counter()
+    print(f"Total time: {end_time - start_time:.2f} seconds")
+
+
+    
