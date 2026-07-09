@@ -49,6 +49,17 @@ DEFAULT_THINKING_LEVEL = "minimal"
 LONG_PAUSE_THRESHOLD_SECONDS = 60.0
 SILENCE_NOISE_THRESHOLD = "-45dB"
 UPLOAD_PROCESSING_TIMEOUT_SECONDS = 600.0
+
+# A stalled HLS/CDN read makes ffmpeg hang forever, wedging its worker thread
+# and with it the whole batch; kill any ffmpeg/ffprobe after this long.
+SUBPROCESS_TIMEOUT_SECONDS = 900.0
+# Per-request cap for every Gemini HTTP call (upload, poll, generate).
+# Generous vs. observed latencies (tens of seconds) but tight enough that a
+# hung connection is cut quickly; long audio uploads are the slowest call.
+GEMINI_HTTP_TIMEOUT_MS = 180_000
+# Absolute per-session ceiling: covers all downloads, probes, retries, and
+# Gemini calls for one session; a session over this becomes an error row.
+SESSION_HARD_TIMEOUT_SECONDS = 3600.0
 # Rate-limit / transient-error backoff: 429 (quota) plus retryable 5xx.
 RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
 BACKOFF_MAX_RETRIES = 6
@@ -273,7 +284,16 @@ def require_google_api_key() -> str:
 
 
 def _run_subprocess(cmd: list[str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(cmd, capture_output=True, text=True, check=False)
+    try:
+        return subprocess.run(
+            cmd, capture_output=True, text=True, check=False,
+            timeout=SUBPROCESS_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            f"{cmd[0]} timed out after {SUBPROCESS_TIMEOUT_SECONDS:.0f}s "
+            "(stalled network stream?)"
+        ) from exc
 
 
 def _safe_audio_stem(row: pd.Series) -> str:
@@ -1366,7 +1386,10 @@ async def process_session(
 
 
 async def run_batch(args: argparse.Namespace) -> pd.DataFrame:
-    client = None if args.skip_gemini else genai.Client(api_key=require_google_api_key())
+    client = None if args.skip_gemini else genai.Client(
+        api_key=require_google_api_key(),
+        http_options=types.HttpOptions(timeout=GEMINI_HTTP_TIMEOUT_MS),
+    )
 
     input_csv = Path(args.input_csv)
     audio_dir = Path(args.audio_dir)
@@ -1397,9 +1420,34 @@ async def run_batch(args: argparse.Namespace) -> pd.DataFrame:
 
     async def bounded(index: int, row: pd.Series) -> tuple[str, dict[str, Any]]:
         async with semaphore:
-            return await process_session(
-                index, len(df), row, args, client, cache_name, audio_dir, raw_json_dir
-            )
+            try:
+                return await asyncio.wait_for(
+                    process_session(
+                        index, len(df), row, args, client, cache_name, audio_dir, raw_json_dir
+                    ),
+                    SESSION_HARD_TIMEOUT_SECONDS,
+                )
+            except TimeoutError:
+                # Watchdog: a session that outlives the hard limit (hung
+                # network stream, wedged HTTP call) becomes an error row
+                # instead of stalling the whole batch forever.
+                session_id = str(row["session_id"])
+                record = flatten_result(
+                    row,
+                    audio_dir / f"{_safe_audio_stem(row)}.mp3",
+                    audio_duration_seconds=None,
+                    report=None,
+                    detected_long_pauses=None,
+                    telemetry={},
+                    latency_seconds=None,
+                    response_json=None,
+                    raw_json_path=None,
+                    status="error",
+                    error=f"TimeoutError: session exceeded {SESSION_HARD_TIMEOUT_SECONDS:.0f}s hard limit",
+                )
+                record["processing_seconds"] = SESSION_HARD_TIMEOUT_SECONDS
+                print(f"[ERROR] session {session_id}: {record['error']}")
+                return session_id, record
 
     cache_mode = "implicit" if args.no_cache else args.cache_mode
 
