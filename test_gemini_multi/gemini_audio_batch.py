@@ -2,7 +2,7 @@
 Batch Gemini audio safety evaluation for sample_audio.csv.
 
 Reads M3U8/audio links from sample_audio.csv, converts each recording to MP3,
-uploads the MP3 to Gemini, evaluates it with prompts.py, and writes an enriched
+uploads the MP3 to Gemini, evaluates it with audio_prompts.py, and writes an enriched
 results dataframe with diarized segments, review flags, response, token,
 duration, latency, and pricing details.
 
@@ -32,7 +32,7 @@ from google.genai import errors as genai_errors
 from google.genai import types
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
-import prompts
+import audio_prompts as prompts
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -513,7 +513,7 @@ def build_speaker_turn_map(spans_by_channel: list[list[tuple[float, float]]]) ->
         return None
     channel_names = ("left channel", "right channel")
     lines = [
-        "SPEAKER CHANNEL MAP (authoritative; each party of this call was recorded on a separate channel):",
+        "This map is AUTHORITATIVE; each party of this call was recorded on a separate channel:",
     ]
     for index, spans in enumerate(spans_by_channel):
         rendered = ", ".join(f"{seconds_to_mmss(start)}-{seconds_to_mmss(end)}" for start, end in spans)
@@ -533,19 +533,20 @@ def build_audio_prompt(
     speaker_turn_map: str | None = None,
     retry_compact: bool = False,
 ) -> str:
-    prompt = (
+    sections = [
+        "=== AUDIO METADATA ===",
         f"audio_duration: {seconds_to_mmss(audio_duration_seconds)} "
-        f"({audio_duration_seconds} seconds total)\n"
+        f"({audio_duration_seconds} seconds total)",
         'All ts_start and ts_end values must be "MM:SS" or "MM:SS.d" strings measured '
-        "from the beginning of this audio and must not exceed the audio duration.\n"
-    )
+        "from the beginning of this audio and must not exceed the audio duration.",
+    ]
     if speaker_turn_map:
-        prompt += "\n" + speaker_turn_map + "\n"
-    prompt += "\n" + prompts.USER_MESSAGE.replace("{s_id}", session_id)
+        sections += ["", "=== SPEAKER CHANNEL MAP ===", speaker_turn_map.strip()]
+    sections += ["", "=== TASK ===", prompts.USER_MESSAGE.replace("{s_id}", session_id).strip()]
     if retry_compact:
         retry_user_message = getattr(prompts, "RETRY_USER_MESSAGE", "").strip() or FALLBACK_RETRY_USER_MESSAGE
-        prompt += "\n\n" + retry_user_message
-    return prompt
+        sections += ["", "=== RETRY INSTRUCTIONS ===", retry_user_message]
+    return "\n".join(sections) + "\n"
 
 
 
@@ -1039,6 +1040,7 @@ def append_raw_json(
     at_flag: Any,
     has_video: bool | None,
     audio_duration_seconds: float | None = None,
+    cache_name: str | None = None,
 ) -> None:
     output_file = DEFAULT_JSON_DIR / "audio_response.json"
     output_file.parent.mkdir(parents=True, exist_ok=True)
@@ -1064,12 +1066,14 @@ def append_raw_json(
         new_record["at_flag"] = True if at_flag == "Yes" else False
         new_record["has_video"] = has_video
         new_record["audio_duration_seconds"] = audio_duration_seconds
+        new_record["cache_name"] = cache_name or ""
     elif isinstance(new_record, list):
         new_record = {
             "audio_url": recording_url,
             "at_flag": at_flag,
             "has_video": has_video,
             "audio_duration_seconds": audio_duration_seconds,
+            "cache_name": cache_name or "",
             "response_data": new_record
         }
 
@@ -1127,6 +1131,7 @@ def log_session_processing(log_path: Path, record: dict[str, Any]) -> None:
         "total_tokens": record.get("total_tokens"),
         "estimated_cost_usd": record.get("estimated_cost_usd"),
         "cache_mode": record.get("cache_mode"),
+        "cache_name": record.get("cache_name"),
         "result": result,
     })
 
@@ -1151,17 +1156,41 @@ def log_run_summary(
         except (TypeError, ValueError):
             return 0.0
 
+    wall_seconds = round(time.perf_counter() - batch_started_perf, 3)
+    total_processing_seconds = round(sum(_num(r.get("processing_seconds")) for r in processed), 3)
+    total_audio_seconds = round(sum(_num(r.get("audio_duration_seconds")) for r in processed), 3)
+    audio_minutes = total_audio_seconds / 60
+    # Wall time is shared across concurrent sessions; processing time is the
+    # per-session sum, so it exceeds wall time when concurrency > 1.
+    wall_per_audio_minute = round(wall_seconds / audio_minutes, 3) if audio_minutes else None
+    processing_per_audio_minute = round(total_processing_seconds / audio_minutes, 3) if audio_minutes else None
+
     _append_json_entry(log_path, {
         "type": "run_summary",
         "batch_started_utc": batch_started_utc,
         "batch_ended_utc": datetime.now(UTC).isoformat(),
-        "batch_wall_seconds": round(time.perf_counter() - batch_started_perf, 3),
+        "batch_wall_seconds": wall_seconds,
         "sessions_processed": len(processed),
         "status_counts": status_counts,
-        "total_processing_seconds": round(sum(_num(r.get("processing_seconds")) for r in processed), 3),
-        "total_audio_duration_seconds": round(sum(_num(r.get("audio_duration_seconds")) for r in processed), 3),
+        "total_processing_seconds": total_processing_seconds,
+        "total_audio_duration_seconds": total_audio_seconds,
+        "avg_processing_seconds_per_session": round(total_processing_seconds / len(processed), 3) if processed else None,
+        "wall_seconds_per_audio_minute": wall_per_audio_minute,
+        "processing_seconds_per_audio_minute": processing_per_audio_minute,
+        "cache_name": next((str(r.get("cache_name")) for r in processed if r.get("cache_name")), ""),
         "total_estimated_cost_usd": round(sum(_num(r.get("estimated_cost_usd")) for r in processed), 6),
     })
+
+    if processed:
+        print(
+            f"Total run time: {wall_seconds:.1f}s ({wall_seconds / 60:.2f} min) for "
+            f"{len(processed)} session(s) - avg {wall_seconds / len(processed):.2f}s/session"
+        )
+        if audio_minutes:
+            print(
+                f"Throughput: {wall_per_audio_minute:.2f}s wall time per 1 min of audio "
+                f"({processing_per_audio_minute:.2f}s per-session processing per 1 min of audio)"
+            )
 
 
 def write_raw_response(raw_json_dir: Path, session_id: str, response_json: str) -> Path:
@@ -1283,11 +1312,12 @@ async def process_session(
             # No await between the read and write inside append_raw_json, so
             # concurrent workers can't interleave on the shared JSON file.
             append_raw_json(
-                response_json=response_json, 
+                response_json=response_json,
                 recording_url=recording_url,
                 at_flag=row.get("flagged", ""),
                 has_video=has_video,
                 audio_duration_seconds=duration_seconds,
+                cache_name=cache_name,
             )
             record = flatten_result(
                 row,

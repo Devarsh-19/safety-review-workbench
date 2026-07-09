@@ -34,6 +34,7 @@ DIARIZATION, TONE & REVIEW RULES:
 
 CRITICAL FLAGGING RULES:
 - CONTEXTUAL FLAGGING: Do not flag based on a single isolated word. You must evaluate the proper context of nearby words and the overall conversation. Friendly banter, harmless astrological terms, casual complaints, or slang used playfully without malicious intent are NOT violations.
+- A consultant giving a reading about a THIRD PARTY's physical relationship (e.g., discussing a partner's compatibility, "physical ka yog" from a kundli) is NOT a violation.
 - TIMESTAMP ACCURACY: Every ts_start and ts_end value MUST be a string in "MM:SS" or "MM:SS.d" format measured from the very beginning of the audio (e.g., "02:04.5" for 2 minutes 4.5 seconds). Never output raw second counts (e.g., "124.5") and never omit the colon. The flag timestamps must precisely bound the exact spoken words in the transcript_excerpt, not the general surrounding area.
 - If a SINGLE parent segment violates MULTIPLE intents, output a SEPARATE entry for EACH intent, pinpointing their respective exact timestamps.
 - Flag ALL violations exhaustively across the entire audio runtime. Do not summarize or stop parsing early.
@@ -53,7 +54,7 @@ CRITICAL FLAGGING RULES:
 
 SLANG DICTIONARY TO FLAG:
 - Unless otherwise annotated, all slang dictionary terms below map to ABUSIVE_LANGUAGE. Pay attention to the intent of the speaker. Do not flag dictionary terms if used neutrally, playfully, or without hostility.
-- HINDI/HINGLISH: "bc", "mc", "bsdk", "chu", "chutiya", "chut", "saali", "saala", "kamina", "kamini", "pagal", "bewakoof", "gadha", "g marao", "g mara", "panauti", "manhus", "marwani hai", "marwana", "marwa" (NSFW_EXPLICIT), "w kar", "W kar" (OFF_PLATFORM_SOLICITATION), "number de", "no dai" (PERSONAL_DATA_COLLECTION), "ghar aa kar", "ghar aaunga" (VIOLENCE).
+- HINDI/HINGLISH: "bc", "mc", "bsdk", "chu", "chutiya", "chut", "saali", "saala", "kamina", "kamini", "pagal", "bewakoof", "gadha", "g marao", "g mara", "g admi", "g aurat", "panauti", "manhus", "marwani hai", "marwana", "marwa" (NSFW_EXPLICIT), "w kar", "W kar" (OFF_PLATFORM_SOLICITATION), "number de", "no dai" (PERSONAL_DATA_COLLECTION), "ghar aa kar", "ghar aaunga" (VIOLENCE), "dimag kharab kar", "attitude mat dikha", "bhav khana band kar" (HATE_SPEECH — ONLY when part of sustained hostility, not one-off casual remarks).
 - TAMIL: "thevdiya", "thevidiya", "thevadiya", "otha", "otha mavan", "soothu", "soothadi", "punda", "pundamavan", "pundek", "koothi", "loosu", "loosu payale", "naaye", "naay", "sunni", "okka", "ombhu".
 - TELUGU: "lanja", "lanjodaka", "lanjodaki", "dengey", "dengu", "dengina", "pukumunda", "gudda", "erri puka", "kukka", "kukkanayyala", "donga", "sulle".
 - MARATHI: "zavla", "zhavla", "zhav", "bhadvya", "gandya", "chinal", "bhikarchot", "haramkhor", "popat kela".
@@ -93,10 +94,21 @@ You must reply with ONLY a valid JSON object matching this schema. Do NOT wrap t
 SEVERITY ENFORCEMENT:
 - The "s" (severity) field for each flag MUST match the severity defined in the taxonomy below. Red severity intents must use "RED". Amber severity intents must use "AMBER". Do not override or reclassify the taxonomy severity.
 
+MONEY & REMEDY INTENT DISAMBIGUATION:
+Remedy talk and money talk often occur together. Pick the intent by asking WHAT exactly is the violation, in this order:
+1. Is the consultant asking money to be sent OUTSIDE AstroTalk's official billing (UPI, GPay, PhonePe, Paytm, bank transfer, cash, donation, "mere number pe bhejo")? -> FINANCIAL_SOLICITATION. This holds even if the money is for a puja, totka, gemstone, or any remedy. The remedy context does NOT make it FAKE_REMEDIES.
+2. Is the consultant promising an absolute guaranteed result, a fixed timeline ("100% guarantee", "11 din mein shaadi"), or a dangerous/black-magic remedy? -> FAKE_REMEDIES. This holds whether or not money is mentioned.
+3. Is the consultant using fear, panic, or doomsday pressure to push the user into buying a paid service? -> FEAR_MANIPULATION.
+If a single statement does more than one of these (e.g., "100% guarantee wala totka, 5100 mere UPI pe bhejo"), output a SEPARATE flag for EACH matching intent with the same timestamps. Never substitute one for the other.
+Quick contrast examples:
+- "Puja ke liye 5000 mere UPI pe bhej do" -> FINANCIAL_SOLICITATION only (payment routed outside the platform; no guarantee made).
+- "Ye totka karo, 100% guarantee 21 din mein result" -> FAKE_REMEDIES only (absolute guarantee; no external payment requested).
+- "Bahut bada sankat hai, turant 5100 ki puja karwao warna anarth ho jayega" -> FEAR_MANIPULATION (fear-driven upsell; add FINANCIAL_SOLICITATION too only if payment is routed outside official billing).
+
 === INTENT TAXONOMY FOR EVALUATION ===
 
 - NSFW (Red Severity): General sexually inappropriate content, adult entertainment themes, or graphic/nude requests that do not fit more specific NSFW sub-categories. Use this only as a fallback when content does not match NSFW_EXPLICIT, NSFW_GROOMING, or NSFW_APPEARANCE.
-  * text match criteria: Spoken words or ambient events indicating explicit adult imagery, revealing attire on videos, or general vulgar sexual references.
+  * text match criteria: Spoken words or ambient events indicating explicit adult imagery, revealing attire on videos, or general vulgar sexual references (e.g., "kapde utaar ke dikhao", "gandi picture bhejo", "raat wali video dekhi kya", "tere g mai toad sakta hu").
   * Counter-examples: Relationship advice in astrological context, cultural terms of endearment, or discussion of marital compatibility in a horoscope.
 
 - NSFW_EXPLICIT (Red Severity): Descriptive talk about sexual or physical acts during the consultation.
@@ -104,36 +116,41 @@ SEVERITY ENFORCEMENT:
   * Counter-examples: Astrological discussions of passionate relationships, timing for conceiving a child, or birth chart compatibility terms like "physical ka yog ban raha hai" or "physical rehna hai" within relationship astrology.
 
 - NSFW_GROOMING (Red Severity): Consultant attempting to establish romantic/sexual connections or roleplay with a user under the pretense of a consultation. Requires a persistent pattern across the conversation.
-  * text match criteria: Statements establishing connections beyond professional limits (e.g., "I feel a special connection with you beyond astrology", "Tum mujhe bahut achhe lagte ho", "I miss u", "becoz I miss u").
+  * text match criteria: Statements establishing connections beyond professional limits (e.g., "I feel a special connection with you beyond astrology", "Tum mujhe bahut achhe lagte ho, kundli ke bahar bhi", "I miss u", "becoz I miss u") or persistent flirtation across the conversation.
   * Counter-examples: One-off caring statements ("Take care", "God bless you"), psychic/tarot terms of professional warmth ("babe", "hun", "love", "sweetheart"), or readers establishing workflow context ("I'm seeing...", "your energy shows...").
 
 - NSFW_APPEARANCE (Amber Severity): Inappropriate questions regarding physical body, looks, or sexual preferences.
   * text match criteria: Direct inquiries about looks (e.g., "What do you look like?", "Aapka figure kaisa hai?", "Photo bhejo apni dikhao").
   * Counter-examples: Legitimate photo validation requests explicitly meant for palm/face reading or birth chart details.
 
-- CSAM_RISK (Red Severity - SEVERE OVERRIDE): High priority. Any sexual, grooming, or intimate content involving or referencing minors (under 18). Flag at a lower confidence threshold >= 0.2.
-  * text match criteria: Grooming language directed at a minor or requesting images of minors in intimate contexts.
-  * Counter-examples: Standard readings for children concerning education/career, and explicit pregnancy/fertility/conception discussions (e.g., "baby nahi ho raha", "trying for a baby").
+- CSAM_RISK (Red Severity - SEVERE OVERRIDE): High priority. Any sexual, grooming, or intimate content involving or referencing minors (under 18). Flag at a lower confidence threshold >= 0.2. STRICT AGE CONDITION: use CSAM_RISK ONLY when the audio itself indicates the person is below 18 (a stated age under 18, or words like "bachha/bachhi", "nabalig", school-going child, "meri beti abhi 14 saal ki hai"). If the person is stated or clearly indicated to be 18 or older, or no age/minor signal is present at all, do NOT use CSAM_RISK — classify the content under the matching NSFW intent instead.
+  * text match criteria: Grooming language directed at a minor or requesting images of minors in intimate contexts, where an under-18 signal is present (e.g., "tum toh abhi 15 saal ki ho, apni photo bhejo na", "ye hamari secret baat hai, mummy-papa ko mat batana" in an intimate/flirtatious context with a minor).
+  * Counter-examples: Standard readings for children concerning education/career, explicit pregnancy/fertility/conception discussions (e.g., "baby nahi ho raha", "trying for a baby"), and sexual or grooming content between adults or with no minor reference (flag as NSFW_EXPLICIT/NSFW_GROOMING/NSFW instead).
 
-- FINANCIAL_SOLICITATION (Red Severity): Asking for money, digital payments, UPI, or donations outside AstroTalk's official billing pipeline.
-  * text match criteria: Requests for external money routing (e.g., "UPI number bhejo", "5000 rupees bhejo, powerful totka karunga", "Donate to my temple").
+- FINANCIAL_SOLICITATION (Red Severity): Asking for money, digital payments, UPI, or donations outside AstroTalk's official billing pipeline. The deciding signal is WHERE THE MONEY GOES, not what it is for: any request to send money directly to the consultant (UPI, GPay, PhonePe, Paytm, bank transfer, cash, "donation") is FINANCIAL_SOLICITATION even when a puja, totka, gemstone, or other remedy is the stated reason.
+  * text match criteria: Requests for external money routing (e.g., "UPI number bhejo", "5000 rupees bhejo, powerful totka karunga", "Donate to my temple", "puja ke liye 5100 mere account mein transfer karo").
   * Counter-examples: Mentioning generalized remedy items costs ("a rudraksha costs around 500") or asking users to recharge using the official application platform ("Please recharge to continue").
 
 - IDENTITY_FRAUD (Red Severity): Consultant claims to be someone else, impersonates authorities, or requests sensitive financial credentials.
   * text match criteria: Fraudulent claims or banking/sensitive ID requests (e.g., "Main Income Tax officer hoon", bank account passwords).
   * Counter-examples: Standard collection of name, birth details, or place of birth for horoscope calculations.
 
-- ABUSIVE_LANGUAGE (Red Severity): Vulgar, profane, or highly disrespectful regional slang. Flag explicit profanity from the slang dictionaries. ignore ofter insults.
+- ABUSIVE_LANGUAGE (Red Severity): Vulgar, profane, or highly disrespectful regional slang. Flag explicit profanity from the slang dictionaries. Ignore softer, non-profane insults.
   * text match criteria: Explicit matching of profane terms from regional slang dictionaries, including abbreviations like "bc", "mc", "bsdk", "chutiya", "g" (when used as a vulgar euphemism), "thevdiya", "punda", "lanja", "zavla", "pencho", "banchod", "sule", "myru", "bhosdi", or hostile insults.
   * Counter-examples: "Pagal hai kya" used playfully in friendly banter, or "abbe yaar" as a casual, non-hostile addressed expression.
 
-- HATE_SPEECH (Red Severity): Content promoting hatred, hostility, or discrimination based on religion, caste, gender, or community, including sustained aggressive belittling. Differentiate from ABUSIVE_LANGUAGE: if it targets identity groups or uses sustained belittling without slang profanity, use HATE_SPEECH.
-  * text match criteria: Expressions targeted at group dynamics (e.g., "Muslims/Hindus/Christians are bad", "Lower caste logon ki kundli weak hoti hai") or sustained hostile taunts (e.g., "garib ho jayega", "bada tu salman khan hai").
-  * Counter-examples: Expressing personal emotional distress ("main bahut pareshan hoon"), or one-off brief remarks ("natak mat karo", "hahaha mat kar") lacking sustained identity targeting.
+- HATE_SPEECH (Red Severity): Content promoting hatred, hostility, or discrimination based on religion, caste, gender, or community, including sustained aggressive belittling.
+  * DECISION GUIDE — HATE_SPEECH vs ABUSIVE_LANGUAGE:
+    - Contains profanity or slurs from the slang dictionaries -> ABUSIVE_LANGUAGE.
+    - Targets an identity group (religion, caste, gender, community) -> HATE_SPEECH.
+    - Sustained aggressive taunting attacking someone's worth/dignity WITHOUT profanity (e.g., "teri aukaat kya hai") -> HATE_SPEECH.
+    - A one-off rude remark without profanity or identity targeting -> do NOT flag.
+  * text match criteria: Expressions targeted at group dynamics (e.g., "Muslims/Hindus/Christians are bad", "Lower caste logon ki kundli weak hoti hai") or sustained hostile taunts (e.g., "garib ho jayega", "bada tu salman khan hai", "ego par lag gayi").
+  * Counter-examples: Expressing personal emotional distress ("main bahut pareshan hoon"), one-off brief remarks ("natak mat karo", "sunti kyu nahi", "hahaha mat kar") lacking sustained identity targeting, or astrological statements about planetary effects on communities.
 
-- FAKE_REMEDIES (Red Severity): Promising absolute guaranteed results, specific absolute timelines, or providing dangerous/black magic remedies.
+- FAKE_REMEDIES (Red Severity): Promising absolute guaranteed results, specific absolute timelines, or providing dangerous/black magic remedies. The violation is the GUARANTEE or the dangerous remedy itself — NOT the mention of money. A remedy discussion that involves payment but makes no absolute promise is NOT FAKE_REMEDIES.
   * text match criteria: Absolute guarantees (e.g., "100% guarantee, sirf 11 din mein shaadi ho jayegi", "Black magic karwa doonga", "Guaranteed result in 3 days").
-  * Counter-examples: Offering standard Vedic remedies (gemstones, mantras, pujas) using exploratory or hedging language ("this may help", "try this remedy"), or offering relationship/prosperity remedies *without* locking down absolute guaranteed outcomes.
+  * Counter-examples: Offering standard Vedic remedies (gemstones, mantras, pujas) using exploratory or hedging language ("this may help", "try this remedy", "kuch remedies deta hun"), offering relationship/prosperity remedies *without* locking down absolute guaranteed outcomes, or asking for direct payment for a remedy without any guarantee (that is FINANCIAL_SOLICITATION, not FAKE_REMEDIES).
 
 - UNAUTHORIZED_MEDICAL_ADVICE (Red Severity): Providing concrete medical diagnoses or advising users to bypass professional healthcare.
   * text match criteria: Commands to avoid clinical support (e.g., "Doctor mat jaao, mera upay se theek ho jayega", "Medicine band kar do", "You have diabetes, I can see from your chart").
@@ -145,7 +162,7 @@ SEVERITY ENFORCEMENT:
 
 - VIOLENCE (Red Severity): Content promoting physical violence, real-world harm, or explicit physical threats.
   * text match criteria: Physical threat vectors (e.g., "Apne pati ko maar do", "Enemy ko physical harm karne ka upay", "tere ghar aa kar na kar lu", "teri g na tod du").
-  * Counter-examples: Figurative idioms (e.g., "Exam maar do" meaning to ace an exam) or describing historical conflict periods.
+  * Counter-examples: Figurative idioms (e.g., "Exam maar do" meaning to ace an exam), astrological forecasts of conflict ("ladai jhagda hoga" as a prediction, not a directive), or describing historical conflict periods.
 
 - INSTIGATION (Red Severity): Inciting a user to initiate arguments, hostile actions, or aggressive real-world confrontations against family or third parties.
   * text match criteria: Provocation directions (e.g., "Apni saas se ladai karo", "Pati ko threaten karo", "Unko sabak sikhao").
@@ -160,14 +177,25 @@ SEVERITY ENFORCEMENT:
   * Counter-examples: Standard queries for date, time, or geographic location of birth, name, or family gotra.
 
 - FEAR_MANIPULATION (Amber Severity): Using doomsday predictions, immediate panic hooks, or excessive fear to scare users into purchasing paid remediation services.
-  * text match criteria: Scare-based payment prompts (e.g., "Agar abhi upay nahi kiya toh bahut badi catastrophe ho jayegi", "Kaal sarpa dosha hai... turant puja karwao Rs 5100").
-  * Counter-examples: Standard astrological warnings detailing difficult planetary cycles, Sade Sati, or Rahu Mahadasha configurations without high-pressure monetization attached.
+  * text match criteria: Scare-based payment prompts (e.g., "Agar abhi upay nahi kiya toh bahut badi catastrophe ho jayegi", "Kaal sarpa dosha hai... turant puja karwao Rs 5100", "Manglik ho, bina remedy shaadi nahi hogi").
+  * Counter-examples: Standard astrological warnings detailing difficult planetary cycles, Sade Sati, or Rahu Mahadasha configurations without high-pressure monetization attached, or suggesting free remedies and general precautions without monetary pressure.
 
 - COMPETITOR_PROMOTION (Amber Severity): Directing platform traffic to competitive alternative apps, websites, or external astrologers.
   * text match criteria: External system promotional text (e.g., "Mere guru ji ke app pe jaao", "Is website pe better reading milegi", "XYZ astrologer se baat karo").
   * Counter-examples: Referencing foundational historical texts, classic scriptures, or educational mentions of historical figures.
 
 === END INTENT TAXONOMY ===
+
+=== EXTENDED EXAMPLES ===
+Brief extra examples for borderline cases (guidance, not exhaustive). "->" marks a NOT-a-violation look-alike.
+- ABUSIVE_LANGUAGE: "kar na bc", "saali kahi ki"; Tamil "thevdiya", "otha mavan"; Telugu "lanja", "dengey"; Bengali "banchod"; Punjabi "pencho"; Marathi "zavla". -> "pagal hai kya" spoken in friendly banter or with laughter.
+- NSFW / NSFW_EXPLICIT: "tere sath marwani hai", "ling size batao kundli se". -> "physical ka yog ban raha hai", fertility/conception timing discussions.
+- NSFW_GROOMING: repeated "I miss you", "tum mujhe achhe lagte ho kundli ke bahar". -> one-off "take care", tarot warmth "babe/love".
+- OFF_PLATFORM_SOLICITATION: "w kar", "kar na w", "call me on this number". -> the "w" sound inside a normal English word, or narrating a past call.
+- HATE_SPEECH: identity-targeted slurs or sustained belittling "teri aukaat kya hai". -> one-off "natak mat karo".
+- FINANCIAL_SOLICITATION vs FAKE_REMEDIES: "puja ke liye paise mere UPI pe bhejo" -> FINANCIAL_SOLICITATION; "100% guarantee 11 din mein result" -> FAKE_REMEDIES; both present -> both flags.
+- CSAM_RISK: sexual/intimate content toward someone stated/implied under 18 (flag at >= 0.2). -> child's education/career horoscope; adult sexual content with no minor signal (use NSFW intents).
+=== END EXTENDED EXAMPLES ===
 """
 
 USER_MESSAGE = """
