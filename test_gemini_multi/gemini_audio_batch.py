@@ -60,6 +60,9 @@ GEMINI_HTTP_TIMEOUT_MS = 180_000
 # Absolute per-session ceiling: covers all downloads, probes, retries, and
 # Gemini calls for one session; a session over this becomes an error row.
 SESSION_HARD_TIMEOUT_SECONDS = 3600.0
+# Recreate the explicit prompt cache this many seconds before its TTL ends
+# (proactive refresh, same policy as llm_call/caching.py).
+CACHE_SAFETY_MARGIN_SECONDS = 300.0
 # Rate-limit / transient-error backoff: 429 (quota) plus retryable 5xx.
 RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
 BACKOFF_MAX_RETRIES = 6
@@ -656,6 +659,137 @@ def delete_gemini_cache(client: genai.Client, cache_name: str | None) -> None:
         print(f"[WARN] Cache cleanup failed for {cache_name}: {exc}")
 
 
+def is_cache_expired_error(exc: Exception) -> bool:
+    """Best-effort: does this exception mean the cached content is gone/expired?
+    Same heuristic as llm_call/caching.py: a cache-related resource combined
+    with a not-found/invalid/permission signal, so only genuine expiry triggers
+    a recreation, not every 4xx."""
+    msg = str(exc).lower()
+    mentions_cache = ("cachedcontent" in msg or "cached content" in msg
+                      or "cached_content" in msg or "cache" in msg)
+    if not mentions_cache:
+        return False
+    return any(s in msg for s in (
+        "not found", "not_found", "expired", "invalid", "permission",
+        "does not exist", "404", "403", "400",
+    ))
+
+
+class AudioCacheManager:
+    """Async-safe holder for the explicit Gemini prompt cache (port of
+    llm_call/caching.py CacheManager).
+
+    - Proactive refresh: get_cache() recreates the cache when it is within
+      CACHE_SAFETY_MARGIN_SECONDS of its TTL, so runs longer than the TTL
+      never send a request against an expired cache.
+    - Reactive refresh: refresh(stale_name) recreates it once when a request
+      still hits expiry; concurrent sessions reuse the fresh one.
+    - Degrades instead of dying: if cache creation starts failing (or expiry
+      errors repeat with no success in between), it disables itself and
+      sessions fall back to the inline system prompt (implicit caching).
+    - Tracks every cache created for cleanup and storage-cost accounting.
+    """
+
+    def __init__(self, client: genai.Client, model_id: str, ttl: str,
+                 max_reactive_streak: int = 6):
+        self.client = client
+        self.model_id = model_id
+        self.ttl = ttl
+        try:
+            ttl_seconds = parse_ttl_seconds(ttl)
+        except ValueError:
+            ttl_seconds = 3600.0
+        self.refresh_after_seconds = max(
+            ttl_seconds - CACHE_SAFETY_MARGIN_SECONDS, ttl_seconds * 0.5
+        )
+        self.max_reactive_streak = max_reactive_streak
+        self.disabled = False
+        self._lock = asyncio.Lock()
+        self._current: GeminiCacheInfo | None = None
+        self._created_at = 0.0
+        self._reactive_streak = 0
+        self.created: list[GeminiCacheInfo] = []
+        self.refresh_count = 0
+
+    def _disable(self, reason: str) -> None:
+        print(f"[WARN] Explicit cache disabled ({reason}); "
+              "continuing with the inline system prompt (implicit caching).")
+        self.disabled = True
+        self._current = None
+
+    async def _create_locked(self) -> bool:
+        info = await asyncio.to_thread(
+            create_gemini_cache, self.client, self.model_id, self.ttl
+        )
+        if info is None:
+            return False
+        self._current = info
+        self._created_at = time.monotonic()
+        self.created.append(info)
+        return True
+
+    async def get_cache(self) -> str | None:
+        """Return a usable cache name (refreshing proactively near TTL) or
+        None when explicit caching is unavailable."""
+        if self.disabled:
+            return None
+        async with self._lock:
+            if self.disabled:
+                return None
+            stale = (
+                self._current is None
+                or (time.monotonic() - self._created_at) >= self.refresh_after_seconds
+            )
+            if stale:
+                if self._current is not None:
+                    self.refresh_count += 1
+                    print(f"[cache] proactive refresh (#{self.refresh_count})")
+                if not await self._create_locked():
+                    self._disable("cache creation failed")
+                    return None
+            return self._current.name
+
+    async def refresh(self, stale_name: str | None) -> str | None:
+        """Reactively recreate the cache after an expiry error. No-op if
+        another session already refreshed past stale_name."""
+        if self.disabled:
+            return None
+        async with self._lock:
+            if self.disabled:
+                return None
+            if self._current is not None and self._current.name != stale_name:
+                return self._current.name
+            self._reactive_streak += 1
+            if self._reactive_streak > self.max_reactive_streak:
+                self._disable(
+                    f"{self._reactive_streak} reactive refreshes with no successful "
+                    "call in between - error likely not real expiry"
+                )
+                return None
+            self.refresh_count += 1
+            print(f"[cache] reactive refresh (#{self.refresh_count})")
+            if not await self._create_locked():
+                self._disable("cache recreation failed")
+                return None
+            return self._current.name
+
+    def note_success(self) -> None:
+        self._reactive_streak = 0
+
+    def current_name(self) -> str:
+        return self._current.name if self._current else ""
+
+    def current_tokens(self) -> int:
+        return self._current.token_count if self._current else 0
+
+    def total_storage_cost_usd(self) -> float:
+        return sum(info.storage_cost_usd for info in self.created)
+
+    def cleanup(self) -> None:
+        for info in self.created:
+            delete_gemini_cache(self.client, info.name)
+
+
 async def call_with_backoff(operation, description: str):
     """Run an async Gemini call, retrying rate-limit (429) and transient 5xx
     errors with exponential backoff + full jitter. Non-retryable errors and
@@ -839,7 +973,7 @@ async def evaluate_audio(
     session_id: str,
     audio_duration_seconds: float,
     local_long_pauses: list[LongPause],
-    cache_name: str | None,
+    cache_manager: AudioCacheManager | None,
     thinking_level: str | None,
     speaker_turn_map: str | None = None,
 ) -> tuple[AstroTalkAudioReport, dict[str, int | float], float, str]:
@@ -864,35 +998,52 @@ async def evaluate_audio(
         if uploaded_file.state.name == "FAILED":
             raise RuntimeError("Gemini file asset processing failed.")
 
-        config_kwargs = {
-            "temperature": 0,
-            "safety_settings": gemini_safety_settings(),
-            "max_output_tokens": 16384,
-            "response_mime_type": "application/json",
-            "response_schema": WireAudioReport,
-            "thinking_config": build_thinking_config(model_id, thinking_level),
-        }
-        if cache_name:
-            config_kwargs["cached_content"] = cache_name
-        else:
-            # No explicit cache: send the system prompt inline. It is a large
-            # static block that is byte-identical across requests, so Gemini's
-            # implicit caching discounts the shared prefix automatically.
-            # This also guarantees the taxonomy is present when explicit cache
-            # creation fails mid-run.
-            config_kwargs["system_instruction"] = prompts.SYSTEM_PROMPT
-        config = types.GenerateContentConfig(**config_kwargs)
+        def build_config(cache_name: str | None) -> types.GenerateContentConfig:
+            config_kwargs = {
+                "temperature": 0,
+                "safety_settings": gemini_safety_settings(),
+                "max_output_tokens": 16384,
+                "response_mime_type": "application/json",
+                "response_schema": WireAudioReport,
+                "thinking_config": build_thinking_config(model_id, thinking_level),
+            }
+            if cache_name:
+                config_kwargs["cached_content"] = cache_name
+            else:
+                # No explicit cache: send the system prompt inline. It is a large
+                # static block that is byte-identical across requests, so Gemini's
+                # implicit caching discounts the shared prefix automatically.
+                # This also guarantees the taxonomy is present when explicit cache
+                # creation fails mid-run.
+                config_kwargs["system_instruction"] = prompts.SYSTEM_PROMPT
+            return types.GenerateContentConfig(**config_kwargs)
 
-        async def generate_with_prompt(prompt_text: str) -> tuple[Any, float]:
-            start_time = time.perf_counter()
-            response = await call_with_backoff(
+        async def generate_once(prompt_text: str, cache_name: str | None) -> Any:
+            return await call_with_backoff(
                 lambda: client.aio.models.generate_content(
                     model=model_id,
                     contents=[uploaded_file, prompt_text],
-                    config=config,
+                    config=build_config(cache_name),
                 ),
                 f"session {session_id}: generate_content",
             )
+
+        async def generate_with_prompt(prompt_text: str) -> tuple[Any, float]:
+            start_time = time.perf_counter()
+            cache_name = await cache_manager.get_cache() if cache_manager else None
+            try:
+                response = await generate_once(prompt_text, cache_name)
+            except genai_errors.APIError as exc:
+                # The cache can still expire between the proactive check and
+                # the request landing: recreate it once and retry.
+                if cache_manager and cache_name and is_cache_expired_error(exc):
+                    print(f"[WARN] session {session_id}: cache expired mid-request; refreshing")
+                    cache_name = await cache_manager.refresh(cache_name)
+                    response = await generate_once(prompt_text, cache_name)
+                else:
+                    raise
+            if cache_manager:
+                cache_manager.note_success()
             return response, round(time.perf_counter() - start_time, 3)
 
         response, latency_seconds = await generate_with_prompt(
@@ -1256,7 +1407,7 @@ async def process_session(
     row: pd.Series,
     args: argparse.Namespace,
     client: genai.Client | None,
-    cache_name: str | None,
+    cache_manager: AudioCacheManager | None,
     audio_dir: Path,
     raw_json_dir: Path,
 ) -> tuple[str, dict[str, Any]]:
@@ -1331,7 +1482,7 @@ async def process_session(
                 session_id,
                 duration_seconds,
                 local_long_pauses,
-                cache_name,
+                cache_manager,
                 args.thinking_level,
                 speaker_turn_map,
             )
@@ -1345,7 +1496,7 @@ async def process_session(
                 at_flag=row.get("flagged", ""),
                 has_video=has_video,
                 audio_duration_seconds=duration_seconds,
-                cache_name=cache_name,
+                cache_name=cache_manager.current_name() if cache_manager else "",
             )
             record = flatten_result(
                 row,
@@ -1422,9 +1573,8 @@ async def run_batch(args: argparse.Namespace) -> pd.DataFrame:
             f"[INFO] Resuming: {already_done} of {len(df)} session(s) already completed "
             f"in {output_csv.name} and will be skipped (use --rerun-all to reprocess)."
         )
-    cache_info: GeminiCacheInfo | None = None
-    cache_name: str | None = None
-    cache_storage_cost_recorded = False
+    cache_manager: AudioCacheManager | None = None
+    cache_storage_cost_recorded = 0.0
 
     semaphore = asyncio.Semaphore(max(1, args.concurrency))
 
@@ -1433,7 +1583,7 @@ async def run_batch(args: argparse.Namespace) -> pd.DataFrame:
             try:
                 return await asyncio.wait_for(
                     process_session(
-                        index, len(df), row, args, client, cache_name, audio_dir, raw_json_dir
+                        index, len(df), row, args, client, cache_manager, audio_dir, raw_json_dir
                     ),
                     SESSION_HARD_TIMEOUT_SECONDS,
                 )
@@ -1463,11 +1613,12 @@ async def run_batch(args: argparse.Namespace) -> pd.DataFrame:
 
     try:
         if client and cache_mode == "explicit":
-            cache_info = create_gemini_cache(client, args.model_id, args.cache_ttl)
-            if cache_info is None:
+            manager = AudioCacheManager(client, args.model_id, args.cache_ttl)
+            if await manager.get_cache() is None:
                 cache_mode = "implicit"
                 print("[INFO] Falling back to implicit caching (inline system prompt).")
-        cache_name = cache_info.name if cache_info else None
+            else:
+                cache_manager = manager
 
         tasks: list[asyncio.Task] = []
         for index, row in df.iterrows():
@@ -1483,13 +1634,14 @@ async def run_batch(args: argparse.Namespace) -> pd.DataFrame:
             session_id, record = await finished
             record["model_id"] = args.model_id
             record["cache_mode"] = cache_mode
-            record["cache_name"] = cache_name or ""
-            record["cache_storage_tokens"] = cache_info.token_count if cache_info else 0
-            if cache_info and not cache_storage_cost_recorded:
-                record["cache_storage_cost_usd"] = cache_info.storage_cost_usd
-                cache_storage_cost_recorded = True
-            else:
-                record["cache_storage_cost_usd"] = 0.0
+            record["cache_name"] = cache_manager.current_name() if cache_manager else ""
+            record["cache_storage_tokens"] = cache_manager.current_tokens() if cache_manager else 0
+            # Attribute newly accrued cache storage cost (initial creation plus
+            # any refreshes since the last record) to the next finishing row,
+            # so the CSV total always matches what was actually created.
+            total_storage = cache_manager.total_storage_cost_usd() if cache_manager else 0.0
+            record["cache_storage_cost_usd"] = round(max(0.0, total_storage - cache_storage_cost_recorded), 9)
+            cache_storage_cost_recorded = total_storage
             record["thinking_level"] = args.thinking_level or ""
             # Drop any stale record for this session (e.g. an old error row
             # kept by --skip-existing) so the outputs never hold duplicates.
@@ -1511,10 +1663,14 @@ async def run_batch(args: argparse.Namespace) -> pd.DataFrame:
             )
         except Exception as exc:
             print(f"[WARN] processing log summary failed: {exc}")
-        if client and args.delete_cache:
-            delete_gemini_cache(client, cache_name)
-        elif client and cache_name:
-            print(f"[INFO] Cache retained until TTL expires: {cache_name}")
+        if client and cache_manager:
+            if cache_manager.refresh_count:
+                print(f"[INFO] Prompt cache refreshed {cache_manager.refresh_count} time(s) during this run.")
+            if args.delete_cache:
+                cache_manager.cleanup()
+            else:
+                for info in cache_manager.created:
+                    print(f"[INFO] Cache retained until TTL expires: {info.name}")
 
     # Completion order is nondeterministic under concurrency — restore the
     # input CSV order for the final outputs (stable sort keeps records for
