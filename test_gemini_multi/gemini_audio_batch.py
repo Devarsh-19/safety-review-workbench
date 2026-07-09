@@ -1410,8 +1410,18 @@ async def run_batch(args: argparse.Namespace) -> pd.DataFrame:
         df = df.head(args.limit)
     df = df.reset_index(drop=True)
 
-    completed_sessions = load_completed_sessions(output_csv) if args.skip_existing else set()
-    results: list[dict[str, Any]] = load_previous_records(output_csv) if args.skip_existing else []
+    # Resume by default (same as moderate.py): sessions already marked success
+    # in the output CSV are skipped; error rows are retried. --rerun-all
+    # reprocesses everything from scratch.
+    resume = not args.rerun_all
+    completed_sessions = load_completed_sessions(output_csv) if resume else set()
+    results: list[dict[str, Any]] = load_previous_records(output_csv) if resume else []
+    already_done = sum(1 for sid in df["session_id"].astype(str) if sid in completed_sessions)
+    if already_done:
+        print(
+            f"[INFO] Resuming: {already_done} of {len(df)} session(s) already completed "
+            f"in {output_csv.name} and will be skipped (use --rerun-all to reprocess)."
+        )
     cache_info: GeminiCacheInfo | None = None
     cache_name: str | None = None
     cache_storage_cost_recorded = False
@@ -1540,7 +1550,16 @@ def parse_args() -> argparse.Namespace:
         help="Number of sessions processed in parallel (download + Gemini). Use 1 for the old sequential behaviour.",
     )
     parser.add_argument("--force-download", action="store_true", help="Redownload/reconvert MP3 files.")
-    parser.add_argument("--skip-existing", action="store_true", help="Skip sessions already marked success in output CSV.")
+    parser.add_argument(
+        "--skip-existing",
+        action="store_true",
+        help="Deprecated no-op: skipping already-successful sessions is now the default.",
+    )
+    parser.add_argument(
+        "--rerun-all",
+        action="store_true",
+        help="Reprocess every session even if already marked success in the output CSV.",
+    )
     parser.add_argument("--skip-gemini", action="store_true", help="Only download/probe audio; do not call Gemini.")
     parser.add_argument(
         "--cache-mode",
