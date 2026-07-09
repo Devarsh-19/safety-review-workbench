@@ -151,15 +151,28 @@ export function getAudioStats(params = {}) {
 
 export function getAudioSessions(filters = {}) {
   const params = new URLSearchParams();
-  if (filters.status) params.append('status', filters.status);
-  if (filters.search) params.append('search', filters.search);
-  if (filters.reviewer_name) params.append('reviewer_name', filters.reviewer_name);
-  if (filters.reviewer_role) params.append('reviewer_role', filters.reviewer_role);
-  if (filters.assigned_to) params.append('assigned_to', filters.assigned_to);
-  if (filters.sort_col) params.append('sort_col', filters.sort_col);
-  if (filters.sort_dir) params.append('sort_dir', filters.sort_dir);
-  if (filters.limit != null) params.append('limit', filters.limit);
-  if (filters.offset != null) params.append('offset', filters.offset);
+  const add = (k, v) => {
+    if (v !== undefined && v !== null && v !== '') params.append(k, v);
+  };
+  add('status', filters.status);
+  add('search', filters.search);
+  add('reviewer_name', filters.reviewer_name);
+  add('reviewer_role', filters.reviewer_role);
+  add('assigned_to', filters.assigned_to);
+  add('has_video', filters.has_video);
+  add('lang', filters.lang);
+  add('duration_min', filters.duration_min);
+  add('duration_max', filters.duration_max);
+  add('flags_min', filters.flags_min);
+  add('flags_max', filters.flags_max);
+  add('roles', filters.roles);
+  add('reviewer', filters.reviewer);
+  add('verdict', filters.verdict);
+  add('astrotalk_verdict', filters.astrotalk_verdict);
+  add('sort_col', filters.sort_col);
+  add('sort_dir', filters.sort_dir);
+  if (filters.limit != null) add('limit', filters.limit);
+  if (filters.offset != null) add('offset', filters.offset);
   const qs = params.toString() ? `?${params}` : '';
   return request(`/audio/sessions${qs}`);
 }

@@ -27,13 +27,34 @@ const STATUS_FILTERS = [
   { value: 'REVIEWED', label: 'Reviewed (unlocked)' },
 ];
 
+const EMPTY_FILTERS = {
+  search: '',
+  hasVideo: '',
+  lang: '',
+  durationMin: '',   // minutes
+  durationMax: '',   // minutes
+  flagsMin: '',
+  flagsMax: '',
+  roles: '',
+  assignedTo: '',
+  reviewer: '',
+  verdict: '',
+  astrotalkVerdict: '',
+  status: '',
+};
+
+// Minutes string from an input box -> seconds for the API, '' when blank.
+function minutesToSeconds(value) {
+  if (value === '' || value == null || Number.isNaN(Number(value))) return '';
+  return String(Number(value) * 60);
+}
+
 export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelectSession }) {
   const [rows, setRows] = useState([]);
   const [total, setTotal] = useState(0);
   const [stats, setStats] = useState(null);
-  const [status, setStatus] = useState('');
-  const [searchInput, setSearchInput] = useState('');  // raw input value
-  const [search, setSearch] = useState('');            // debounced value used for queries
+  const [filterInputs, setFilterInputs] = useState(EMPTY_FILTERS); // raw input values
+  const [filters, setFilters] = useState(EMPTY_FILTERS);           // debounced values used for queries
   const [page, setPage] = useState(0);
   const [sortCol, setSortCol] = useState('s_id');
   const [sortDir, setSortDir] = useState('asc');
@@ -43,14 +64,20 @@ export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelect
   // latest one, so slow/out-of-order responses can't overwrite fresh rows.
   const requestIdRef = useRef(0);
 
-  // Debounce the search box: query 300ms after the user stops typing.
+  // Debounce every filter control: query 300ms after the user stops typing.
   useEffect(() => {
     const t = setTimeout(() => {
-      setSearch(searchInput);
+      setFilters(filterInputs);
       setPage(0);
     }, 300);
     return () => clearTimeout(t);
-  }, [searchInput]);
+  }, [filterInputs]);
+
+  const setFilter = (key, value) =>
+    setFilterInputs((prev) => ({ ...prev, [key]: value }));
+
+  const hasActiveFilters = Object.values(filterInputs).some((v) => v !== '');
+  const clearFilters = () => setFilterInputs(EMPTY_FILTERS);
 
   const load = useCallback(() => {
     const reqId = ++requestIdRef.current;
@@ -58,7 +85,19 @@ export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelect
     setError('');
     Promise.all([
       getAudioSessions({
-        status, search,
+        status: filters.status,
+        search: filters.search,
+        has_video: filters.hasVideo,
+        lang: filters.lang,
+        duration_min: minutesToSeconds(filters.durationMin),
+        duration_max: minutesToSeconds(filters.durationMax),
+        flags_min: filters.flagsMin,
+        flags_max: filters.flagsMax,
+        roles: filters.roles,
+        assigned_to: filters.assignedTo,
+        reviewer: filters.reviewer,
+        verdict: filters.verdict,
+        astrotalk_verdict: filters.astrotalkVerdict,
         reviewer_name: reviewerName, reviewer_role: reviewerRole,
         sort_col: sortCol, sort_dir: sortDir,
         limit: PAGE_SIZE, offset: page * PAGE_SIZE,
@@ -78,7 +117,7 @@ export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelect
       .finally(() => {
         if (reqId === requestIdRef.current) setLoading(false);
       });
-  }, [status, search, page, sortCol, sortDir, reviewerName, reviewerRole]);
+  }, [filters, page, sortCol, sortDir, reviewerName, reviewerRole]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -125,6 +164,146 @@ export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelect
     { key: 'action', label: 'Action', sortable: false },
   ];
 
+  const filterInputStyle = {
+    width: '100%', boxSizing: 'border-box', padding: '4px 6px',
+    fontSize: 11, borderRadius: 4, border: `1px solid ${C.border}`,
+    background: C.bgSurface, color: C.textPrimary,
+  };
+  const filterSelectStyle = { ...filterInputStyle, cursor: 'pointer' };
+  const filterCellStyle = {
+    padding: '6px 10px', background: C.bgMuted,
+    borderBottom: `1px solid ${C.border}`,
+  };
+
+  // One filter control per column, keyed by column key.
+  const FILTER_CONTROLS = {
+    s_id: (
+      <input
+        value={filterInputs.search}
+        onChange={(e) => setFilter('search', e.target.value)}
+        placeholder="Search id…"
+        style={filterInputStyle}
+      />
+    ),
+    has_video: (
+      <select
+        value={filterInputs.hasVideo}
+        onChange={(e) => setFilter('hasVideo', e.target.value)}
+        style={filterSelectStyle}
+      >
+        <option value="">All</option>
+        <option value="1">Yes</option>
+        <option value="0">No</option>
+      </select>
+    ),
+    lang: (
+      <input
+        value={filterInputs.lang}
+        onChange={(e) => setFilter('lang', e.target.value)}
+        placeholder="e.g. HINDI"
+        style={filterInputStyle}
+      />
+    ),
+    duration: (
+      <div style={{ display: 'flex', gap: 4 }}>
+        <input
+          type="number" min="0"
+          value={filterInputs.durationMin}
+          onChange={(e) => setFilter('durationMin', e.target.value)}
+          placeholder="min (m)"
+          style={filterInputStyle}
+        />
+        <input
+          type="number" min="0"
+          value={filterInputs.durationMax}
+          onChange={(e) => setFilter('durationMax', e.target.value)}
+          placeholder="max (m)"
+          style={filterInputStyle}
+        />
+      </div>
+    ),
+    flags: (
+      <div style={{ display: 'flex', gap: 4 }}>
+        <input
+          type="number" min="0"
+          value={filterInputs.flagsMin}
+          onChange={(e) => setFilter('flagsMin', e.target.value)}
+          placeholder="min"
+          style={filterInputStyle}
+        />
+        <input
+          type="number" min="0"
+          value={filterInputs.flagsMax}
+          onChange={(e) => setFilter('flagsMax', e.target.value)}
+          placeholder="max"
+          style={filterInputStyle}
+        />
+      </div>
+    ),
+    roles: (
+      <select
+        value={filterInputs.roles}
+        onChange={(e) => setFilter('roles', e.target.value)}
+        style={filterSelectStyle}
+      >
+        <option value="">All</option>
+        <option value="assigned">Assigned</option>
+        <option value="unassigned">Not assigned</option>
+      </select>
+    ),
+    assigned_to: (
+      <input
+        value={filterInputs.assignedTo}
+        onChange={(e) => setFilter('assignedTo', e.target.value)}
+        placeholder="Name…"
+        style={filterInputStyle}
+      />
+    ),
+    reviewer: (
+      <input
+        value={filterInputs.reviewer}
+        onChange={(e) => setFilter('reviewer', e.target.value)}
+        placeholder="Name…"
+        style={filterInputStyle}
+      />
+    ),
+    verdict: (
+      <select
+        value={filterInputs.verdict}
+        onChange={(e) => setFilter('verdict', e.target.value)}
+        style={filterSelectStyle}
+      >
+        <option value="">All</option>
+        <option value="SEVERE">Severe</option>
+        <option value="FLAGGED">Flagged</option>
+        <option value="CLEAN">Clean</option>
+      </select>
+    ),
+    astrotalk_verdict: (
+      <select
+        value={filterInputs.astrotalkVerdict}
+        onChange={(e) => setFilter('astrotalkVerdict', e.target.value)}
+        style={filterSelectStyle}
+      >
+        <option value="">All</option>
+        <option value="FLAGGED">Flagged</option>
+        <option value="CLEAN">Clean</option>
+      </select>
+    ),
+    status: (
+      <select
+        value={filterInputs.status}
+        onChange={(e) => setFilter('status', e.target.value)}
+        style={filterSelectStyle}
+      >
+        {STATUS_FILTERS.map((f) => (
+          <option key={f.value} value={f.value}>{f.label}</option>
+        ))}
+      </select>
+    ),
+    action: null,
+  };
+
   return (
     <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
       <TopBar reviewerName={`${reviewerName} · Audio Review`} />
@@ -156,32 +335,22 @@ export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelect
           ))}
         </div>
 
-        {/* Filters */}
-        <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
-          <select
-            value={status}
-            onChange={(e) => { setStatus(e.target.value); setPage(0); }}
-            style={{
-              padding: '8px 12px', fontSize: 13, borderRadius: 5,
-              border: `1px solid ${C.border}`, background: C.bgSurface,
-              color: C.textPrimary, cursor: 'pointer',
-            }}
-          >
-            {STATUS_FILTERS.map((f) => (
-              <option key={f.value} value={f.value}>{f.label}</option>
-            ))}
-          </select>
-          <input
-            value={searchInput}
-            onChange={(e) => setSearchInput(e.target.value)}
-            placeholder="Search session id…"
-            style={{
-              flex: 1, maxWidth: 260, padding: '8px 12px', fontSize: 13,
-              borderRadius: 5, border: `1px solid ${C.border}`,
-              background: C.bgSurface, color: C.textPrimary,
-            }}
-          />
-        </div>
+        {/* Filters live in the table header (one control per column). This bar
+            only hosts the reset action so active filters are easy to back out of. */}
+        {hasActiveFilters && (
+          <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 8 }}>
+            <button
+              onClick={clearFilters}
+              style={{
+                padding: '6px 12px', fontSize: 12, borderRadius: 4,
+                border: `1px solid ${C.border}`, background: C.bgSurface,
+                color: C.textPrimary, cursor: 'pointer',
+              }}
+            >
+              ✕ Clear all filters
+            </button>
+          </div>
+        )}
 
         {error && (
           <div style={{
@@ -269,6 +438,14 @@ export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelect
                       )}
                     </div>
                   </th>
+                ))}
+              </tr>
+              {/* Per-column filter row */}
+              <tr style={{ background: C.bgMuted }}>
+                {TABLE_COLUMNS.map((col) => (
+                  <td key={`filter-${col.key}`} style={filterCellStyle}>
+                    {FILTER_CONTROLS[col.key] || null}
+                  </td>
                 ))}
               </tr>
             </thead>

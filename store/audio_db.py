@@ -71,12 +71,24 @@ def fetch_audio_sessions_page(
     reviewer_role: str = None,
     reviewer_name: str = None,
     assigned_to: str = None,
+    has_video: str = None,
+    lang: str = None,
+    duration_min: float = None,
+    duration_max: float = None,
+    flags_min: int = None,
+    flags_max: int = None,
+    roles: str = None,
+    reviewer: str = None,
+    verdict: str = None,
+    astrotalk_verdict: str = None,
     sort_col: str = None,
     sort_dir: str = None,
     limit: int = 50,
     offset: int = 0,
 ) -> tuple[list[dict], int]:
     """Paginated audio session list with per-session flag/segment counts.
+    Every queue column is filterable server-side so a filter applies to the
+    whole table, not just the visible page.
     Role-based default visibility mirrors the chat DB (fetch_sessions_page):
     - L1 (no explicit status filter): submitted/locked sessions hidden
     - L2 (no explicit status filter): locked sessions hidden
@@ -94,10 +106,35 @@ def fetch_audio_sessions_page(
     if reviewer_role == "L1" and reviewer_name:
         where.append("s.assigned_to = ?"); params.append(reviewer_name)
     elif assigned_to:
-        where.append("s.assigned_to = ?"); params.append(assigned_to)
+        where.append("s.assigned_to LIKE ?"); params.append(f"%{assigned_to}%")
 
     if search:
         where.append("CAST(s.s_id AS TEXT) LIKE ?"); params.append(f"%{search}%")
+    if has_video in ("1", "true", "yes"):
+        where.append("s.has_video = 1")
+    elif has_video in ("0", "false", "no"):
+        where.append("(s.has_video = 0 OR s.has_video IS NULL)")
+    if lang:
+        where.append("s.lang LIKE ?"); params.append(f"%{lang}%")
+    if duration_min is not None:
+        where.append("COALESCE(s.duration_seconds, sc.max_ts_end, 0) >= ?"); params.append(duration_min)
+    if duration_max is not None:
+        where.append("COALESCE(s.duration_seconds, sc.max_ts_end, 0) <= ?"); params.append(duration_max)
+    if flags_min is not None:
+        where.append("COALESCE(fc.flag_count, 0) >= ?"); params.append(flags_min)
+    if flags_max is not None:
+        where.append("COALESCE(fc.flag_count, 0) <= ?"); params.append(flags_max)
+    if roles == "assigned":
+        where.append("s.speaker1_role IS NOT NULL AND s.speaker2_role IS NOT NULL")
+    elif roles == "unassigned":
+        where.append("(s.speaker1_role IS NULL OR s.speaker2_role IS NULL)")
+    if reviewer:
+        where.append("(s.submitted_by LIKE ? OR s.reviewer_id LIKE ?)")
+        params.extend([f"%{reviewer}%", f"%{reviewer}%"])
+    if verdict:
+        where.append("s.overall_verdict = ?"); params.append(verdict)
+    if astrotalk_verdict:
+        where.append("s.astrotalk_verdict = ?"); params.append(astrotalk_verdict)
     where_sql = " AND ".join(where)
 
     # flag_count excludes DISMISSED rows so it matches the chat DB, where a
