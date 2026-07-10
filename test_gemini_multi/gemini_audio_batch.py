@@ -1186,10 +1186,12 @@ def write_outputs(results: list[dict[str, Any]], output_csv: Path, output_jsonl:
 
 
 def moderation_json_path(input_csv: Path) -> Path:
-    """Aggregate response file named after the input CSV plus the run date,
-    e.g. sample_audio_2026-07-09_audio_moderation.json."""
-    date_tag = datetime.now().strftime("%Y-%m-%d")
-    return DEFAULT_JSON_DIR / f"{input_csv.stem}_{date_tag}_audio_moderation.json"
+    """Aggregate response file named after the input CSV, e.g.
+    sample_audio_2026-07-10_audio_moderation.json for input
+    sample_audio_2026-07-10.csv. The name is derived only from the input stem
+    (no separate run-date tag), so every run against the same input appends to
+    the same JSON file and resume can read completed sessions back from it."""
+    return DEFAULT_JSON_DIR / f"{input_csv.stem}_audio_moderation.json"
 
 
 def append_raw_json(
@@ -1359,17 +1361,31 @@ def write_raw_response(raw_json_dir: Path, session_id: str, response_json: str) 
     return raw_json_path
 
 
-def load_completed_sessions(output_csv: Path) -> set[str]:
-    if not output_csv.exists():
+def load_completed_sessions(moderation_json: Path) -> set[str]:
+    """Completed session_ids from the moderation JSON output file.
+
+    Read from the moderation JSON (the aggregate file append_raw_json writes to
+    as each session finishes) rather than the CSV: append_raw_json runs only on
+    the success path, so every record in it is a completed session, and each one
+    carries the session id as ``s_id``. The CSV embeds JSON blobs
+    (segments/flags/pauses) full of commas and quotes, so a single malformed
+    field can shift columns and corrupt the session_id/status parse.
+    """
+    if not moderation_json.exists():
         return set()
     try:
-        previous = pd.read_csv(output_csv, dtype={"session_id": str})
-    except Exception:
+        data = json.loads(moderation_json.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
         return set()
-    if "session_id" not in previous or "status" not in previous:
+    if not isinstance(data, list):
         return set()
-    completed = previous[previous["status"].eq("success")]
-    return set(completed["session_id"].astype(str))
+    completed: set[str] = set()
+    for record in data:
+        if isinstance(record, dict):
+            session_id = record.get("s_id")
+            if session_id is not None and str(session_id) != "":
+                completed.add(str(session_id))
+    return completed
 
 
 def load_previous_records(output_csv: Path) -> list[dict[str, Any]]:
@@ -1544,13 +1560,14 @@ async def run_batch(args: argparse.Namespace) -> pd.DataFrame:
     # in the output CSV are skipped; error rows are retried. --rerun-all
     # reprocesses everything from scratch.
     resume = not args.rerun_all
-    completed_sessions = load_completed_sessions(output_csv) if resume else set()
+    moderation_json = moderation_json_path(input_csv)
+    completed_sessions = load_completed_sessions(moderation_json) if resume else set()
     results: list[dict[str, Any]] = load_previous_records(output_csv) if resume else []
     already_done = sum(1 for sid in df["session_id"].astype(str) if sid in completed_sessions)
     if already_done:
         print(
             f"[INFO] Resuming: {already_done} of {len(df)} session(s) already completed "
-            f"in {output_csv.name} and will be skipped (use --rerun-all to reprocess)."
+            f"in {moderation_json.name} and will be skipped (use --rerun-all to reprocess)."
         )
     cache_manager: AudioCacheManager | None = None
     cache_storage_cost_recorded = 0.0
