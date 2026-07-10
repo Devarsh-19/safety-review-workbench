@@ -62,32 +62,19 @@ export default function AudioSessionViewer({ sId, sessionList, reviewerName, rev
   const [playerError, setPlayerError] = useState('');
   const [editingFlag, setEditingFlag] = useState(null);   // flag_id being edited
   const [dismissingFlagId, setDismissingFlagId] = useState(null);
+  const [dismissReason, setDismissReason] = useState('');
   const [editIntent, setEditIntent] = useState('');
   const [editSeverity, setEditSeverity] = useState('RED');
   const [editReasoning, setEditReasoning] = useState('');
 
+  // Adjacent-session navigation, same as the chat viewer: no status/verdict
+  // filtering — Previous/Next walk the queue list as displayed.
   const currentIndex = sessionList?.findIndex((r) => r.s_id === sId) ?? -1;
-  const isSevere = (v) => ['SEVERE', 'RED', 'HIGH'].includes(v);
-  
-  let prevIndex = -1;
-  if (currentIndex > 0 && sessionList) {
-    for (let i = currentIndex - 1; i >= 0; i--) {
-      if (sessionList[i].review_status === 'PENDING' && isSevere(sessionList[i].overall_verdict)) {
-        prevIndex = i;
-        break;
-      }
-    }
-  }
-
-  let nextIndex = -1;
-  if (currentIndex >= 0 && sessionList) {
-    for (let i = currentIndex + 1; i < sessionList.length; i++) {
-      if (sessionList[i].review_status === 'PENDING' && isSevere(sessionList[i].overall_verdict)) {
-        nextIndex = i;
-        break;
-      }
-    }
-  }
+  const prevIndex = currentIndex > 0 ? currentIndex - 1 : -1;
+  const nextIndex =
+    currentIndex >= 0 && sessionList && currentIndex < sessionList.length - 1
+      ? currentIndex + 1
+      : -1;
 
   const hasPrev = prevIndex !== -1;
   const hasNext = nextIndex !== -1;
@@ -160,12 +147,13 @@ export default function AudioSessionViewer({ sId, sessionList, reviewerName, rev
     audio.play().catch(() => { });
   };
 
-  // Distinct raw speaker labels, in order of appearance -> lane 1 and lane 2.
+  // Distinct raw speaker labels, in order of appearance. Every speaker gets a
+  // lane; the first two are role-assignable (the data model supports exactly
+  // two roles), extra speakers render read-only-role lanes.
   const speakerLabels = [];
   segments.forEach((seg) => {
     if (seg.speaker && !speakerLabels.includes(seg.speaker)) speakerLabels.push(seg.speaker);
   });
-  const [label1, label2] = [speakerLabels[0], speakerLabels[1]];
 
   const segById = {};
   segments.forEach((seg) => { segById[seg.seg_id] = seg; });
@@ -180,19 +168,31 @@ export default function AudioSessionViewer({ sId, sessionList, reviewerName, rev
   );
   const unactionedCount = activeFlags.filter((f) => f.status !== 'CONFIRMED' && f.status !== 'DISMISSED').length;
 
+  // Mirrors the backend submit gate: speaker roles must be assigned before a
+  // session WITH flags can be submitted. Pre-checking here disables the button
+  // with a hint instead of surfacing a raw HTTP 400 after the click.
+  const rolesMissing = flags.length > 0 && !(session?.speaker1_role && session?.speaker2_role);
+
+  const byStartTime = (a, b) => {
+    const aStart = Number(a.ts_start ?? segById[a.seg_id]?.ts_start ?? Number.MAX_SAFE_INTEGER);
+    const bStart = Number(b.ts_start ?? segById[b.seg_id]?.ts_start ?? Number.MAX_SAFE_INTEGER);
+    return aStart - bStart;
+  };
+
   const flagsForSpeaker = (label) =>
-    activeFlags
-      .filter((f) => segById[f.seg_id]?.speaker === label)
-      .sort((a, b) => {
-        const aStart = Number(a.ts_start ?? segById[a.seg_id]?.ts_start ?? Number.MAX_SAFE_INTEGER);
-        const bStart = Number(b.ts_start ?? segById[b.seg_id]?.ts_start ?? Number.MAX_SAFE_INTEGER);
-        return aStart - bStart;
-      });
+    activeFlags.filter((f) => segById[f.seg_id]?.speaker === label).sort(byStartTime);
+
+  // Flags whose seg_id is NULL or points at a segment that no longer exists
+  // (possible after re-ingest replaces segments while preserving reviewer
+  // flags). They MUST stay visible and actionable — they count toward the
+  // submit gate, so hiding them would block submission with no way out.
+  const orphanFlags = activeFlags
+    .filter((f) => !segById[f.seg_id]?.speaker)
+    .sort(byStartTime);
 
   const startEdit = (f) => {
     setEditingFlag(f.flag_id);
     setEditIntent(f.intent || '');
-    // Normalize legacy severity values (HIGH/SEVERE→RED, MEDIUM/FLAGGED→AMBER)
     // Normalize legacy severity values (HIGH/SEVERE→RED, MEDIUM/FLAGGED→AMBER)
     const sev = (f.severity || '').toUpperCase();
     const normalizedSev = ['RED', 'SEVERE', 'HIGH'].includes(sev) ? 'RED' : 'AMBER';
@@ -211,7 +211,11 @@ export default function AudioSessionViewer({ sId, sessionList, reviewerName, rev
   };
 
   const confirmDismiss = (f) => {
-    doAction(() => dismissAudioFlag(f.flag_id, reviewerName, 'Dismissed as false detection').then(() => setDismissingFlagId(null)));
+    const note = dismissReason.trim() || 'Dismissed as false detection';
+    doAction(() => dismissAudioFlag(f.flag_id, reviewerName, note).then(() => {
+      setDismissingFlagId(null);
+      setDismissReason('');
+    }));
   };
 
   const undoDismiss = (f) => {
@@ -245,18 +249,24 @@ export default function AudioSessionViewer({ sId, sessionList, reviewerName, rev
     try { return JSON.parse(session?.pauses || '[]'); } catch { return []; }
   })();
 
+  // Sentinel lane for flags that can't be attributed to a rendered speaker.
+  const UNASSIGNED_LANE = '__unassigned__';
+
   const renderLane = (label, laneIdx) => {
     if (!label) return null;
-    const laneFlags = flagsForSpeaker(label);
-    const role = roleForLane(laneIdx);
+    const isOrphanLane = label === UNASSIGNED_LANE;
+    const laneFlags = isOrphanLane ? orphanFlags : flagsForSpeaker(label);
+    if (isOrphanLane && laneFlags.length === 0) return null;
+    const roleAssignable = !isOrphanLane && laneIdx < 2;
+    const role = roleAssignable ? roleForLane(laneIdx) : null;
     return (
       <div key={label} style={{
         flex: 1,
         background: C.bgSurface,
-        border: `1px solid ${C.border}`,
+        border: `1px solid ${isOrphanLane ? C.flaggedBorder : C.border}`,
         borderRadius: 6,
         overflow: 'hidden',
-        minWidth: 0,
+        minWidth: 320,
       }}>
         {/* Lane header + role assignment */}
         <div style={{
@@ -268,31 +278,42 @@ export default function AudioSessionViewer({ sId, sessionList, reviewerName, rev
             fontSize: 12, fontFamily: MONO, textTransform: 'uppercase',
             letterSpacing: '0.05em', color: C.textPrimary, fontWeight: 600,
           }}>
-            {role ? `${role} (${label})` : label}
+            {isOrphanLane ? 'Unassigned flags' : role ? `${role} (${label})` : label}
           </div>
-          <div style={{ display: 'flex', gap: 6, marginTop: 8, alignItems: 'center' }}>
-            <span style={{ fontSize: 11, color: C.textSecondary }}>Speaker is:</span>
-            {ROLES.map((r) => {
-              const active = role === r;
-              return (
-                <button
-                  key={r}
-                  disabled={readOnly || busy}
-                  onClick={() => assignRole(laneIdx, r)}
-                  style={{
-                    padding: '3px 10px', fontSize: 11, fontFamily: MONO,
-                    borderRadius: 3,
-                    border: `1px solid ${active ? C.accent : C.border}`,
-                    background: active ? C.accentLight : C.bgSurface,
-                    color: active ? C.accentDark : C.textSecondary,
-                    cursor: readOnly || busy ? 'not-allowed' : 'pointer',
-                  }}
-                >
-                  {r}
-                </button>
-              );
-            })}
-          </div>
+          {isOrphanLane ? (
+            <div style={{ fontSize: 11, color: C.textSecondary, marginTop: 6 }}>
+              These flags reference no (or a removed) speaker segment. They still
+              require action before the session can be submitted.
+            </div>
+          ) : roleAssignable ? (
+            <div style={{ display: 'flex', gap: 6, marginTop: 8, alignItems: 'center' }}>
+              <span style={{ fontSize: 11, color: C.textSecondary }}>Speaker is:</span>
+              {ROLES.map((r) => {
+                const active = role === r;
+                return (
+                  <button
+                    key={r}
+                    disabled={readOnly || busy}
+                    onClick={() => assignRole(laneIdx, r)}
+                    style={{
+                      padding: '3px 10px', fontSize: 11, fontFamily: MONO,
+                      borderRadius: 3,
+                      border: `1px solid ${active ? C.accent : C.border}`,
+                      background: active ? C.accentLight : C.bgSurface,
+                      color: active ? C.accentDark : C.textSecondary,
+                      cursor: readOnly || busy ? 'not-allowed' : 'pointer',
+                    }}
+                  >
+                    {r}
+                  </button>
+                );
+              })}
+            </div>
+          ) : (
+            <div style={{ fontSize: 11, color: C.textSecondary, marginTop: 6 }}>
+              Additional speaker — roles can only be assigned to the first two speakers.
+            </div>
+          )}
         </div>
 
         {/* Flag list */}
@@ -309,6 +330,9 @@ export default function AudioSessionViewer({ sId, sessionList, reviewerName, rev
             const isDismissing = dismissingFlagId === f.flag_id;
             const isSevere = f.severity === 'SEVERE' || f.severity === 'HIGH' || f.severity === 'RED';
             const isFlagged = f.severity === 'FLAGGED' || f.severity === 'MEDIUM' || f.severity === 'AMBER';
+            const tsStart = f.ts_start ?? seg?.ts_start;
+            const tsEnd = f.ts_end ?? seg?.ts_end;
+            const seekable = !!audioUrl && tsStart != null;
             return (
               <div key={f.flag_id} style={{
                 border: dismissed ? `1px dashed ${C.border}`
@@ -322,18 +346,21 @@ export default function AudioSessionViewer({ sId, sessionList, reviewerName, rev
               }}>
                 <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
                   <button
-                    onClick={() => seekTo(f.ts_start ?? seg?.ts_start)}
-                    disabled={!audioUrl}
-                    title={audioUrl ? 'Play from this timestamp' : 'No recording attached'}
+                    onClick={() => seekable && seekTo(tsStart)}
+                    disabled={!seekable}
+                    title={!audioUrl ? 'No recording attached'
+                      : tsStart == null ? 'No timestamp on this flag'
+                        : 'Play from this timestamp'}
                     style={{
                       fontFamily: MONO, fontSize: 12, fontWeight: 600,
-                      color: audioUrl ? C.accentDark : C.textPrimary,
+                      color: seekable ? C.accentDark : C.textPrimary,
                       background: 'none', border: 'none', padding: 0,
-                      cursor: audioUrl ? 'pointer' : 'default',
-                      textDecoration: audioUrl ? 'underline' : 'none',
+                      cursor: seekable ? 'pointer' : 'default',
+                      textDecoration: seekable ? 'underline' : 'none',
                     }}
                   >
-                    {audioUrl ? '▶ ' : ''}{formatTime(f.ts_start ?? seg?.ts_start)} – {formatTime(f.ts_end ?? seg?.ts_end)}
+                    {seekable ? '▶ ' : ''}
+                    {tsStart == null ? 'no timestamp' : `${formatTime(tsStart)} – ${formatTime(tsEnd)}`}
                   </button>
                   <VerdictBadge verdict={f.severity} />
                   <span style={{
@@ -436,7 +463,7 @@ export default function AudioSessionViewer({ sId, sessionList, reviewerName, rev
                     </button>
                     <button
                       disabled={busy}
-                      onClick={() => setDismissingFlagId(f.flag_id)}
+                      onClick={() => { setDismissingFlagId(f.flag_id); setDismissReason(''); }}
                       style={{
                         padding: '4px 10px', fontSize: 11, fontFamily: MONO, borderRadius: 3,
                         border: `1px solid ${C.severeBorder}`, background: C.bgSurface, color: C.severeText,
@@ -457,6 +484,16 @@ export default function AudioSessionViewer({ sId, sessionList, reviewerName, rev
                     <div style={{ fontSize: 13, color: '#A32D2D', marginBottom: 8 }}>
                       Dismiss this flag? This marks it as a false detection.
                     </div>
+                    <input
+                      value={dismissReason}
+                      onChange={(e) => setDismissReason(e.target.value)}
+                      placeholder="Reason (optional — logged to the audit trail)…"
+                      style={{
+                        width: '100%', boxSizing: 'border-box', padding: '6px 8px',
+                        fontSize: 12, borderRadius: 4, border: `1px solid ${C.border}`,
+                        marginBottom: 8, background: '#FFFFFF',
+                      }}
+                    />
                     <div style={{ display: 'flex', gap: 6 }}>
                       <button
                         disabled={busy}
@@ -471,7 +508,7 @@ export default function AudioSessionViewer({ sId, sessionList, reviewerName, rev
                       </button>
                       <button
                         disabled={busy}
-                        onClick={() => setDismissingFlagId(null)}
+                        onClick={() => { setDismissingFlagId(null); setDismissReason(''); }}
                         style={{
                           padding: '6px 12px', fontSize: 12, fontWeight: 500, borderRadius: 3,
                           border: `1px solid ${C.border}`, background: '#FFFFFF', color: C.textPrimary,
@@ -624,9 +661,9 @@ export default function AudioSessionViewer({ sId, sessionList, reviewerName, rev
               {/* Review trail — who did what, when (chat parity) */}
               {(session.submitted_by || session.reviewer_id || session.locked_by) && (
                 <span style={{ fontSize: 12, color: C.textSecondary, fontFamily: MONO }}>
-                  {session.submitted_by && `submitted by ${session.submitted_by}${session.submitted_at ? ` at ${session.submitted_at}` : ''}`}
-                  {!session.submitted_by && session.reviewer_id && `reviewed by ${session.reviewer_id}${session.reviewed_at ? ` at ${session.reviewed_at}` : ''}`}
-                  {session.locked_by && ` · locked by ${session.locked_by}${session.locked_at ? ` at ${session.locked_at}` : ''}`}
+                  {session.submitted_by && `submitted by ${session.submitted_by}${session.submitted_at ? ` on ${String(session.submitted_at).slice(0, 10)}` : ''}`}
+                  {!session.submitted_by && session.reviewer_id && `reviewed by ${session.reviewer_id}${session.reviewed_at ? ` on ${String(session.reviewed_at).slice(0, 10)}` : ''}`}
+                  {session.locked_by && ` · locked by ${session.locked_by}${session.locked_at ? ` on ${String(session.locked_at).slice(0, 10)}` : ''}`}
                 </span>
               )}
               {session.reviewer_note && (
@@ -684,13 +721,14 @@ export default function AudioSessionViewer({ sId, sessionList, reviewerName, rev
               </div>
             )}
 
-            {/* Two speaker lanes */}
-            {speakerLabels.length === 0 ? (
+            {/* Speaker lanes — one per distinct speaker, plus an "Unassigned"
+                lane so orphaned flags stay visible and actionable */}
+            {speakerLabels.length === 0 && orphanFlags.length === 0 ? (
               <div style={{ color: C.textSecondary, fontSize: 13 }}>No segments in this session.</div>
             ) : (
-              <div style={{ display: 'flex', gap: 16, alignItems: 'flex-start' }}>
-                {renderLane(label1, 0)}
-                {renderLane(label2, 1)}
+              <div style={{ display: 'flex', gap: 16, alignItems: 'flex-start', flexWrap: 'wrap' }}>
+                {speakerLabels.map((label, idx) => renderLane(label, idx))}
+                {renderLane(UNASSIGNED_LANE, -1)}
               </div>
             )}
 
@@ -728,22 +766,29 @@ export default function AudioSessionViewer({ sId, sessionList, reviewerName, rev
                     </button>
                   )}
                   <button
-                    disabled={busy || unactionedCount > 0}
+                    disabled={busy || unactionedCount > 0 || rolesMissing}
                     title={unactionedCount > 0
                       ? `${unactionedCount} flag(s) must be confirmed, edited or dismissed first`
-                      : 'Submit this session for L2 review'}
+                      : rolesMissing
+                        ? 'Assign speaker roles (astrologer/user) before submitting'
+                        : 'Submit this session for L2 review'}
                     onClick={() => doAction(() => submitAudioSession(sId, reviewerName, note))}
                     style={{
                       padding: '9px 16px', fontSize: 13, fontWeight: 500,
                       borderRadius: 5, border: 'none',
-                      background: (busy || unactionedCount > 0) ? '#D4D0C9' : C.accent,
-                      color: (busy || unactionedCount > 0) ? C.textMuted : '#FFFFFF',
-                      cursor: (busy || unactionedCount > 0) ? 'not-allowed' : 'pointer',
+                      background: (busy || unactionedCount > 0 || rolesMissing) ? '#D4D0C9' : C.accent,
+                      color: (busy || unactionedCount > 0 || rolesMissing) ? C.textMuted : '#FFFFFF',
+                      cursor: (busy || unactionedCount > 0 || rolesMissing) ? 'not-allowed' : 'pointer',
                       whiteSpace: 'nowrap',
                     }}
                   >
                     Submit for L2 Review
                   </button>
+                  {rolesMissing && unactionedCount === 0 && (
+                    <span style={{ fontSize: 12, color: C.flaggedText, whiteSpace: 'nowrap' }}>
+                      Assign speaker roles first
+                    </span>
+                  )}
                 </>
               )}
               {reviewerRole === 'L2' && !locked && (

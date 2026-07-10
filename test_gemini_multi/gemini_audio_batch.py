@@ -2,7 +2,7 @@
 Batch Gemini audio safety evaluation for sample_audio.csv.
 
 Reads M3U8/audio links from sample_audio.csv, converts each recording to MP3,
-uploads the MP3 to Gemini, evaluates it with prompts.py, and writes an enriched
+uploads the MP3 to Gemini, evaluates it with audio_prompts.py, and writes an enriched
 results dataframe with diarized segments, review flags, response, token,
 duration, latency, and pricing details.
 
@@ -13,9 +13,10 @@ Example:
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
-import math
 import os
+import random
 import re
 import subprocess
 import time
@@ -27,10 +28,11 @@ from urllib.parse import urlparse
 
 import pandas as pd
 from google import genai
+from google.genai import errors as genai_errors
 from google.genai import types
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
-import prompts
+import audio_prompts as prompts
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -41,12 +43,33 @@ DEFAULT_OUTPUT_CSV = BASE_DIR / "data" / "gemini_audio_results.csv"
 DEFAULT_OUTPUT_JSONL = BASE_DIR / "data" / "gemini_audio_results.jsonl"
 DEFAULT_RAW_JSON_DIR = BASE_DIR / "data" / "raw_json"
 DEFAULT_JSON_DIR = BASE_DIR / "data"
+DEFAULT_PROCESSING_LOG = BASE_DIR / "data" / "processing_log.json"
 DEFAULT_MODEL_ID = "gemini-3-flash-preview"
-DEFAULT_THINKING_LEVEL = "minimal"
 LONG_PAUSE_THRESHOLD_SECONDS = 60.0
 SILENCE_NOISE_THRESHOLD = "-45dB"
-MAX_PLAUSIBLE_TRANSCRIPT_WORDS_PER_SECOND = 7.0
-MIN_WORDS_FOR_TIMESTAMP_REPAIR = 4
+UPLOAD_PROCESSING_TIMEOUT_SECONDS = 600.0
+
+# A stalled HLS/CDN read makes ffmpeg hang forever, wedging its worker thread
+# and with it the whole batch; kill any ffmpeg/ffprobe after this long.
+SUBPROCESS_TIMEOUT_SECONDS = 900.0
+# Per-request cap for every Gemini HTTP call (upload, poll, generate).
+# Generous vs. observed latencies (tens of seconds) but tight enough that a
+# hung connection is cut quickly; long audio uploads are the slowest call.
+GEMINI_HTTP_TIMEOUT_MS = 180_000
+# Absolute per-session ceiling: covers all downloads, probes, retries, and
+# Gemini calls for one session; a session over this becomes an error row.
+SESSION_HARD_TIMEOUT_SECONDS = 3600.0
+# Recreate the explicit prompt cache this many seconds before its TTL ends
+# (proactive refresh, same policy as llm_call/caching.py).
+CACHE_SAFETY_MARGIN_SECONDS = 300.0
+# Rate-limit / transient-error backoff: 429 (quota) plus retryable 5xx.
+RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
+BACKOFF_MAX_RETRIES = 6
+BACKOFF_BASE_SECONDS = 2.0
+BACKOFF_MAX_SECONDS = 60.0
+# Per-channel speech-span detection for stereo (one-party-per-channel) calls.
+CHANNEL_SPAN_MIN_SILENCE_SECONDS = 0.6
+CHANNEL_SPAN_MIN_SPEECH_SECONDS = 0.4
 FALLBACK_RETRY_USER_MESSAGE = (
     "Your previous response did not validate. Retry once with a compact reply and return only one valid JSON "
     "object that matches the schema exactly, with no markdown or extra commentary."
@@ -105,7 +128,8 @@ SPEAKER_LABEL_INPUT_RE = re.compile(r"^speaker\s*0*([1-9]\d*)$", re.IGNORECASE)
 
 
 def normalize_speaker_label(value: str) -> str:
-    normalized = " ".join(str(value).strip().split())
+    # Accept underscore diarization variants ("SPEAKER_1") alongside "Speaker 1".
+    normalized = " ".join(str(value).strip().replace("_", " ").split())
     match = SPEAKER_LABEL_INPUT_RE.fullmatch(normalized.replace(" ", "", 1))
     if not match:
         match = SPEAKER_LABEL_INPUT_RE.fullmatch(normalized)
@@ -201,6 +225,42 @@ class AstroTalkAudioReport(BaseModel):
     segments: list[DiarizedSegment] = Field(description="Diarized timestamp/tone/intent metadata segments in order.")
 
 
+# Wire models define the response schema sent to Gemini. Timestamps are
+# "MM:SS"/"MM:SS.d" strings because Gemini's audio understanding is trained on
+# MM:SS positions; forcing float seconds made it emit an ambiguous mix of
+# formats. parse_timestamp() converts the strings into float seconds when the
+# wire report is validated into the internal AstroTalkAudioReport.
+_TS_STRING_DESCRIPTION = (
+    'Timestamp as an "MM:SS" or "MM:SS.d" string measured from the beginning of the audio, e.g. "02:04.5".'
+)
+
+
+class WireSegmentFlag(BaseModel):
+    intent: IntentId = Field(description="The matching Intent ID string from the taxonomy.")
+    s: Literal["RED", "AMBER"] = Field(description="Severity label.")
+    conf: float = Field(ge=0.0, le=1.0, description="Confidence rating from 0.0 to 1.0.")
+    transcript_excerpt: str = Field(
+        description="Short exact words or ambient event that triggered the flag; not a full transcript."
+    )
+    ts_start: str = Field(description=f"Exact violation start. {_TS_STRING_DESCRIPTION}")
+    ts_end: str = Field(description=f"Exact violation end. {_TS_STRING_DESCRIPTION}")
+
+
+class WireDiarizedSegment(BaseModel):
+    segment_id: int = Field(ge=1, description="Sequential segment identifier within this audio.")
+    speaker: str = Field(description="Stable numbered speaker label such as Speaker 1, Speaker 2, etc.")
+    ts_start: str = Field(description=f"Segment start. {_TS_STRING_DESCRIPTION}")
+    ts_end: str = Field(description=f"Segment end. {_TS_STRING_DESCRIPTION}")
+    flags: list[WireSegmentFlag] = Field(description="Violation flags for this segment.")
+    tone: ToneLabel = Field(description="Dominant tone heard in this segment.")
+
+
+class WireAudioReport(BaseModel):
+    s_id: str = Field(description="The identifier of the processed session.")
+    lang: str = Field(description="Auto-detected language(s).")
+    segments: list[WireDiarizedSegment] = Field(description="Diarized timestamp/tone/intent metadata segments in order.")
+
+
 def load_env_file(path: Path) -> None:
     """Load simple KEY=VALUE pairs without overriding the process environment."""
     if not path.exists():
@@ -226,7 +286,16 @@ def require_google_api_key() -> str:
 
 
 def _run_subprocess(cmd: list[str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(cmd, capture_output=True, text=True, check=False)
+    try:
+        return subprocess.run(
+            cmd, capture_output=True, text=True, check=False,
+            timeout=SUBPROCESS_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            f"{cmd[0]} timed out after {SUBPROCESS_TIMEOUT_SECONDS:.0f}s "
+            "(stalled network stream?)"
+        ) from exc
 
 
 def _safe_audio_stem(row: pd.Series) -> str:
@@ -237,8 +306,12 @@ def _safe_audio_stem(row: pd.Series) -> str:
     return str(row["session_id"])
 
 
-def convert_to_mp3(recording_url: str, output_path: Path, force: bool = False) -> None:
-    """Convert an M3U8/audio URL to a mono 16k MP3 using ffmpeg."""
+def convert_to_mp3(recording_url: str, output_path: Path, force: bool = False, channels: int = 1) -> None:
+    """Convert an M3U8/audio URL to a 16k MP3 using ffmpeg.
+
+    Stereo call recordings keep both channels (one party per channel) so
+    speaker turns can be derived per channel; everything else is mono.
+    """
     if output_path.exists() and output_path.stat().st_size > 0 and not force:
         return
 
@@ -253,7 +326,7 @@ def convert_to_mp3(recording_url: str, output_path: Path, force: bool = False) -
         recording_url,
         "-vn",
         "-ac",
-        "1",
+        "2" if channels >= 2 else "1",
         "-ar",
         "16000",
         "-codec:a",
@@ -286,6 +359,30 @@ def probe_has_video(media_source: str) -> bool | None:
         print(f"[WARN] ffprobe video probe failed for {media_source}: {result.stderr.strip()}")
         return None
     return any(line.strip() for line in result.stdout.splitlines())
+
+
+def probe_audio_channels(media_source: str) -> int | None:
+    """Best-effort channel count for the first audio stream."""
+    cmd = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-select_streams",
+        "a:0",
+        "-show_entries",
+        "stream=channels",
+        "-of",
+        "default=noprint_wrappers=1:nokey=1",
+        media_source,
+    ]
+    result = _run_subprocess(cmd)
+    if result.returncode != 0:
+        print(f"[WARN] ffprobe channel probe failed for {media_source}: {result.stderr.strip()}")
+        return None
+    try:
+        return int(result.stdout.strip().splitlines()[0])
+    except (ValueError, IndexError):
+        return None
 
 
 def probe_audio_duration(audio_path: Path) -> float:
@@ -370,22 +467,108 @@ def long_pauses_to_json(long_pauses: list[LongPause]) -> str:
     return json.dumps([pause.model_dump() for pause in long_pauses], ensure_ascii=False)
 
 
+def seconds_to_mmss(seconds: float) -> str:
+    total = round(max(0.0, float(seconds)), 1)
+    minutes = int(total // 60)
+    secs = round(total - minutes * 60, 1)
+    if secs >= 60.0:
+        minutes += 1
+        secs = 0.0
+    return f"{minutes:02d}:{secs:04.1f}"
+
+
+def detect_channel_speech_spans(
+    audio_path: Path,
+    channel_index: int,
+    audio_duration_seconds: float,
+    min_silence_seconds: float = CHANNEL_SPAN_MIN_SILENCE_SECONDS,
+    min_speech_seconds: float = CHANNEL_SPAN_MIN_SPEECH_SECONDS,
+) -> list[tuple[float, float]]:
+    """Speech spans for one channel of a stereo call, via inverted silencedetect."""
+    cmd = [
+        "ffmpeg",
+        "-hide_banner",
+        "-nostats",
+        "-i",
+        str(audio_path),
+        "-af",
+        (
+            f"pan=mono|c0=c{channel_index},"
+            f"silencedetect=noise={SILENCE_NOISE_THRESHOLD}:d={min_silence_seconds}"
+        ),
+        "-f",
+        "null",
+        "-",
+    ]
+    result = _run_subprocess(cmd)
+    if result.returncode != 0:
+        raise RuntimeError(f"ffmpeg channel silence detection failed: {result.stderr.strip()}")
+
+    silences: list[tuple[float, float]] = []
+    pending_start: float | None = None
+    output = f"{result.stderr}\n{result.stdout}"
+    for line in output.splitlines():
+        start_match = re.search(r"silence_start:\s*([0-9.]+)", line)
+        if start_match:
+            pending_start = float(start_match.group(1))
+        end_match = re.search(r"silence_end:\s*([0-9.]+)", line)
+        if end_match and pending_start is not None:
+            silences.append((pending_start, float(end_match.group(1))))
+            pending_start = None
+    if pending_start is not None:
+        silences.append((pending_start, audio_duration_seconds))
+
+    spans: list[tuple[float, float]] = []
+    cursor = 0.0
+    for silence_start, silence_end in silences:
+        if silence_start - cursor >= min_speech_seconds:
+            spans.append((round(cursor, 3), round(silence_start, 3)))
+        cursor = max(cursor, silence_end)
+    if audio_duration_seconds - cursor >= min_speech_seconds:
+        spans.append((round(cursor, 3), round(audio_duration_seconds, 3)))
+    return spans
+
+
+def build_speaker_turn_map(spans_by_channel: list[list[tuple[float, float]]]) -> str | None:
+    """Render per-channel speech spans as the SPEAKER CHANNEL MAP prompt block."""
+    if not any(spans_by_channel):
+        return None
+    channel_names = ("left channel", "right channel")
+    lines = [
+        "This map is AUTHORITATIVE; each party of this call was recorded on a separate channel:",
+    ]
+    for index, spans in enumerate(spans_by_channel):
+        rendered = ", ".join(f"{seconds_to_mmss(start)}-{seconds_to_mmss(end)}" for start, end in spans)
+        channel_name = channel_names[index] if index < len(channel_names) else f"channel {index + 1}"
+        lines.append(f"Speaker {index + 1} ({channel_name}) speaks during: {rendered or 'never'}")
+    lines.append(
+        "Attribute each segment and flag to the speaker whose spans cover its time range; "
+        "keep these speaker labels consistent for the whole audio."
+    )
+    return "\n".join(lines)
+
+
 def build_audio_prompt(
     session_id: str,
     audio_duration_seconds: float,
     *,
+    speaker_turn_map: str | None = None,
     retry_compact: bool = False,
 ) -> str:
-    prompt = (
-        f"audio_duration_seconds: {audio_duration_seconds}\n"
-        "All ts_start and ts_end values must be seconds from the beginning "
-        "of this audio and must be within the audio duration.\n\n"
-        + prompts.USER_MESSAGE.replace("{s_id}", session_id)
-    )
+    sections = [
+        "=== AUDIO METADATA ===",
+        f"audio_duration: {seconds_to_mmss(audio_duration_seconds)} "
+        f"({audio_duration_seconds} seconds total)",
+        'All ts_start and ts_end values must be "MM:SS" or "MM:SS.d" strings measured '
+        "from the beginning of this audio and must not exceed the audio duration.",
+    ]
+    if speaker_turn_map:
+        sections += ["", "=== SPEAKER CHANNEL MAP ===", speaker_turn_map.strip()]
+    sections += ["", "=== TASK ===", prompts.USER_MESSAGE.replace("{s_id}", session_id).strip()]
     if retry_compact:
         retry_user_message = getattr(prompts, "RETRY_USER_MESSAGE", "").strip() or FALLBACK_RETRY_USER_MESSAGE
-        prompt += "\n\n" + retry_user_message
-    return prompt
+        sections += ["", "=== RETRY INSTRUCTIONS ===", retry_user_message]
+    return "\n".join(sections) + "\n"
 
 
 
@@ -420,27 +603,9 @@ def calculate_cache_storage_cost_usd(token_count: int, ttl: str) -> float:
     return token_count * ttl_hours * CACHE_STORAGE_RATE_PER_HOUR
 
 
-def build_thinking_config(
-    model_id: str,
-    thinking_level: str | None = DEFAULT_THINKING_LEVEL,
-    thinking_budget: int | None = None,
-    include_thoughts: bool = False,
-) -> types.ThinkingConfig:
-    del model_id
-
-    config_kwargs: dict[str, Any] = {"include_thoughts": include_thoughts}
-    normalized_level = (thinking_level or "").strip().lower()
-
-    if thinking_budget is not None:
-        config_kwargs["thinking_budget"] = int(thinking_budget)
-    elif normalized_level == "minimal":
-        config_kwargs["thinking_budget"] = 0
-    elif normalized_level:
-        config_kwargs["thinking_level"] = normalized_level
-    else:
-        config_kwargs["thinking_budget"] = 0
-
-    return types.ThinkingConfig(**config_kwargs)
+def build_thinking_config() -> types.ThinkingConfig:
+    """Thinking is always fully off: budget 0, no thought output."""
+    return types.ThinkingConfig(include_thoughts=False, thinking_budget=0)
 
 
 def create_gemini_cache(client: genai.Client, model_id: str, ttl: str) -> GeminiCacheInfo | None:
@@ -475,16 +640,167 @@ def delete_gemini_cache(client: genai.Client, cache_name: str | None) -> None:
         print(f"[WARN] Cache cleanup failed for {cache_name}: {exc}")
 
 
-def delete_uploaded_file(client: genai.Client, file_name: str, display_name: str) -> None:
+def is_cache_expired_error(exc: Exception) -> bool:
+    """Best-effort: does this exception mean the cached content is gone/expired?
+    Same heuristic as llm_call/caching.py: a cache-related resource combined
+    with a not-found/invalid/permission signal, so only genuine expiry triggers
+    a recreation, not every 4xx."""
+    msg = str(exc).lower()
+    mentions_cache = ("cachedcontent" in msg or "cached content" in msg
+                      or "cached_content" in msg or "cache" in msg)
+    if not mentions_cache:
+        return False
+    return any(s in msg for s in (
+        "not found", "not_found", "expired", "invalid", "permission",
+        "does not exist", "404", "403", "400",
+    ))
+
+
+class AudioCacheManager:
+    """Async-safe holder for the explicit Gemini prompt cache (port of
+    llm_call/caching.py CacheManager).
+
+    - Proactive refresh: get_cache() recreates the cache when it is within
+      CACHE_SAFETY_MARGIN_SECONDS of its TTL, so runs longer than the TTL
+      never send a request against an expired cache.
+    - Reactive refresh: refresh(stale_name) recreates it once when a request
+      still hits expiry; concurrent sessions reuse the fresh one.
+    - Degrades instead of dying: if cache creation starts failing (or expiry
+      errors repeat with no success in between), it disables itself and
+      sessions fall back to the inline system prompt (implicit caching).
+    - Tracks every cache created for cleanup and storage-cost accounting.
+    """
+
+    def __init__(self, client: genai.Client, model_id: str, ttl: str,
+                 max_reactive_streak: int = 6):
+        self.client = client
+        self.model_id = model_id
+        self.ttl = ttl
+        try:
+            ttl_seconds = parse_ttl_seconds(ttl)
+        except ValueError:
+            ttl_seconds = 3600.0
+        self.refresh_after_seconds = max(
+            ttl_seconds - CACHE_SAFETY_MARGIN_SECONDS, ttl_seconds * 0.5
+        )
+        self.max_reactive_streak = max_reactive_streak
+        self.disabled = False
+        self._lock = asyncio.Lock()
+        self._current: GeminiCacheInfo | None = None
+        self._created_at = 0.0
+        self._reactive_streak = 0
+        self.created: list[GeminiCacheInfo] = []
+        self.refresh_count = 0
+
+    def _disable(self, reason: str) -> None:
+        print(f"[WARN] Explicit cache disabled ({reason}); "
+              "continuing with the inline system prompt (implicit caching).")
+        self.disabled = True
+        self._current = None
+
+    async def _create_locked(self) -> bool:
+        info = await asyncio.to_thread(
+            create_gemini_cache, self.client, self.model_id, self.ttl
+        )
+        if info is None:
+            return False
+        self._current = info
+        self._created_at = time.monotonic()
+        self.created.append(info)
+        return True
+
+    async def get_cache(self) -> str | None:
+        """Return a usable cache name (refreshing proactively near TTL) or
+        None when explicit caching is unavailable."""
+        if self.disabled:
+            return None
+        async with self._lock:
+            if self.disabled:
+                return None
+            stale = (
+                self._current is None
+                or (time.monotonic() - self._created_at) >= self.refresh_after_seconds
+            )
+            if stale:
+                if self._current is not None:
+                    self.refresh_count += 1
+                    print(f"[cache] proactive refresh (#{self.refresh_count})")
+                if not await self._create_locked():
+                    self._disable("cache creation failed")
+                    return None
+            return self._current.name
+
+    async def refresh(self, stale_name: str | None) -> str | None:
+        """Reactively recreate the cache after an expiry error. No-op if
+        another session already refreshed past stale_name."""
+        if self.disabled:
+            return None
+        async with self._lock:
+            if self.disabled:
+                return None
+            if self._current is not None and self._current.name != stale_name:
+                return self._current.name
+            self._reactive_streak += 1
+            if self._reactive_streak > self.max_reactive_streak:
+                self._disable(
+                    f"{self._reactive_streak} reactive refreshes with no successful "
+                    "call in between - error likely not real expiry"
+                )
+                return None
+            self.refresh_count += 1
+            print(f"[cache] reactive refresh (#{self.refresh_count})")
+            if not await self._create_locked():
+                self._disable("cache recreation failed")
+                return None
+            return self._current.name
+
+    def note_success(self) -> None:
+        self._reactive_streak = 0
+
+    def current_name(self) -> str:
+        return self._current.name if self._current else ""
+
+    def current_tokens(self) -> int:
+        return self._current.token_count if self._current else 0
+
+    def total_storage_cost_usd(self) -> float:
+        return sum(info.storage_cost_usd for info in self.created)
+
+    def cleanup(self) -> None:
+        for info in self.created:
+            delete_gemini_cache(self.client, info.name)
+
+
+async def call_with_backoff(operation, description: str):
+    """Run an async Gemini call, retrying rate-limit (429) and transient 5xx
+    errors with exponential backoff + full jitter. Non-retryable errors and
+    exhausted retries propagate to the caller, which records an error row."""
+    for attempt in range(BACKOFF_MAX_RETRIES + 1):
+        try:
+            return await operation()
+        except genai_errors.APIError as exc:
+            code = getattr(exc, "code", None)
+            if code not in RETRYABLE_STATUS_CODES or attempt == BACKOFF_MAX_RETRIES:
+                raise
+            delay = min(BACKOFF_MAX_SECONDS, BACKOFF_BASE_SECONDS * (2 ** attempt))
+            delay *= random.uniform(0.5, 1.0)
+            print(
+                f"[WARN] {description}: HTTP {code} ({getattr(exc, 'status', '')}) — "
+                f"backing off {delay:.1f}s (attempt {attempt + 1}/{BACKOFF_MAX_RETRIES})"
+            )
+            await asyncio.sleep(delay)
+
+
+async def delete_uploaded_file(client: genai.Client, file_name: str, display_name: str) -> None:
     for attempt in range(1, 4):
         try:
-            client.files.delete(name=file_name)
+            await client.aio.files.delete(name=file_name)
             return
         except Exception as exc:
             if attempt == 3:
                 print(f"[WARN] Uploaded file cleanup failed for {display_name}: {exc}")
             else:
-                time.sleep(attempt)
+                await asyncio.sleep(attempt)
 
 
 def tokens_by_modality(details: Any) -> dict[str, int]:
@@ -578,243 +894,11 @@ def normalize_long_pause_duration(pause: LongPause) -> LongPause:
     return pause
 
 
-def _segment_overlap_seconds(
-    flag_ts_start: float,
-    flag_ts_end: float,
-    segment: DiarizedSegment,
-) -> float:
-    return max(0.0, min(flag_ts_end, float(segment.ts_end)) - max(flag_ts_start, float(segment.ts_start)))
-
-
-def count_transcript_words(text: str | None) -> int:
-    if not text:
-        return 0
-    return len(re.findall(r"\S+", text.strip()))
-
-
-def minimum_plausible_transcript_duration(text: str | None) -> float:
-    word_count = count_transcript_words(text)
-    if word_count < MIN_WORDS_FOR_TIMESTAMP_REPAIR:
-        return 0.0
-    return word_count / MAX_PLAUSIBLE_TRANSCRIPT_WORDS_PER_SECOND
-
-
-def decimal_mmss_to_seconds(value: float, audio_duration_seconds: float) -> float | None:
-    """Treat values like 12.23 as 12m23s when the surrounding evidence requires it."""
-    if not math.isfinite(value) or value < 0:
-        return None
-    if abs(value - round(value, 2)) > 0.000001:
-        return None
-
-    minutes = int(value)
-    seconds = int(round((value - minutes) * 100))
-    if seconds >= 60:
-        return None
-
-    converted = float((minutes * 60) + seconds)
-    if converted > audio_duration_seconds + 0.001:
-        return None
-    return converted
-
-
-def compact_mmss_to_seconds(value: float, audio_duration_seconds: float) -> float | None:
-    """Treat values like 212.0 as 2m12s and 2146.5 as 21m46.5s."""
-    if not math.isfinite(value) or value < 100:
-        return None
-
-    whole = int(value)
-    fraction = float(value) - whole
-    minutes = whole // 100
-    seconds = (whole % 100) + fraction
-    if seconds >= 60:
-        return None
-
-    converted = float((minutes * 60) + seconds)
-    if converted > audio_duration_seconds + 0.001:
-        return None
-    if abs(converted - value) <= 0.001:
-        return None
-    return converted
-
-
-def compact_mmss_span_to_seconds(
-    ts_start: float,
-    ts_end: float,
-    audio_duration_seconds: float,
-) -> tuple[float, float] | None:
-    converted_start = compact_mmss_to_seconds(float(ts_start), audio_duration_seconds)
-    converted_end = compact_mmss_to_seconds(float(ts_end), audio_duration_seconds)
-    if converted_start is None or converted_end is None:
-        return None
-    if converted_end < converted_start:
-        return None
-    return round(converted_start, 3), round(converted_end, 3)
-
-
-def decimal_mmss_span_to_seconds(
-    ts_start: float,
-    ts_end: float,
-    audio_duration_seconds: float,
-) -> tuple[float, float] | None:
-    converted_start = decimal_mmss_to_seconds(float(ts_start), audio_duration_seconds)
-    converted_end = decimal_mmss_to_seconds(float(ts_end), audio_duration_seconds)
-    if converted_start is None or converted_end is None:
-        return None
-    if converted_end < converted_start:
-        return None
-    if abs(converted_start - ts_start) <= 0.001 and abs(converted_end - ts_end) <= 0.001:
-        return None
-    return round(converted_start, 3), round(converted_end, 3)
-
-
-def needs_decimal_mmss_repair(
-    ts_start: float,
-    ts_end: float,
-    transcript_excerpt: str | None,
-    audio_duration_seconds: float,
-) -> bool:
-    min_duration = minimum_plausible_transcript_duration(transcript_excerpt)
-    if min_duration <= 0:
-        return False
-
-    current_duration = max(0.0, float(ts_end) - float(ts_start))
-    if current_duration + 0.001 >= min_duration:
-        return False
-
-    converted_span = decimal_mmss_span_to_seconds(ts_start, ts_end, audio_duration_seconds)
-    if converted_span is None:
-        return False
-
-    converted_duration = max(0.0, converted_span[1] - converted_span[0])
-    return converted_duration + 0.001 >= min_duration
-
-
-def timestamp_span_repair_to_seconds(
-    ts_start: float,
-    ts_end: float,
-    transcript_excerpt: str | None,
-    audio_duration_seconds: float,
-) -> tuple[float, float] | None:
-    compact_span = compact_mmss_span_to_seconds(ts_start, ts_end, audio_duration_seconds)
-    if compact_span is not None:
-        return compact_span
-
-    if needs_decimal_mmss_repair(ts_start, ts_end, transcript_excerpt, audio_duration_seconds):
-        return decimal_mmss_span_to_seconds(ts_start, ts_end, audio_duration_seconds)
-    return None
-
-
-def repair_likely_display_timestamps(
-    report: AstroTalkAudioReport,
-    audio_duration_seconds: float | None,
-) -> tuple[AstroTalkAudioReport, int]:
-    if audio_duration_seconds is None or audio_duration_seconds < 60:
-        return report, 0
-
-    repaired_segments: list[DiarizedSegment] = []
-    repair_count = 0
-
-    for segment in report.segments:
-        original_segment_start = float(segment.ts_start)
-        original_segment_end = float(segment.ts_end)
-        segment_transcript = " ".join(flag.transcript_excerpt for flag in segment.flags)
-        segment_repaired_span = timestamp_span_repair_to_seconds(
-            original_segment_start,
-            original_segment_end,
-            segment_transcript,
-            audio_duration_seconds,
-        )
-
-        flag_repairs: list[tuple[SegmentFlag, tuple[float, float] | None]] = []
-        any_flag_needs_repair = False
-        for flag in segment.flags:
-            effective_start = float(flag.ts_start) if flag.ts_start is not None else original_segment_start
-            effective_end = float(flag.ts_end) if flag.ts_end is not None else original_segment_end
-            repaired_flag_span = timestamp_span_repair_to_seconds(
-                effective_start,
-                effective_end,
-                flag.transcript_excerpt,
-                audio_duration_seconds,
-            )
-            if repaired_flag_span is not None:
-                any_flag_needs_repair = True
-                flag_repairs.append((flag, repaired_flag_span))
-            else:
-                flag_repairs.append((flag, None))
-
-        if segment_repaired_span is None and any_flag_needs_repair:
-            segment_repaired_span = (
-                compact_mmss_span_to_seconds(
-                    original_segment_start,
-                    original_segment_end,
-                    audio_duration_seconds,
-                )
-                or decimal_mmss_span_to_seconds(
-                    original_segment_start,
-                    original_segment_end,
-                    audio_duration_seconds,
-                )
-            )
-        repaired_segment_span = segment_repaired_span
-
-        repaired_flags: list[SegmentFlag] = []
-        for flag, repaired_flag_span in flag_repairs:
-            if repaired_flag_span is None and repaired_segment_span is not None:
-                effective_start = float(flag.ts_start) if flag.ts_start is not None else original_segment_start
-                effective_end = float(flag.ts_end) if flag.ts_end is not None else original_segment_end
-                if (
-                    abs(effective_start - original_segment_start) <= 0.001
-                    and abs(effective_end - original_segment_end) <= 0.001
-                ):
-                    repaired_flag_span = repaired_segment_span
-
-            if repaired_flag_span is not None:
-                repaired_flags.append(
-                    flag.model_copy(
-                        update={
-                            "ts_start": repaired_flag_span[0],
-                            "ts_end": repaired_flag_span[1],
-                        }
-                    )
-                )
-                repair_count += 1
-            else:
-                repaired_flags.append(flag)
-
-        if repaired_segment_span is not None:
-            repaired_segments.append(
-                segment.model_copy(
-                    update={
-                        "ts_start": repaired_segment_span[0],
-                        "ts_end": repaired_segment_span[1],
-                        "flags": repaired_flags,
-                    }
-                )
-            )
-            repair_count += 1
-        elif repaired_flags != segment.flags:
-            repaired_segments.append(segment.model_copy(update={"flags": repaired_flags}))
-        else:
-            repaired_segments.append(segment)
-
-    if repair_count == 0:
-        return report, 0
-    return report.model_copy(update={"segments": repaired_segments}), repair_count
-
-
 def normalize_audio_report(
     report: AstroTalkAudioReport,
     session_id: str,
     local_long_pauses: list[LongPause],
-    audio_duration_seconds: float | None = None,
 ) -> AstroTalkAudioReport:
-    report, timestamp_repair_count = repair_likely_display_timestamps(report, audio_duration_seconds)
-    if timestamp_repair_count:
-        print(
-            f"[WARN] session {session_id}: repaired {timestamp_repair_count} likely display-format timestamp "
-            "value(s) to seconds"
-        )
-
     ordered_segments = sorted(
         report.segments,
         key=lambda segment: (float(segment.ts_start), float(segment.ts_end), int(segment.segment_id)),
@@ -840,58 +924,114 @@ def normalize_audio_report(
     )
 
 
+def merge_telemetry(base: dict[str, int | float], extra: dict[str, int | float]) -> dict[str, int | float]:
+    """Sum token/cost telemetry across multiple Gemini calls (e.g. a retry).
+    Every field is additive: token counts and estimated_cost_usd."""
+    merged = dict(base)
+    for key, value in extra.items():
+        merged[key] = merged.get(key, 0) + value
+    return merged
+
+
 def parse_audio_report(response: Any, session_id: str) -> AstroTalkAudioReport:
-    report = getattr(response, "parsed", None)
-    if report is None:
-        report = AstroTalkAudioReport.model_validate_json(response.text)
-    elif not isinstance(report, AstroTalkAudioReport):
-        report = AstroTalkAudioReport.model_validate(report)
+    wire = getattr(response, "parsed", None)
+    if wire is None:
+        wire = WireAudioReport.model_validate_json(response.text)
+    elif not isinstance(wire, WireAudioReport):
+        wire = WireAudioReport.model_validate(wire)
+    # Internal validators convert the wire "MM:SS" strings into float seconds.
+    data = wire.model_dump()
+    data["review"] = False
+    data["long_pauses"] = []
+    report = AstroTalkAudioReport.model_validate(data)
     return report.model_copy(update={"s_id": str(session_id)})
 
 
-def evaluate_audio(
+async def evaluate_audio(
     client: genai.Client,
     model_id: str,
     audio_path: Path,
     session_id: str,
     audio_duration_seconds: float,
     local_long_pauses: list[LongPause],
-    cache_name: str | None,
-    thinking_level: str | None,
+    cache_manager: AudioCacheManager | None,
+    speaker_turn_map: str | None = None,
 ) -> tuple[AstroTalkAudioReport, dict[str, int | float], float, str]:
     uploaded_file = None
     try:
-        uploaded_file = client.files.upload(file=str(audio_path))
+        uploaded_file = await call_with_backoff(
+            lambda: client.aio.files.upload(file=str(audio_path)),
+            f"session {session_id}: file upload",
+        )
+        upload_wait_started = time.monotonic()
         while uploaded_file.state.name == "PROCESSING":
-            time.sleep(2)
-            uploaded_file = client.files.get(name=uploaded_file.name)
+            if time.monotonic() - upload_wait_started > UPLOAD_PROCESSING_TIMEOUT_SECONDS:
+                raise RuntimeError(
+                    f"Gemini file asset stuck in PROCESSING for over "
+                    f"{UPLOAD_PROCESSING_TIMEOUT_SECONDS:.0f}s."
+                )
+            await asyncio.sleep(2)
+            uploaded_file = await call_with_backoff(
+                lambda: client.aio.files.get(name=uploaded_file.name),
+                f"session {session_id}: file status poll",
+            )
         if uploaded_file.state.name == "FAILED":
             raise RuntimeError("Gemini file asset processing failed.")
 
-        config_kwargs = {
-            "temperature": 0,
-            "safety_settings": gemini_safety_settings(),
-            "max_output_tokens": 16384,
-            "response_mime_type": "application/json",
-            "response_schema": AstroTalkAudioReport,
-            "thinking_config": build_thinking_config(model_id, thinking_level),
-        }
-        if cache_name:
-            config_kwargs["cached_content"] = cache_name
-        config = types.GenerateContentConfig(**config_kwargs)
+        def build_config(cache_name: str | None) -> types.GenerateContentConfig:
+            config_kwargs = {
+                "temperature": 0,
+                "safety_settings": gemini_safety_settings(),
+                "max_output_tokens": 16384,
+                "response_mime_type": "application/json",
+                "response_schema": WireAudioReport,
+                "thinking_config": build_thinking_config(),
+            }
+            if cache_name:
+                config_kwargs["cached_content"] = cache_name
+            else:
+                # No explicit cache: send the system prompt inline. It is a large
+                # static block that is byte-identical across requests, so Gemini's
+                # implicit caching discounts the shared prefix automatically.
+                # This also guarantees the taxonomy is present when explicit cache
+                # creation fails mid-run.
+                config_kwargs["system_instruction"] = prompts.SYSTEM_PROMPT
+            return types.GenerateContentConfig(**config_kwargs)
 
-        def generate_with_prompt(prompt_text: str) -> tuple[Any, float]:
-            start_time = time.perf_counter()
-            response = client.models.generate_content(
-                model=model_id,
-                contents=[uploaded_file, prompt_text],
-                config=config,
+        async def generate_once(prompt_text: str, cache_name: str | None) -> Any:
+            return await call_with_backoff(
+                lambda: client.aio.models.generate_content(
+                    model=model_id,
+                    contents=[uploaded_file, prompt_text],
+                    config=build_config(cache_name),
+                ),
+                f"session {session_id}: generate_content",
             )
+
+        async def generate_with_prompt(prompt_text: str) -> tuple[Any, float]:
+            start_time = time.perf_counter()
+            cache_name = await cache_manager.get_cache() if cache_manager else None
+            try:
+                response = await generate_once(prompt_text, cache_name)
+            except genai_errors.APIError as exc:
+                # The cache can still expire between the proactive check and
+                # the request landing: recreate it once and retry.
+                if cache_manager and cache_name and is_cache_expired_error(exc):
+                    print(f"[WARN] session {session_id}: cache expired mid-request; refreshing")
+                    cache_name = await cache_manager.refresh(cache_name)
+                    response = await generate_once(prompt_text, cache_name)
+                else:
+                    raise
+            if cache_manager:
+                cache_manager.note_success()
             return response, round(time.perf_counter() - start_time, 3)
 
-        response, latency_seconds = generate_with_prompt(
-            build_audio_prompt(session_id, audio_duration_seconds)
+        response, latency_seconds = await generate_with_prompt(
+            build_audio_prompt(session_id, audio_duration_seconds, speaker_turn_map=speaker_turn_map)
         )
+        # Telemetry is captured per call and merged, so a retry's cost includes
+        # the failed first attempt's tokens instead of silently dropping them.
+        telemetry = usage_to_telemetry(response.usage_metadata) if response.usage_metadata else {}
         try:
             parsed_report = parse_audio_report(response, session_id)
         except ValidationError:
@@ -899,23 +1039,25 @@ def evaluate_audio(
                 f"[WARN] session {session_id}: Gemini returned invalid/truncated JSON; "
                 "retrying once with compact-output instructions"
             )
-            response, retry_latency_seconds = generate_with_prompt(
+            response, retry_latency_seconds = await generate_with_prompt(
                 build_audio_prompt(
                     session_id,
                     audio_duration_seconds,
+                    speaker_turn_map=speaker_turn_map,
                     retry_compact=True,
                 )
             )
             latency_seconds = round(latency_seconds + retry_latency_seconds, 3)
+            if response.usage_metadata:
+                telemetry = merge_telemetry(telemetry, usage_to_telemetry(response.usage_metadata))
             parsed_report = parse_audio_report(response, session_id)
 
-        report = normalize_audio_report(parsed_report, session_id, local_long_pauses, audio_duration_seconds)
-        telemetry = usage_to_telemetry(response.usage_metadata) if response.usage_metadata else {}
+        report = normalize_audio_report(parsed_report, session_id, local_long_pauses)
         response_json = report.model_dump_json()
         return report, telemetry, latency_seconds, response_json
     finally:
         if uploaded_file:
-            delete_uploaded_file(client, uploaded_file.name, audio_path.name)
+            await delete_uploaded_file(client, uploaded_file.name, audio_path.name)
 
 
 def invalid_timestamp_records(records: list[dict[str, Any]], audio_duration_seconds: float | None) -> list[dict[str, Any]]:
@@ -1023,6 +1165,15 @@ def flatten_result(
     return result
 
 
+def json_default(value: Any) -> Any:
+    """Serialize numpy scalars (int64/float64/bool_) that json can't handle.
+    pandas rows carry numpy types; .item() converts them to native Python."""
+    item = getattr(value, "item", None)
+    if callable(item):
+        return item()
+    return str(value)
+
+
 def write_outputs(results: list[dict[str, Any]], output_csv: Path, output_jsonl: Path) -> None:
     output_csv.parent.mkdir(parents=True, exist_ok=True)
     output_jsonl.parent.mkdir(parents=True, exist_ok=True)
@@ -1030,12 +1181,26 @@ def write_outputs(results: list[dict[str, Any]], output_csv: Path, output_jsonl:
     df.to_csv(output_csv, index=False, encoding="utf-8-sig")
     with output_jsonl.open("w", encoding="utf-8") as handle:
         for record in results:
-            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+            handle.write(json.dumps(record, ensure_ascii=False, default=json_default) + "\n")
 
 
 
-def append_raw_json(response_json: str, recording_url: str, at_flag: Any, has_video: bool | None) -> None:
-    output_file = DEFAULT_JSON_DIR / "audio_response.json"
+def moderation_json_path(input_csv: Path) -> Path:
+    """Aggregate response file named after the input CSV plus the run date,
+    e.g. sample_audio_2026-07-09_audio_moderation.json."""
+    date_tag = datetime.now().strftime("%Y-%m-%d")
+    return DEFAULT_JSON_DIR / f"{input_csv.stem}_{date_tag}_audio_moderation.json"
+
+
+def append_raw_json(
+    output_file: Path,
+    response_json: str,
+    recording_url: str,
+    at_flag: Any,
+    has_video: bool | None,
+    audio_duration_seconds: float | None = None,
+    cache_name: str | None = None,
+) -> None:
     output_file.parent.mkdir(parents=True, exist_ok=True)
 
     if output_file.exists():
@@ -1056,21 +1221,134 @@ def append_raw_json(response_json: str, recording_url: str, at_flag: Any, has_vi
         new_record = {"raw_response": response_json}
     if isinstance(new_record, dict):
         new_record["audio_url"] = recording_url
-        new_record["at_flag"] = at_flag
+        new_record["at_flag"] = True if at_flag == "Yes" else False
         new_record["has_video"] = has_video
+        new_record["audio_duration_seconds"] = audio_duration_seconds
+        new_record["cache_name"] = cache_name or ""
     elif isinstance(new_record, list):
         new_record = {
             "audio_url": recording_url,
             "at_flag": at_flag,
             "has_video": has_video,
+            "audio_duration_seconds": audio_duration_seconds,
+            "cache_name": cache_name or "",
             "response_data": new_record
         }
 
     data.append(new_record)
 
     with output_file.open("w", encoding="utf-8") as f:
-        json.dump(data, f, indent=4, ensure_ascii=False)
+        json.dump(data, f, indent=4, ensure_ascii=False, default=json_default)
 
+
+
+def _append_json_entry(log_path: Path, entry: dict[str, Any]) -> None:
+    """Append one entry to a JSON-array log file (read, append, rewrite).
+    Same pattern as append_raw_json: no awaits between read and write, so
+    concurrent workers on the event loop can't interleave on the file."""
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    entries: list = []
+    if log_path.exists():
+        try:
+            existing = json.loads(log_path.read_text(encoding="utf-8"))
+            if isinstance(existing, list):
+                entries = existing
+        except (json.JSONDecodeError, OSError):
+            entries = []
+    entries.append(entry)
+    log_path.write_text(
+        json.dumps(entries, indent=2, ensure_ascii=False, default=json_default),
+        encoding="utf-8",
+    )
+
+
+def log_session_processing(log_path: Path, record: dict[str, Any]) -> None:
+    """Append one per-session entry to the processing log the moment the
+    session finishes: timing (start/end/duration) plus the session's output."""
+    result = None
+    if record.get("response_json"):
+        try:
+            result = json.loads(record["response_json"])
+        except (json.JSONDecodeError, TypeError):
+            result = record["response_json"]
+
+    _append_json_entry(log_path, {
+        "type": "session",
+        "session_id": record.get("session_id"),
+        "status": record.get("status"),
+        "error": record.get("error") or None,
+        "started_at_utc": record.get("processing_started_utc"),
+        "ended_at_utc": record.get("processing_ended_utc"),
+        "processing_seconds": record.get("processing_seconds"),
+        "gemini_latency_seconds": record.get("latency_seconds"),
+        "audio_duration_seconds": record.get("audio_duration_seconds"),
+        "detected_languages": record.get("detected_languages"),
+        "review": record.get("review"),
+        "flag_count": record.get("flag_count"),
+        "long_pause_count": record.get("long_pause_count"),
+        "total_tokens": record.get("total_tokens"),
+        "estimated_cost_usd": record.get("estimated_cost_usd"),
+        "cache_mode": record.get("cache_mode"),
+        "cache_name": record.get("cache_name"),
+        "result": result,
+    })
+
+
+def log_run_summary(
+    log_path: Path,
+    batch_started_utc: str,
+    batch_started_perf: float,
+    results: list[dict[str, Any]],
+    processed_session_ids: set[str],
+) -> None:
+    """Append the end-of-run entry: batch start/end times, wall duration, and
+    totals over the sessions processed in THIS run."""
+    processed = [r for r in results if str(r.get("session_id")) in processed_session_ids]
+    status_counts: dict[str, int] = {}
+    for r in processed:
+        status_counts[str(r.get("status"))] = status_counts.get(str(r.get("status")), 0) + 1
+
+    def _num(value) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return 0.0
+
+    wall_seconds = round(time.perf_counter() - batch_started_perf, 3)
+    total_processing_seconds = round(sum(_num(r.get("processing_seconds")) for r in processed), 3)
+    total_audio_seconds = round(sum(_num(r.get("audio_duration_seconds")) for r in processed), 3)
+    audio_minutes = total_audio_seconds / 60
+    # Wall time is shared across concurrent sessions; processing time is the
+    # per-session sum, so it exceeds wall time when concurrency > 1.
+    wall_per_audio_minute = round(wall_seconds / audio_minutes, 3) if audio_minutes else None
+    processing_per_audio_minute = round(total_processing_seconds / audio_minutes, 3) if audio_minutes else None
+
+    _append_json_entry(log_path, {
+        "type": "run_summary",
+        "batch_started_utc": batch_started_utc,
+        "batch_ended_utc": datetime.now(UTC).isoformat(),
+        "batch_wall_seconds": wall_seconds,
+        "sessions_processed": len(processed),
+        "status_counts": status_counts,
+        "total_processing_seconds": total_processing_seconds,
+        "total_audio_duration_seconds": total_audio_seconds,
+        "avg_processing_seconds_per_session": round(total_processing_seconds / len(processed), 3) if processed else None,
+        "wall_seconds_per_audio_minute": wall_per_audio_minute,
+        "processing_seconds_per_audio_minute": processing_per_audio_minute,
+        "cache_name": next((str(r.get("cache_name")) for r in processed if r.get("cache_name")), ""),
+        "total_estimated_cost_usd": round(sum(_num(r.get("estimated_cost_usd")) for r in processed), 6),
+    })
+
+    if processed:
+        print(
+            f"Total run time: {wall_seconds:.1f}s ({wall_seconds / 60:.2f} min) for "
+            f"{len(processed)} session(s) - avg {wall_seconds / len(processed):.2f}s/session"
+        )
+        if audio_minutes:
+            print(
+                f"Throughput: {wall_per_audio_minute:.2f}s wall time per 1 min of audio "
+                f"({processing_per_audio_minute:.2f}s per-session processing per 1 min of audio)"
+            )
 
 
 def write_raw_response(raw_json_dir: Path, session_id: str, response_json: str) -> Path:
@@ -1103,14 +1381,155 @@ def load_previous_records(output_csv: Path) -> list[dict[str, Any]]:
         return []
 
 
-def run_batch(args: argparse.Namespace) -> pd.DataFrame:
-    client = None if args.skip_gemini else genai.Client(api_key=require_google_api_key())
+async def process_session(
+    index: int,
+    total: int,
+    row: pd.Series,
+    args: argparse.Namespace,
+    client: genai.Client | None,
+    cache_manager: AudioCacheManager | None,
+    audio_dir: Path,
+    raw_json_dir: Path,
+) -> tuple[str, dict[str, Any]]:
+    """Download, probe, and evaluate one session. Always returns a record —
+    failures come back as status='error' rows, never as raised exceptions.
+
+    ffmpeg/ffprobe subprocesses run in worker threads; the Gemini calls are
+    truly async (client.aio), so sessions overlap up to the semaphore limit.
+    """
+    session_id = str(row["session_id"])
+    recording_url = str(row["recording_url"])
+    audio_stem = _safe_audio_stem(row)
+    audio_path = audio_dir / f"{audio_stem}.mp3"
+    has_video: bool | None = None
+    tag = f"[{index + 1}/{total}] session {session_id}"
+    started_at_utc = datetime.now(UTC).isoformat()
+    started_perf = time.perf_counter()
+
+    print(f"{tag}: converting/downloading audio")
+    try:
+        has_video = await asyncio.to_thread(probe_has_video, recording_url)
+        if has_video:
+            print(f"{tag}: source media contains video")
+
+        source_channels = await asyncio.to_thread(probe_audio_channels, recording_url)
+        await asyncio.to_thread(
+            convert_to_mp3, recording_url, audio_path, args.force_download, source_channels or 1
+        )
+        duration_seconds = await asyncio.to_thread(probe_audio_duration, audio_path)
+        local_long_pauses = await asyncio.to_thread(detect_long_pauses, audio_path, duration_seconds)
+        if local_long_pauses:
+            print(f"{tag}: {len(local_long_pauses)} long pause(s) need review")
+
+        # Stereo call recordings carry one party per channel: derive the exact
+        # speaker turn map locally and hand it to Gemini as ground truth
+        # (probe the local file — cached files from older runs may be mono).
+        speaker_turn_map: str | None = None
+        local_channels = await asyncio.to_thread(probe_audio_channels, str(audio_path))
+        if local_channels and local_channels >= 2:
+            spans_by_channel = [
+                await asyncio.to_thread(
+                    detect_channel_speech_spans, audio_path, channel_index, duration_seconds
+                )
+                for channel_index in (0, 1)
+            ]
+            speaker_turn_map = build_speaker_turn_map(spans_by_channel)
+            if speaker_turn_map:
+                print(f"{tag}: stereo source — channel-based speaker map attached")
+
+        if args.skip_gemini:
+            record = flatten_result(
+                row,
+                audio_path,
+                duration_seconds,
+                report=None,
+                detected_long_pauses=local_long_pauses,
+                telemetry={},
+                latency_seconds=None,
+                response_json=None,
+                raw_json_path=None,
+                status="downloaded",
+                has_video=has_video,
+            )
+        else:
+            print(f"{tag}: uploading to Gemini")
+            if client is None:
+                raise RuntimeError("Gemini client was not initialized.")
+            report, telemetry, latency, response_json = await evaluate_audio(
+                client,
+                args.model_id,
+                audio_path,
+                session_id,
+                duration_seconds,
+                local_long_pauses,
+                cache_manager,
+                speaker_turn_map,
+            )
+            raw_json_path = write_raw_response(raw_json_dir, session_id, response_json)
+            # No await between the read and write inside append_raw_json, so
+            # concurrent workers can't interleave on the shared JSON file.
+            append_raw_json(
+                output_file=moderation_json_path(Path(args.input_csv)),
+                response_json=response_json,
+                recording_url=recording_url,
+                at_flag=row.get("flagged", ""),
+                has_video=has_video,
+                audio_duration_seconds=duration_seconds,
+                cache_name=cache_manager.current_name() if cache_manager else "",
+            )
+            record = flatten_result(
+                row,
+                audio_path,
+                duration_seconds,
+                report,
+                detected_long_pauses=local_long_pauses,
+                telemetry=telemetry,
+                latency_seconds=latency,
+                response_json=response_json,
+                raw_json_path=raw_json_path,
+                status="success",
+                has_video=has_video,
+            )
+            cost = record.get("estimated_cost_usd", 0.0)
+            print(f"{tag}: {record['flag_count']} flags, ${float(cost):.6f}, {latency:.1f}s")
+    except Exception as exc:
+        record = flatten_result(
+            row,
+            audio_path,
+            audio_duration_seconds=None,
+            report=None,
+            detected_long_pauses=None,
+            telemetry={},
+            latency_seconds=None,
+            response_json=None,
+            raw_json_path=None,
+            status="error",
+            error=f"{type(exc).__name__}: {exc}",
+            has_video=has_video,
+        )
+        print(f"[ERROR] session {session_id}: {record['error']}")
+
+    record["processing_started_utc"] = started_at_utc
+    record["processing_ended_utc"] = datetime.now(UTC).isoformat()
+    record["processing_seconds"] = round(time.perf_counter() - started_perf, 3)
+    return session_id, record
+
+
+async def run_batch(args: argparse.Namespace) -> pd.DataFrame:
+    client = None if args.skip_gemini else genai.Client(
+        api_key=require_google_api_key(),
+        http_options=types.HttpOptions(timeout=GEMINI_HTTP_TIMEOUT_MS),
+    )
 
     input_csv = Path(args.input_csv)
     audio_dir = Path(args.audio_dir)
     output_csv = Path(args.output_csv)
     output_jsonl = Path(args.output_jsonl)
     raw_json_dir = Path(args.raw_json_dir)
+    processing_log = Path(args.processing_log)
+    batch_started_utc = datetime.now(UTC).isoformat()
+    batch_started_perf = time.perf_counter()
+    processed_session_ids: set[str] = set()
 
     df = pd.read_csv(input_csv, dtype={"session_id": str})
     if args.session_id:
@@ -1121,100 +1540,40 @@ def run_batch(args: argparse.Namespace) -> pd.DataFrame:
         df = df.head(args.limit)
     df = df.reset_index(drop=True)
 
-    completed_sessions = load_completed_sessions(output_csv) if args.skip_existing else set()
-    results: list[dict[str, Any]] = load_previous_records(output_csv) if args.skip_existing else []
-    cache_info: GeminiCacheInfo | None = None
-    cache_name: str | None = None
-    cache_storage_cost_recorded = False
+    # Resume by default (same as moderate.py): sessions already marked success
+    # in the output CSV are skipped; error rows are retried. --rerun-all
+    # reprocesses everything from scratch.
+    resume = not args.rerun_all
+    completed_sessions = load_completed_sessions(output_csv) if resume else set()
+    results: list[dict[str, Any]] = load_previous_records(output_csv) if resume else []
+    already_done = sum(1 for sid in df["session_id"].astype(str) if sid in completed_sessions)
+    if already_done:
+        print(
+            f"[INFO] Resuming: {already_done} of {len(df)} session(s) already completed "
+            f"in {output_csv.name} and will be skipped (use --rerun-all to reprocess)."
+        )
+    cache_manager: AudioCacheManager | None = None
+    cache_storage_cost_recorded = 0.0
 
-    try:
-        if client and not args.no_cache:
-            cache_info = create_gemini_cache(client, args.model_id, args.cache_ttl)
-        cache_name = cache_info.name if cache_info else None
+    semaphore = asyncio.Semaphore(max(1, args.concurrency))
 
-        for index, row in df.iterrows():
-            session_id = str(row["session_id"])
-            recording_url = str(row["recording_url"])
-            audio_stem = _safe_audio_stem(row)
-            audio_path = audio_dir / f"{audio_stem}.mp3"
-            has_video: bool | None = None
-
-            if session_id in completed_sessions:
-                print(f"[{index + 1}/{len(df)}] skip completed session {session_id}")
-                continue
-
-            print(f"[{index + 1}/{len(df)}] session {session_id}: converting/downloading audio")
+    async def bounded(index: int, row: pd.Series) -> tuple[str, dict[str, Any]]:
+        async with semaphore:
             try:
-                has_video = probe_has_video(recording_url)
-                if has_video:
-                    print(f"[{index + 1}/{len(df)}] session {session_id}: source media contains video")
-
-                convert_to_mp3(recording_url, audio_path, force=args.force_download)
-                duration_seconds = probe_audio_duration(audio_path)
-                local_long_pauses = detect_long_pauses(audio_path, duration_seconds)
-                if local_long_pauses:
-                    print(
-                        f"[{index + 1}/{len(df)}] session {session_id}: "
-                        f"{len(local_long_pauses)} long pause(s) need review"
-                    )
-
-                if args.skip_gemini:
-                    record = flatten_result(
-                        row,
-                        audio_path,
-                        duration_seconds,
-                        report=None,
-                        detected_long_pauses=local_long_pauses,
-                        telemetry={},
-                        latency_seconds=None,
-                        response_json=None,
-                        raw_json_path=None,
-                        status="downloaded",
-                        has_video=has_video,
-                    )
-                else:
-                    print(f"[{index + 1}/{len(df)}] session {session_id}: uploading to Gemini")
-                    if client is None:
-                        raise RuntimeError("Gemini client was not initialized.")
-                    report, telemetry, latency, response_json = evaluate_audio(
-                        client,
-                        args.model_id,
-                        audio_path,
-                        session_id,
-                        duration_seconds,
-                        local_long_pauses,
-                        cache_name,
-                        args.thinking_level,
-                    )
-                    raw_json_path = write_raw_response(raw_json_dir, session_id, response_json)
-                    append_raw_json(
-                        response_json=response_json,
-                        recording_url=recording_url,
-                        at_flag=row.get("flagged", ""),
-                        has_video=has_video,
-                    )
-                    record = flatten_result(
-                        row,
-                        audio_path,
-                        duration_seconds,
-                        report,
-                        detected_long_pauses=local_long_pauses,
-                        telemetry=telemetry,
-                        latency_seconds=latency,
-                        response_json=response_json,
-                        raw_json_path=raw_json_path,
-                        status="success",
-                        has_video=has_video,
-                    )
-                    cost = record.get("estimated_cost_usd", 0.0)
-                    print(
-                        f"[{index + 1}/{len(df)}] session {session_id}: "
-                        f"{record['flag_count']} flags, ${float(cost):.6f}, {latency:.1f}s"
-                    )
-            except Exception as exc:
+                return await asyncio.wait_for(
+                    process_session(
+                        index, len(df), row, args, client, cache_manager, audio_dir, raw_json_dir
+                    ),
+                    SESSION_HARD_TIMEOUT_SECONDS,
+                )
+            except TimeoutError:
+                # Watchdog: a session that outlives the hard limit (hung
+                # network stream, wedged HTTP call) becomes an error row
+                # instead of stalling the whole batch forever.
+                session_id = str(row["session_id"])
                 record = flatten_result(
                     row,
-                    audio_path,
+                    audio_dir / f"{_safe_audio_stem(row)}.mp3",
                     audio_duration_seconds=None,
                     report=None,
                     detected_long_pauses=None,
@@ -1223,27 +1582,82 @@ def run_batch(args: argparse.Namespace) -> pd.DataFrame:
                     response_json=None,
                     raw_json_path=None,
                     status="error",
-                    error=f"{type(exc).__name__}: {exc}",
-                    has_video=has_video,
+                    error=f"TimeoutError: session exceeded {SESSION_HARD_TIMEOUT_SECONDS:.0f}s hard limit",
                 )
+                record["processing_seconds"] = SESSION_HARD_TIMEOUT_SECONDS
                 print(f"[ERROR] session {session_id}: {record['error']}")
+                return session_id, record
 
-            record["model_id"] = args.model_id
-            record["cache_name"] = cache_name or ""
-            record["cache_storage_tokens"] = cache_info.token_count if cache_info else 0
-            if cache_info and not cache_storage_cost_recorded:
-                record["cache_storage_cost_usd"] = cache_info.storage_cost_usd
-                cache_storage_cost_recorded = True
+    cache_mode = "implicit" if args.no_cache else args.cache_mode
+
+    try:
+        if client and cache_mode == "explicit":
+            manager = AudioCacheManager(client, args.model_id, args.cache_ttl)
+            if await manager.get_cache() is None:
+                cache_mode = "implicit"
+                print("[INFO] Falling back to implicit caching (inline system prompt).")
             else:
-                record["cache_storage_cost_usd"] = 0.0
-            record["thinking_level"] = args.thinking_level or ""
+                cache_manager = manager
+
+        tasks: list[asyncio.Task] = []
+        for index, row in df.iterrows():
+            session_id = str(row["session_id"])
+            if session_id in completed_sessions:
+                print(f"[{index + 1}/{len(df)}] skip completed session {session_id}")
+                continue
+            tasks.append(asyncio.create_task(bounded(index, row)))
+
+        # Results are appended and flushed as each session finishes, so an
+        # interrupted run still leaves everything completed so far on disk.
+        for finished in asyncio.as_completed(tasks):
+            session_id, record = await finished
+            record["model_id"] = args.model_id
+            record["cache_mode"] = cache_mode
+            record["cache_name"] = cache_manager.current_name() if cache_manager else ""
+            record["cache_storage_tokens"] = cache_manager.current_tokens() if cache_manager else 0
+            # Attribute newly accrued cache storage cost (initial creation plus
+            # any refreshes since the last record) to the next finishing row,
+            # so the CSV total always matches what was actually created.
+            total_storage = cache_manager.total_storage_cost_usd() if cache_manager else 0.0
+            record["cache_storage_cost_usd"] = round(max(0.0, total_storage - cache_storage_cost_recorded), 9)
+            cache_storage_cost_recorded = total_storage
+            record["thinking_budget"] = 0
+            # Drop any stale record for this session (e.g. an old error row
+            # kept by --skip-existing) so the outputs never hold duplicates.
+            results = [r for r in results if str(r.get("session_id")) != session_id]
             results.append(record)
             write_outputs(results, output_csv, output_jsonl)
+            # Session done -> append its timing + output to the processing log
+            # immediately, so the log is complete up to the last finished
+            # session even if the run is interrupted.
+            processed_session_ids.add(session_id)
+            log_session_processing(processing_log, record)
     finally:
-        if client and args.delete_cache:
-            delete_gemini_cache(client, cache_name)
-        elif client and cache_name:
-            print(f"[INFO] Cache retained until TTL expires: {cache_name}")
+        try:
+            # Run-summary entry carries the batch end time; written in finally
+            # so an interrupted run still records when and where it stopped.
+            log_run_summary(
+                processing_log, batch_started_utc, batch_started_perf,
+                results, processed_session_ids,
+            )
+        except Exception as exc:
+            print(f"[WARN] processing log summary failed: {exc}")
+        if client and cache_manager:
+            if cache_manager.refresh_count:
+                print(f"[INFO] Prompt cache refreshed {cache_manager.refresh_count} time(s) during this run.")
+            if args.delete_cache:
+                cache_manager.cleanup()
+            else:
+                for info in cache_manager.created:
+                    print(f"[INFO] Cache retained until TTL expires: {info.name}")
+
+    # Completion order is nondeterministic under concurrency — restore the
+    # input CSV order for the final outputs (stable sort keeps records for
+    # sessions outside this run, e.g. --skip-existing carryovers, in front).
+    if results:
+        input_order = {sid: i for i, sid in enumerate(df["session_id"].astype(str))}
+        results.sort(key=lambda r: input_order.get(str(r.get("session_id")), -1))
+        write_outputs(results, output_csv, output_jsonl)
 
     return pd.DataFrame(results)
 
@@ -1255,26 +1669,58 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-csv", default=str(DEFAULT_OUTPUT_CSV), help="Enriched result dataframe CSV.")
     parser.add_argument("--output-jsonl", default=str(DEFAULT_OUTPUT_JSONL), help="Line-delimited JSON results.")
     parser.add_argument("--raw-json-dir", default=str(DEFAULT_RAW_JSON_DIR), help="Directory for per-session raw JSON responses.")
+    parser.add_argument(
+        "--processing-log",
+        default=str(DEFAULT_PROCESSING_LOG),
+        help="Single JSON file that gets one timing+output entry appended per finished session, plus a run summary.",
+    )
     parser.add_argument("--model-id", default=DEFAULT_MODEL_ID, help="Gemini model ID.")
     parser.add_argument("--cache-ttl", default="3600s", help="Gemini cached prompt TTL.")
     parser.add_argument("--session-id", default=None, help="Process only this session_id from the input CSV.")
     parser.add_argument("--limit", type=int, default=None, help="Only process the first N rows.")
+    parser.add_argument(
+        "--concurrency",
+        type=int,
+        default=16,
+        help="Number of sessions processed in parallel (download + Gemini). Use 1 for the old sequential behaviour.",
+    )
     parser.add_argument("--force-download", action="store_true", help="Redownload/reconvert MP3 files.")
-    parser.add_argument("--skip-existing", action="store_true", help="Skip sessions already marked success in output CSV.")
+    parser.add_argument(
+        "--skip-existing",
+        action="store_true",
+        help="Deprecated no-op: skipping already-successful sessions is now the default.",
+    )
+    parser.add_argument(
+        "--rerun-all",
+        action="store_true",
+        help="Reprocess every session even if already marked success in the output CSV.",
+    )
     parser.add_argument("--skip-gemini", action="store_true", help="Only download/probe audio; do not call Gemini.")
-    parser.add_argument("--no-cache", action="store_true", help="Do not create a Gemini cached system prompt.")
+    parser.add_argument(
+        "--cache-mode",
+        choices=["explicit", "implicit"],
+        default="explicit",
+        help=(
+            "explicit: create a Gemini cached-content object for the system prompt "
+            "(guaranteed discount + storage cost). implicit: send the system prompt "
+            "inline and rely on Gemini's automatic implicit prefix caching "
+            "(best-effort discount, no storage cost, no cache management)."
+        ),
+    )
+    parser.add_argument("--no-cache", action="store_true",
+                        help="Deprecated: same as --cache-mode implicit.")
     parser.add_argument("--delete-cache", action="store_true", help="Delete the Gemini cache after this run.")
     parser.add_argument(
         "--thinking-level",
-        choices=["low", "medium", "high", "minimal"],
-        default=DEFAULT_THINKING_LEVEL,
-        help="Gemini 3 thinking effort. Defaults to 'minimal' for the lowest reasoning setting.",
+        default=None,
+        help="Deprecated no-op: thinking is always disabled (thinking_budget=0).",
     )
     return parser.parse_args()
 
 
 if __name__ == "__main__":
-    final_df = run_batch(parse_args())
+    start_time = time.perf_counter()
+    final_df = asyncio.run(run_batch(parse_args()))
     if not final_df.empty:
         request_cost = final_df.get("estimated_cost_usd", pd.Series(dtype=float)).fillna(0).sum()
         cache_storage_cost = final_df.get("cache_storage_cost_usd", pd.Series(dtype=float)).fillna(0).sum()
@@ -1285,3 +1731,9 @@ if __name__ == "__main__":
         print(f"Estimated Gemini request cost USD: {request_cost:.6f}")
         print(f"Estimated Gemini cache storage cost USD: {cache_storage_cost:.6f}")
         print(f"Estimated total Gemini cost USD: {total_cost:.6f}")
+
+    end_time = time.perf_counter()
+    print(f"Total time: {end_time - start_time:.2f} seconds")
+
+
+    

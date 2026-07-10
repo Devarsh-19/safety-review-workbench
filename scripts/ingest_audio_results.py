@@ -16,13 +16,26 @@ Expected object shape:
     "flags": [{"intent": "...", "s": "RED", "conf": 0.91, "transcript_excerpt": "...", "segment_id": 1}]
   }
 
-Timestamps are converted from HH:MM:SS to seconds. Re-ingesting an existing
-s_id replaces its segments/flags but preserves review workflow state
-(review_status, speaker roles, reviewer columns).
+Timestamps are converted from HH:MM:SS to seconds.
+
+Duplicate protection (mirrors the chat ingester + pipeline/checkpoint.py):
+- A checkpoint file (logs/audio_ingest_checkpoint.json) records every s_id
+  already ingested; those sessions are skipped on later runs. Use --force to
+  re-ingest checkpointed sessions, --reset-checkpoint to start fresh.
+- Sessions whose review_status is no longer PENDING are never touched.
+- Re-ingesting a PENDING session refreshes segments and untouched LLM flags
+  only: MANUAL flags, amendments, confirmed and dismissed flags are preserved,
+  and incoming LLM flags that duplicate a kept (seg_id, intent) are skipped.
+
+Each session is written in its own transaction, so one bad session is
+reported and skipped without losing the rest of the run.
+
+CLEAN sessions with no flags are auto-submitted for L2 review as reviewer
+'LLM' (chat parity). Disable with --no-auto-submit.
 
 Usage:
   python scripts/ingest_audio_results.py path/to/file.json
-  python scripts/ingest_audio_results.py path/to/dir/
+  python scripts/ingest_audio_results.py path/to/dir/ [--force] [--no-auto-submit]
 """
 
 import argparse
@@ -34,7 +47,37 @@ from dotenv import load_dotenv
 load_dotenv()
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from store.audio_db import get_audio_connection, initialise_audio_db, AUDIO_DB_PATH  # noqa: E402
+from store.audio_db import (  # noqa: E402
+    get_audio_connection,
+    initialise_audio_db,
+    recompute_audio_session_verdict,
+    AUDIO_DB_PATH,
+)
+
+_CHECKPOINT_FILE = Path(__file__).resolve().parents[1] / "logs" / "audio_ingest_checkpoint.json"
+
+
+def load_audio_checkpoint() -> set[int]:
+    if not _CHECKPOINT_FILE.exists():
+        return set()
+    try:
+        data = json.loads(_CHECKPOINT_FILE.read_text(encoding="utf-8"))
+        return {int(s) for s in data.get("ingested_s_ids", [])}
+    except (json.JSONDecodeError, OSError, TypeError, ValueError):
+        return set()
+
+
+def save_audio_checkpoint(ingested_s_ids: set[int]) -> None:
+    _CHECKPOINT_FILE.parent.mkdir(parents=True, exist_ok=True)
+    _CHECKPOINT_FILE.write_text(
+        json.dumps({"ingested_s_ids": sorted(ingested_s_ids)}, indent=2),
+        encoding="utf-8",
+    )
+
+
+def clear_audio_checkpoint() -> None:
+    if _CHECKPOINT_FILE.exists():
+        _CHECKPOINT_FILE.unlink()
 
 
 def hms_to_seconds(value) -> float:
@@ -173,100 +216,152 @@ def localize_flag_span_to_segment(
     return localized_start, localized_end
 
 
-def ingest_session(conn, obj: dict) -> tuple[int, int, int]:
-    """Insert/replace one session object. Returns (s_id, n_segments, n_flags)."""
-    from engine.verdict_rules import get_db_verdict_for_flags, get_db_confidence_for_verdict
+def resolve_segment_ids(segments: list[dict]) -> None:
+    """Assign a collision-free seg_id to every segment (stored in '_seg_id').
 
+    audio_segments has PRIMARY KEY (s_id, seg_id); LLM output with missing or
+    repeated segment_ids must not abort the insert with an IntegrityError.
+    """
+    used: set[int] = set()
+    for seg in segments:
+        raw = seg.get("segment_id") or seg.get("seg_id")
+        try:
+            seg_id = int(raw) if raw is not None else 0
+        except (TypeError, ValueError):
+            seg_id = 0
+        if seg_id <= 0 or seg_id in used:
+            seg_id = max(used, default=0) + 1
+        used.add(seg_id)
+        seg["_seg_id"] = seg_id
+
+
+def parse_astrotalk_verdict(value) -> str | None:
+    """'CLEAN'/'FLAGGED' from the at_flag field; accepts 0/1, "0"/"1", bools."""
+    flagged = optional_bool(value)
+    if flagged is None:
+        return None
+    return "FLAGGED" if flagged else "CLEAN"
+
+
+def ingest_session(conn, obj: dict, auto_submit: bool = True) -> tuple[str, int, int]:
+    """Insert or refresh one session object. Returns (outcome, n_segments, n_flags).
+
+    outcome: 'inserted' | 'refreshed' | 'skipped' (session exists and is no
+    longer PENDING — reviewer work is never touched).
+    """
     s_id = int(obj["s_id"])
-    segments = obj.get("segments") or []
-    # Same verdict rules as the chat DB: SEVERE / FLAGGED / CLEAN from the
-    # intent codes, including flagged-combination escalations.
-    #
+    segments = [dict(seg) for seg in (obj.get("segments") or [])]
+    resolve_segment_ids(segments)
+
     # Flags may be top-level (flattened batch output) or nested inside
     # segments (raw Gemini JSON).  Support both shapes so either source
     # can be ingested without silent data loss.
-    flags = obj.get("flags") or []
+    flags = list(obj.get("flags") or [])
     if not flags and segments:
         for seg in segments:
-            seg_flags = seg.get("flags") or []
-            for sf in seg_flags:
+            for sf in seg.get("flags") or []:
                 sf = dict(sf)
-                sf.setdefault("segment_id", seg.get("segment_id") or seg.get("seg_id"))
+                sf.setdefault("segment_id", seg["_seg_id"])
                 sf.setdefault("speaker", seg.get("speaker"))
                 sf.setdefault("ts_start", seg.get("ts_start"))
                 sf.setdefault("ts_end", seg.get("ts_end"))
                 flags.append(sf)
-    intent_codes = [f.get("intent") for f in flags if f.get("intent")]
-    verdict    = get_db_verdict_for_flags(intent_codes)
-    confidence = get_db_confidence_for_verdict(verdict)
 
-    # Parse astrotalk verdict
-    astrotalk_val = obj.get("at_flag")
-    astrotalk_verdict = None
-    if astrotalk_val == 0:
-        astrotalk_verdict = 'CLEAN'
-    elif astrotalk_val == 1:
-        astrotalk_verdict = 'FLAGGED'
+    astrotalk_verdict = parse_astrotalk_verdict(obj.get("at_flag"))
     has_video = optional_bool(obj.get("has_video"))
     has_video_value = None if has_video is None else int(has_video)
+    duration = optional_seconds(
+        obj.get("audio_duration_seconds") or obj.get("duration_seconds")
+    )
 
     existing = conn.execute(
-        "SELECT s_id FROM audio_sessions WHERE s_id = ?", (s_id,)
+        "SELECT review_status FROM audio_sessions WHERE s_id = ?", (s_id,)
     ).fetchone()
+    if existing and existing["review_status"] != "PENDING":
+        # Chat parity: re-ingesting never clobbers submitted/reviewed/locked
+        # sessions or their flags.
+        return "skipped", 0, 0
+
+    kept_flag_keys: set[tuple[int | None, str | None]] = set()
     if existing:
-        # Refresh the LLM-derived columns, keep review workflow state.
-        # audio_url only overwrites when the new JSON provides one.
+        # Refresh the LLM-derived columns; keep review workflow state.
+        # audio_url/has_video/duration only overwrite when the new JSON
+        # provides a value.
         conn.execute(
             """UPDATE audio_sessions
-               SET lang = ?, pauses = ?, needs_review = ?, overall_verdict = ?,
-                   confidence_score = ?, astrotalk_verdict = COALESCE(?, astrotalk_verdict),
+               SET lang = ?, pauses = ?, needs_review = ?,
+                   astrotalk_verdict = COALESCE(?, astrotalk_verdict),
                    audio_url = COALESCE(?, audio_url),
-                   has_video = COALESCE(?, has_video)
+                   has_video = COALESCE(?, has_video),
+                   duration_seconds = COALESCE(?, duration_seconds)
                WHERE s_id = ?""",
             (obj.get("lang"), json.dumps(obj.get("long_pauses") or obj.get("pauses") or []),
-             1 if obj.get("review") else 0, verdict, confidence, astrotalk_verdict,
-             obj.get("audio_url"), has_video_value, s_id),
+             1 if obj.get("review") else 0, astrotalk_verdict,
+             obj.get("audio_url"), has_video_value, duration, s_id),
         )
-        conn.execute("DELETE FROM audio_flags WHERE s_id = ?", (s_id,))
+        # Replace only untouched LLM flags. MANUAL flags, amendments,
+        # confirmed and dismissed flags are reviewer work — keep them
+        # (chat parity: the chat ingester only de-dupe-inserts, never deletes).
+        conn.execute(
+            """DELETE FROM audio_flags
+               WHERE s_id = ?
+                 AND source = 'LLM'
+                 AND status = 'ACTIVE'
+                 AND parent_flag_id IS NULL
+                 AND flag_id NOT IN (
+                     SELECT parent_flag_id FROM audio_flags
+                     WHERE s_id = ? AND parent_flag_id IS NOT NULL
+                 )""",
+            (s_id, s_id),
+        )
+        kept_flag_keys = {
+            (r["seg_id"], r["intent"])
+            for r in conn.execute(
+                "SELECT seg_id, intent FROM audio_flags WHERE s_id = ?", (s_id,)
+            ).fetchall()
+        }
+        # Segments carry no reviewer state — safe to replace wholesale.
         conn.execute("DELETE FROM audio_segments WHERE s_id = ?", (s_id,))
     else:
         conn.execute(
             """INSERT INTO audio_sessions
-                   (s_id, lang, pauses, needs_review, overall_verdict, confidence_score, astrotalk_verdict, audio_url, has_video)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   (s_id, lang, pauses, needs_review, astrotalk_verdict, audio_url, has_video, duration_seconds)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
             (s_id, obj.get("lang"), json.dumps(obj.get("long_pauses") or obj.get("pauses") or []),
-             1 if obj.get("review") else 0, verdict, confidence, astrotalk_verdict, obj.get("audio_url"), has_video_value),
+             1 if obj.get("review") else 0, astrotalk_verdict, obj.get("audio_url"),
+             has_video_value, duration),
         )
 
     for seg in segments:
-        seg_id = int(seg.get("segment_id") or seg.get("seg_id") or 0)
         conn.execute(
             """INSERT INTO audio_segments (s_id, seg_id, ts_start, ts_end, speaker, tone)
                VALUES (?, ?, ?, ?, ?, ?)""",
-            (s_id, seg_id, hms_to_seconds(seg.get("ts_start")),
+            (s_id, seg["_seg_id"], hms_to_seconds(seg.get("ts_start")),
              hms_to_seconds(seg.get("ts_end")), seg.get("speaker"), seg.get("tone")),
         )
 
     n_flags = 0
     for flag in flags:
-        seg_id = flag.get("segment_id") or flag.get("seg_id")
+        raw_seg_id = flag.get("segment_id") or flag.get("seg_id")
         matched_segment = None
 
-        if seg_id is not None and segments:
+        if raw_seg_id is not None and segments:
             matched_segment = next(
                 (
                     seg for seg in segments
-                    if int(seg.get("segment_id") or seg.get("seg_id") or 0) == int(seg_id)
+                    if int(seg.get("segment_id") or seg.get("seg_id") or 0) == int(raw_seg_id)
+                    or seg["_seg_id"] == int(raw_seg_id)
                 ),
                 None,
             )
         if matched_segment is None and segments:
             matched_segment = choose_best_segment(flag, segments)
-            if matched_segment is not None:
-                seg_id = matched_segment.get("segment_id") or matched_segment.get("seg_id")
 
-        if seg_id is not None:
-            seg_id = int(seg_id)
+        seg_id = matched_segment["_seg_id"] if matched_segment is not None else (
+            int(raw_seg_id) if raw_seg_id is not None else None
+        )
+        if (seg_id, flag.get("intent")) in kept_flag_keys:
+            continue  # same LLM flag already exists (confirmed/amended) — don't duplicate
         flag_ts_start = optional_seconds(flag.get("ts_start"))
         flag_ts_end = optional_seconds(flag.get("ts_end"))
         flag_ts_start, flag_ts_end = localize_flag_span_to_segment(
@@ -282,12 +377,42 @@ def ingest_session(conn, obj: dict) -> tuple[int, int, int]:
              flag.get("conf"), flag.get("transcript_excerpt") or flag.get("transcript")),
         )
         n_flags += 1
-    return s_id, len(segments), n_flags
+
+    # Verdict from the flags now in the DB (respects amendments/dismissals) —
+    # same rules as the chat DB, including flagged-combination escalations.
+    verdict = recompute_audio_session_verdict(s_id, conn)
+
+    # Chat parity: a session with no flags at all is CLEAN and goes straight
+    # to the L2 queue as reviewer 'LLM' instead of clogging the L1 queue.
+    if auto_submit and verdict == "CLEAN":
+        remaining = conn.execute(
+            "SELECT COUNT(*) FROM audio_flags WHERE s_id = ?", (s_id,)
+        ).fetchone()[0]
+        if remaining == 0:
+            conn.execute(
+                """UPDATE audio_sessions
+                   SET review_status = 'SUBMITTED_FOR_REVIEW',
+                       submitted_by  = 'LLM',
+                       submitted_at  = datetime('now'),
+                       reviewer_id   = 'LLM',
+                       reviewer_note = 'Auto-submitted by LLM ingest: no flags',
+                       reviewed_at   = datetime('now')
+                   WHERE s_id = ? AND review_status = 'PENDING'""",
+                (s_id,),
+            )
+
+    return ("refreshed" if existing else "inserted"), len(segments), n_flags
 
 
 def main():
     parser = argparse.ArgumentParser(description="Ingest audio LLM results into the audio review DB.")
     parser.add_argument("path", help="JSON file or directory of .json files.")
+    parser.add_argument("--force", action="store_true",
+                        help="Re-ingest sessions already recorded in the checkpoint.")
+    parser.add_argument("--reset-checkpoint", action="store_true",
+                        help="Clear the checkpoint before ingesting.")
+    parser.add_argument("--no-auto-submit", action="store_true",
+                        help="Do not auto-submit CLEAN zero-flag sessions for L2 review.")
     args = parser.parse_args()
 
     src = Path(args.path)
@@ -296,22 +421,65 @@ def main():
         print(f"No .json files found at {src}")
         sys.exit(1)
 
+    if args.reset_checkpoint:
+        clear_audio_checkpoint()
+        print("Checkpoint cleared.")
+    ingested_ids = load_audio_checkpoint()
+
     initialise_audio_db()
     conn = get_audio_connection()
-    n_sessions = 0
+    counts = {"inserted": 0, "refreshed": 0, "skipped": 0}
+    n_checkpoint_skips = n_errors = 0
     try:
         for fp in files:
-            data = json.loads(fp.read_text(encoding="utf-8"))
+            try:
+                data = json.loads(fp.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError) as exc:
+                print(f"[ERROR] {fp.name}: unreadable JSON — {exc}")
+                n_errors += 1
+                continue
             objects = data if isinstance(data, list) else [data]
             for obj in objects:
-                s_id, n_seg, n_flag = ingest_session(conn, obj)
-                n_sessions += 1
-                print(f"  s_id {s_id}: {n_seg} segments, {n_flag} flags  ({fp.name})")
-        conn.commit()
+                try:
+                    s_id = int(obj["s_id"])
+                except (KeyError, TypeError, ValueError):
+                    print(f"[ERROR] {fp.name}: object without a valid s_id — skipped")
+                    n_errors += 1
+                    continue
+
+                if s_id in ingested_ids and not args.force:
+                    n_checkpoint_skips += 1
+                    continue
+
+                try:
+                    # One transaction per session: a bad session rolls back
+                    # alone and the rest of the run is preserved.
+                    with conn:
+                        outcome, n_seg, n_flag = ingest_session(
+                            conn, obj, auto_submit=not args.no_auto_submit
+                        )
+                except Exception as exc:
+                    print(f"[ERROR] s_id {s_id}: {type(exc).__name__}: {exc}  ({fp.name})")
+                    n_errors += 1
+                    continue
+
+                counts[outcome] += 1
+                ingested_ids.add(s_id)
+                if outcome == "skipped":
+                    print(f"  s_id {s_id}: already reviewed — untouched  ({fp.name})")
+                else:
+                    print(f"  s_id {s_id}: {outcome}, {n_seg} segments, {n_flag} flags  ({fp.name})")
+            save_audio_checkpoint(ingested_ids)
     finally:
         conn.close()
+        save_audio_checkpoint(ingested_ids)
 
-    print(f"\nIngested {n_sessions} session(s) into {AUDIO_DB_PATH}")
+    print(
+        f"\nDone: {counts['inserted']} inserted, {counts['refreshed']} refreshed, "
+        f"{counts['skipped']} already-reviewed, {n_checkpoint_skips} checkpoint skips, "
+        f"{n_errors} errors -> {AUDIO_DB_PATH}"
+    )
+    print(f"Checkpoint: {_CHECKPOINT_FILE}")
 
 
 if __name__ == "__main__":
