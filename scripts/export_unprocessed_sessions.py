@@ -2,11 +2,12 @@
 export_unprocessed_sessions.py
 
 Read-only. Pulls the sessions whose VERDICT is unprocessed straight from the DB
-(no input CSV). A session's verdict is "unprocessed" when overall_verdict has
-not been assigned yet — NULL or blank. (Assigned verdicts are CLEAN / FLAGGED /
-SEVERE.)
+(no input CSV). "Unprocessed" matches the UI/API definition exactly — the
+literal verdict string 'UNPROCESSED' (what the API counts as count_unprocessed
+and VerdictBadge renders as the grey "Unprocessed" badge). A session starts at
+'UNPROCESSED' and moves to CLEAN / FLAGGED / SEVERE once classified.
 
-    Target: overall_verdict IS NULL OR TRIM(overall_verdict) = ''
+    Target: overall_verdict = 'UNPROCESSED'
 
   * with --out   : writes those sessions' full chat in the LLM-pipeline INPUT
                    CSV format (session_id, message_seq, sender, message_text,
@@ -37,10 +38,14 @@ from store.db import get_connection  # noqa: E402
 # Input CSV format expected by ingest_llm_sessions.py / the batch runner.
 CSV_COLUMNS = ["session_id", "message_seq", "sender", "message_text", "is_automated_message"]
 
-# Subquery defining "verdict is unprocessed" (no verdict assigned yet).
+# Subquery defining "verdict is unprocessed".
+# Matches the UI/API definition exactly: overall_verdict = 'UNPROCESSED'
+# (the literal verdict string the API counts and VerdictBadge renders as the
+# grey "Unprocessed" badge). NOT the same as NULL/blank — a session starts at
+# 'UNPROCESSED' and moves to CLEAN/FLAGGED/SEVERE once classified.
 _TARGET_SUBQUERY = """
     SELECT session_id FROM sessions
-    WHERE overall_verdict IS NULL OR TRIM(overall_verdict) = ''
+    WHERE overall_verdict = 'UNPROCESSED'
 """
 
 
