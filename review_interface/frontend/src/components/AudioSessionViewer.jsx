@@ -842,7 +842,7 @@ export default function AudioSessionViewer({ sId, sessionList, reviewerName, rev
                   disabled={busy}
                   onClick={() => {
                     // eslint-disable-next-line no-alert
-                    if (!window.confirm(`Lock session ${sId}? This is final and cannot be undone.`)) return;
+                    if (!window.confirm(`Lock session ${sId}? This freezes all flags and the review decision. An L2 reviewer can unlock it later if needed.`)) return;
                     doAction(() => lockAudioSession(sId, reviewerName));
                   }}
                   style={{

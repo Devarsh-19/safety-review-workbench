@@ -397,10 +397,7 @@ export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelect
         {/* L2 reviewer progress — assignment-based breakdown per reviewer,
             collapsible; identical visuals to the chat queue (SessionQueue.jsx) */}
         {reviewerRole === 'L2' && stats?.reviewer_stats?.length > 0 && (
-          <div style={{
-            background: C.bgSurface, border: `1px solid ${C.border}`,
-            borderRadius: 6, padding: '10px 16px', marginBottom: 16,
-          }}>
+          <div style={{ marginBottom: 16 }}>
             <button
               onClick={() => setShowReviewerProgress((v) => !v)}
               style={{
