@@ -115,6 +115,8 @@ Name: Sexually Inappropriate Content (General)
 Severity: Red
 Description: Sexually inappropriate content that does not fit more specific NSFW sub-categories.
 Examples: Sharing or requesting nude/explicit images; wearing revealing attire on video calls; sending adult GIFs/stickers; "tere g mai toad sakta hu" (vulgar sexual reference)
+
+Do not tag these:-
 Counter-examples: Relationship advice in astrological context; cultural terms of endearment; discussion of marital compatibility or romantic timing in horoscope
 
 ---
@@ -124,6 +126,8 @@ Name: Explicit Sexual Content in Consultation
 Severity: Red
 Description: Consultant or user is descriptive about sexual or physical acts during a consultation.
 Examples: Describing sexual acts in detail; "Kya aap apne pati ke saath bed par kya karte ho?"; "Mera ling size batao kundli se"; "tere sath marwani hai"; "apni marwane ke liye"
+
+Do not tag these:-
 Counter-examples: General romantic compatibility questions; astrological passionate relationships; asking about timing for conceiving a child; discussing physical relationship compatibility in astrological context (kundli, yog, dosha, transit); "physical ka yog ban raha hai"; "physical rehna hai" in marriage/relationship astrology context; consultant explaining physical compatibility from birth chart analysis
 
 ---
@@ -133,6 +137,8 @@ Name: Grooming, Romantic Solicitation or Roleplay
 Severity: Red
 Description: Consultant attempting to establish a romantic or sexual relationship with a user under the pretense of consultation. Requires pattern across messages.
 Examples: "I feel a special connection with you beyond astrology"; "Tum mujhe bahut achhe lagte ho, kundli ke bahar bhi"; persistent flirtation; "I miss you"; "becoz I miss u"
+
+Do not tag these:-
 Counter-examples: Astrological romantic predictions; one-off caring statements; "Take care" or "God bless you" closing messages; psychic/tarot consultants using terms like "babe", "hun", "love", "sweetheart" as professional warmth; consultants saying "I'm seeing...", "your energy shows..." in reading context; friendly rapport-building in English-language psychic sessions
 
 ---
@@ -142,6 +148,8 @@ Name: Inappropriate Questions About Appearance or Body private parts
 Severity: Amber
 Description: Asking users about their physical appearance, body, or sexual preferences.
 Examples: "What do you look like?"; "Aapka figure kaisa hai?"; "Photo bhejo apni dikhao"
+
+Do not tag these:-
 Counter-examples: Photo for kundali/palm reading; health measurements for medical issue; asking for birth chart details
 
 ---
@@ -151,6 +159,8 @@ Name: Content Involving Minors -- Sexual or Intimate
 Severity: Red (SEVERE override)
 Description: Any content involving sexual or intimate acts with or about minors (under 18). This is the HIGHEST priority category. Flag at confidence >= 0.2 (lower threshold than other categories).
 Examples: Any sexual reference involving a person under 18; grooming language directed at a minor; requesting images of minors in sexual context
+
+Do not tag these:-
 Counter-examples: Legitimate horoscope readings for children (education, career); discussions about PREGNANCY, fertility, or conceiving a baby (e.g. "baby nahi ho raha", "trying for a baby") are NOT CSAM_RISK.
 
 ---
@@ -159,7 +169,9 @@ Intent: FINANCIAL_SOLICITATION
 Name: Unauthorized Financial Solicitation
 Severity: Red
 Description: Consultant asks user for money outside the official AstroTalk payment system.
-Examples: "UPI number bhejo"; "5000 rupees bhejo, powerful totka karunga"; "Donate to my temple for better results"
+Examples: "UPI number bhejo"; "5000 rupees bhejo, powerful totka karunga"; "10000 me aapka kaam ho jaega"
+
+Do not tag these:-
 Counter-examples: Discussing AstroTalk's official payment or recharge process; mentioning remedy item costs in general terms ("a rudraksha costs around 500"); "Please recharge to continue the session"
 
 ---
@@ -169,6 +181,8 @@ Name: Identity Fraud or Impersonation
 Severity: Red
 Description: Consultant claims to be someone else or asks for sensitive personal/financial info.
 Examples: "Main Income Tax officer hoon"; "Aadhaar number ya bank details bhejo"
+
+Do not tag these:-
 Counter-examples: Asking for name, date of birth, or birth place for horoscope calculation; verifying user identity within AstroTalk platform
 
 ---
@@ -178,6 +192,8 @@ Name: Abusive or Profane Language
 Severity: Red
 Description: Use of abusive, vulgar, or highly disrespectful language. Flag EVERY instance -- even single-word profanity.
 Examples: "bc", "mc", "bsdk", "chutiya", "madarchod", "behenchod", "randi", "harami", "gand fat gayi", "lund", "bhosdi ke", "lavda", "suar ki aulad", "kamine", "haramzada"
+
+Do not tag these:-
 Counter-examples: "Pagal hai kya" used playfully in friendly banter; "abbe yaar" as casual friendly address without hostility; normal mild words like bewakoof, ullu, stupid
 
 ---
@@ -186,18 +202,11 @@ Intent: HATE_SPEECH
 Name: Hate Speech or Discrimination
 Severity: Red
 Description: Content promoting hatred, hostility, or discrimination based on religion, caste, gender, community. Also includes sustained aggressive belittling targeting a person's worth, dignity, or status.
-Examples: "Muslims/Christians/Hindus are bad"; "Lower caste logon ki kundli weak hoti hai"; sustained hostile taunts: "ego par lag gayi"; "garib ho jayega"; "bada tu salman khan hai"; gender-based hostility
+Examples: "Muslims/Christians/Hindus are bad"; "Lower caste logon ki kundli weak hoti hai"; gender-based hostility
 DECISION GUIDE — HATE_SPEECH vs ABUSIVE_LANGUAGE: Contains profanity or slurs → ABUSIVE_LANGUAGE; Targets an identity group → HATE_SPEECH; Sustained aggressive taunting WITHOUT profanity → HATE_SPEECH
+
+Do not tag these:-
 Counter-examples: Expressing personal frustration ("main bahut pareshan hoon"); single casual remarks like "natak mat karo", "sunti kyu nahi" without sustained hostility; astrological statements about planetary effects
-
----
-
-Intent: FAKE_REMEDIES
-Name: Fake or Harmful Remedies
-Severity: Red
-Description: Promising guaranteed results or giving dangerous/illegal remedies ONLY when they involve risk of self-harm, violence, or dangerous black magic.
-Examples: "Black magic karwa doonga" involving harm to others; "Suicide karne ka upay kar do"; "Drink this poisonous mixture for 11 days"
-Counter-examples: Normal unrealistic promises like "100% guarantee, sirf 11 din mein shaadi ho jayegi"; "Guaranteed result in 3 days"; standard Vedic remedies with strong claims but no harm
 
 ---
 
@@ -206,6 +215,8 @@ Name: False or Over-Optimistic Assurance
 Severity: Yellow
 Description: Giving exaggerated, overly optimistic, or misleading hope about remedies or solutions without making absolute guarantees or involving harm.
 Examples: "Bahut logon ki problem solve ho gayi"; "Miraculous results"; "Life changing remedy"; "Zaroor fayda hoga"; "Sab theek ho jayega"; "Paisa vasool remedy"; "Mere kai clients ki shaadi ho gayi"
+
+Do not tag these:-
 Counter-examples: Neutral advice like "try kar sakte hain" or "results vary karte hain"; absolute guarantees involving self-harm or violence which should go to FAKE_REMEDIES; standard hedging language like "this may help"
 
 ---
@@ -215,6 +226,8 @@ Name: Unauthorized Medical Advice
 Severity: Red
 Description: Giving medical diagnosis or advising against professional medical care.
 Examples: "Doctor mat jaao, mera upay se theek ho jayega"; "Medicine band kar do"; "You have diabetes, I can see from your chart"
+
+Do not tag these:-
 Counter-examples: "Aapki health ke liye achha samay aa raha hai" (astrological health prediction); suggesting Ayurvedic supplements as complementary; "Please consult a doctor also"
 
 ---
@@ -224,6 +237,8 @@ Name: Self-Harm or Suicide Related Content
 Severity: Red
 Description: Content encouraging or providing advice on self-harm or suicide.
 Examples: "Suicide kar lo, better hai"; "Life mein kuch nahi hai, end kar do"; encouraging someone to hurt themselves
+
+Do not tag these:-
 Counter-examples: User expressing sadness or distress ("mera mann bahut dukhi hai"); consultant offering emotional support; discussing difficult planetary periods causing hardship
 
 ---
@@ -233,6 +248,8 @@ Name: Promotion of Violence
 Severity: Red
 Description: Content promoting or encouraging violent acts, including physical threats.
 Examples: "Apne pati ko maar do"; "Enemy ko physical harm karne ka upay"; "tere ghar aa kar na kar lu"; "teri g na tod du"
+
+Do not tag these:-
 Counter-examples: "Exam maar do" (ace the exam — figurative use); astrological predictions about conflict periods; "ladai jhagda hoga" as astrological forecast
 
 ---
@@ -242,6 +259,8 @@ Name: Instigation or Provocation
 Severity: Red
 Description: Inciting user to fight, argue, or take harmful actions against others.
 Examples: "Apni saas se ladai karo"; "Pati ko threaten karo"; "Unko sabak sikhao"
+
+Do not tag these:-
 Counter-examples: Advising someone to have a calm conversation; suggesting relationship counseling; "Apne rights ke liye khade ho" (standing up for rights without inciting violence)
 
 ---
@@ -251,6 +270,8 @@ Name: Off-Platform Solicitation
 Severity: Amber
 Description: Asking user to move conversation to WhatsApp, Telegram, phone call, or any platform outside AstroTalk. Even single-letter shorthand counts when clearly referencing WhatsApp.
 Examples: "Mujhe WhatsApp pe message karo"; "Call karo is number pe"; "w kar"; "kar w"; "W kar fatafat"; "unblock in W"; "call me"
+
+Do not tag these:-
 Counter-examples: "w" inside normal English words like "with" or "want"; discussing session on AstroTalk app; mentioning phone in astrological prediction context
 
 ---
@@ -260,6 +281,8 @@ Name: Excessive Personal Data Collection
 Severity: Amber
 Description: Asking for sensitive personal information not needed for astrology.
 Examples: "Aadhaar card bhejo"; "Bank account details do"; "Password batao"; "phone number do"; "number bhejo"
+
+Do not tag these:-
 Counter-examples: Asking for date of birth, time of birth, or place of birth (standard for astrology); asking for name or gotra for kundali preparation
 
 ---
@@ -269,6 +292,8 @@ Name: Fear Manipulation or Scare Tactics
 Severity: Amber
 Description: Using excessive fear or doom predictions to pressure user into paid remedies.
 Examples: "Agar abhi upay nahi kiya toh bahut badi catastrophe ho jayegi"; "Kaal sarpa dosha hai, turant puja karwao Rs 5100"; "Manglik ho, bina remedy shaadi nahi hogi"
+
+Do not tag these:-
 Counter-examples: Legitimate astrological warnings about difficult planetary transits; mentioning Sade Sati or Rahu Mahadasha effects as general prediction; suggesting free remedies without pressure
 
 ---
@@ -278,6 +303,8 @@ Name: Competitor Promotion
 Severity: Amber
 Description: Promoting other astrologers, apps, websites, or services.
 Examples: "Mere guru ji ke app pe jaao"; "Is website pe better reading milegi"; "XYZ astrologer se baat karo, bahut achhe hai"
+
+Do not tag these:-
 Counter-examples: Referring to general astrological concepts or scriptures; mentioning historical astrologers in educational context
 
 === END INTENT TAXONOMY ===
