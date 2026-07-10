@@ -1191,8 +1191,10 @@ def audio_dismiss_flag(flag_id: int, body: DismissFlagRequest):
             _reject_if_audio_locked(_audio_session_or_404(s_id))
             original_flag_id = target["parent_flag_id"] if target["parent_flag_id"] else flag_id
 
+            # Hard delete, chat parity: the original and any amendment go
+            # away entirely; the review log keeps the audit trail.
             conn.execute(
-                "UPDATE audio_flags SET status = 'DISMISSED' WHERE flag_id = ? OR parent_flag_id = ?",
+                "DELETE FROM audio_flags WHERE flag_id = ? OR parent_flag_id = ?",
                 (original_flag_id, original_flag_id),
             )
 
@@ -1200,45 +1202,6 @@ def audio_dismiss_flag(flag_id: int, body: DismissFlagRequest):
                 """INSERT INTO audio_review_log (s_id, flag_id, action, reviewer_id, note)
                    VALUES (?, ?, 'DISMISSED', ?, ?)""",
                 (s_id, original_flag_id, body.reviewer_id, body.note),
-            )
-            recompute_audio_session_verdict(s_id, conn)
-        return {"success": True}
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
-    finally:
-        conn.close()
-
-class UndismissFlagRequest(BaseModel):
-    reviewer_id: str
-
-@app.post("/audio/flags/{flag_id}/undismiss")
-def audio_undismiss_flag(flag_id: int, body: UndismissFlagRequest):
-    """Restore a dismissed flag back to ACTIVE."""
-    conn = get_audio_connection()
-    try:
-        with conn:
-            target = conn.execute(
-                "SELECT flag_id, s_id, parent_flag_id FROM audio_flags WHERE flag_id = ?",
-                (flag_id,),
-            ).fetchone()
-            if target is None:
-                raise HTTPException(status_code=404, detail=f"Audio flag {flag_id} not found")
-
-            s_id = target["s_id"]
-            _reject_if_audio_locked(_audio_session_or_404(s_id))
-            original_flag_id = target["parent_flag_id"] if target["parent_flag_id"] else flag_id
-
-            conn.execute(
-                "UPDATE audio_flags SET status = 'ACTIVE' WHERE flag_id = ? OR parent_flag_id = ?",
-                (original_flag_id, original_flag_id),
-            )
-
-            conn.execute(
-                """INSERT INTO audio_review_log (s_id, flag_id, action, reviewer_id)
-                   VALUES (?, ?, 'UNDISMISSED', ?)""",
-                (s_id, original_flag_id, body.reviewer_id),
             )
             recompute_audio_session_verdict(s_id, conn)
         return {"success": True}
@@ -1334,8 +1297,10 @@ def audio_submit(s_id: int, body: SubmitRequest):
     if detail["flags"] and not (detail["session"]["speaker1_role"] and detail["session"]["speaker2_role"]):
         raise HTTPException(status_code=400,
                             detail="Assign speaker roles (astrologer/user) before submitting")
-    # The L1 reviewer must rate the whole session's risk before it can go to L2.
-    if not detail["session"].get("manual_risk_level"):
+    # The L1 reviewer must rate the whole session's risk before it can go to
+    # L2 — but only when flags remain. A session whose flags were all
+    # dismissed (deleted) is clean and can be submitted directly.
+    if detail["flags"] and not detail["session"].get("manual_risk_level"):
         raise HTTPException(status_code=400,
                             detail="Set the session risk rating (high/medium/low) before submitting")
     # Same gate as chat: every active flag must be actioned (confirmed after
