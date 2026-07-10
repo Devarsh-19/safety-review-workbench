@@ -1043,7 +1043,7 @@ def audio_speaker_roles(s_id: int, body: SpeakerRolesRequest):
     if detail["session"]["review_status"] == "LOCKED":
         raise HTTPException(status_code=400, detail="Session is locked — roles can no longer be changed")
     try:
-        set_speaker_roles(s_id, body.speaker1_role, body.speaker2_role)
+        set_speaker_roles(s_id, body.speaker1_role, body.speaker2_role, body.reviewer_id)
         return {"success": True, "speaker1_role": body.speaker1_role,
                 "speaker2_role": body.speaker2_role}
     except ValueError as exc:
@@ -1367,7 +1367,7 @@ def audio_lock(s_id: int, body: LockRequest):
 def audio_unlock(s_id: int, body: LockRequest):
     _require_l2(body.reviewer_id, "unlock sessions")
     try:
-        unlock_audio_session(s_id)
+        unlock_audio_session(s_id, body.reviewer_id)
         return {"success": True}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))

@@ -20,9 +20,16 @@ SESSION_RISKS = ("HIGH", "MEDIUM", "LOW")
 
 
 def get_audio_connection() -> sqlite3.Connection:
-    conn = sqlite3.connect(AUDIO_DB_PATH)
+    # timeout + WAL + busy_timeout: many reviewers hit the API concurrently
+    # from different laptops. WAL lets readers and the writer proceed in
+    # parallel; busy_timeout makes a second writer wait instead of failing
+    # with "database is locked".
+    conn = sqlite3.connect(AUDIO_DB_PATH, timeout=15)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA busy_timeout = 15000")
+    conn.execute("PRAGMA synchronous = NORMAL")
     return conn
 
 
@@ -263,7 +270,8 @@ def get_audio_flag_summary(s_id: int) -> dict:
     }
 
 
-def set_speaker_roles(s_id: int, speaker1_role: str, speaker2_role: str) -> None:
+def set_speaker_roles(s_id: int, speaker1_role: str, speaker2_role: str,
+                      reviewer_id: str = None) -> None:
     """Persist the reviewer's speaker->role assignment. Roles must be opposite."""
     if speaker1_role not in SPEAKER_ROLES or speaker2_role not in SPEAKER_ROLES:
         raise ValueError(f"Roles must be one of {SPEAKER_ROLES}")
@@ -273,6 +281,11 @@ def set_speaker_roles(s_id: int, speaker1_role: str, speaker2_role: str) -> None
         conn.execute(
             "UPDATE audio_sessions SET speaker1_role = ?, speaker2_role = ? WHERE s_id = ?",
             (speaker1_role, speaker2_role, s_id),
+        )
+        conn.execute(
+            """INSERT INTO audio_review_log (s_id, action, reviewer_id, note)
+               VALUES (?, 'SET_SPEAKER_ROLES', ?, ?)""",
+            (s_id, reviewer_id, f"speaker1={speaker1_role}, speaker2={speaker2_role}"),
         )
 
 
@@ -304,6 +317,11 @@ def submit_audio_session(s_id: int, reviewer_id: str, note: str = None) -> None:
                WHERE s_id = ?""",
             (reviewer_id, reviewer_id, note, s_id),
         )
+        conn.execute(
+            """INSERT INTO audio_review_log (s_id, action, reviewer_id, note)
+               VALUES (?, 'SUBMIT', ?, ?)""",
+            (s_id, reviewer_id, note or ""),
+        )
 
 
 def lock_audio_session(s_id: int, reviewer_id: str) -> None:
@@ -316,9 +334,14 @@ def lock_audio_session(s_id: int, reviewer_id: str) -> None:
                WHERE s_id = ?""",
             (reviewer_id, s_id),
         )
+        conn.execute(
+            """INSERT INTO audio_review_log (s_id, action, reviewer_id, note)
+               VALUES (?, 'LOCK', ?, '')""",
+            (s_id, reviewer_id),
+        )
 
 
-def unlock_audio_session(s_id: int) -> None:
+def unlock_audio_session(s_id: int, reviewer_id: str = None) -> None:
     # Same transition as the chat DB: unlock lands on REVIEWED, not back on
     # SUBMITTED_FOR_REVIEW (see store/db.py unlock_session).
     with get_audio_connection() as conn:
@@ -329,4 +352,9 @@ def unlock_audio_session(s_id: int) -> None:
                    locked_at     = NULL
                WHERE s_id = ?""",
             (s_id,),
+        )
+        conn.execute(
+            """INSERT INTO audio_review_log (s_id, action, reviewer_id, note)
+               VALUES (?, 'UNLOCK', ?, '')""",
+            (s_id, reviewer_id),
         )
