@@ -6,7 +6,7 @@ import StatusBadge from './StatusBadge';
 import VerdictBadge from './VerdictBadge';
 import LoadingSpinner from './LoadingSpinner';
 import HasVideoBadge from './HasVideoBadge';
-import { getAudioSessions, getAudioStats, lockAudioSession } from '../api';
+import { getAudioSessions, getAudioStats, lockAudioSession, getAudioViolationStats } from '../api';
 
 const PAGE_SIZE = 50;
 
@@ -26,6 +26,31 @@ const STATUS_FILTERS = [
   { value: 'LOCKED', label: 'Locked' },
   { value: 'REVIEWED', label: 'Reviewed (unlocked)' },
 ];
+
+// Bar colours for the violation heatmap — same palette as the chat queue
+// (SessionQueue.jsx CATEGORY_COLORS) so both dashboards read identically.
+const CATEGORY_COLORS = {
+  OFF_PLATFORM_SOLICITATION:   '#0F6E56',
+  NSFW:                        '#A32D2D',
+  NSFW_EXPLICIT:               '#A32D2D',
+  NSFW_GROOMING:               '#A32D2D',
+  NSFW_APPEARANCE:             '#854F0B',
+  CSAM_RISK:                   '#6B0000',
+  FEAR_MANIPULATION:           '#854F0B',
+  FINANCIAL_SOLICITATION:      '#854F0B',
+  PERSONAL_DATA_COLLECTION:    '#185FA5',
+  ABUSIVE_LANGUAGE:            '#A32D2D',
+  HATE_SPEECH:                 '#A32D2D',
+  IDENTITY_FRAUD:              '#185FA5',
+  FAKE_REMEDIES:               '#854F0B',
+  UNAUTHORIZED_MEDICAL_ADVICE: '#3B6D11',
+  SELF_HARM:                   '#6B0000',
+  VIOLENCE:                    '#A32D2D',
+  INSTIGATION:                 '#8A2BE2',
+  COMPETITOR_PROMOTION:        '#6B6860',
+  EXTERNAL_MEDIA_CONTENT:      '#185FA5',
+  OTHER:                       '#6B6860',
+};
 
 const EMPTY_FILTERS = {
   search: '',
@@ -63,6 +88,24 @@ export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelect
   // Monotonic id per request — a response only lands if it is still the
   // latest one, so slow/out-of-order responses can't overwrite fresh rows.
   const requestIdRef = useRef(0);
+
+  // Violation heatmap — collapsible, fetched on first open (chat parity)
+  const [showHeatmap, setShowHeatmap] = useState(false);
+  const [heatmapData, setHeatmapData] = useState([]);
+  const [loadingHeatmap, setLoadingHeatmap] = useState(false);
+
+  const handleToggleHeatmap = () => {
+    const next = !showHeatmap;
+    setShowHeatmap(next);
+    if (next) {
+      setLoadingHeatmap(true);
+      getAudioViolationStats()
+        .then((data) => { setHeatmapData(data); setLoadingHeatmap(false); })
+        .catch(() => setLoadingHeatmap(false));
+    }
+  };
+
+  const heatmapMax = heatmapData.length > 0 ? Math.max(...heatmapData.map((d) => d.count)) : 1;
 
   // Debounce every filter control: query 300ms after the user stops typing.
   useEffect(() => {
@@ -333,7 +376,72 @@ export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelect
               </div>
             </div>
           ))}
+          <div style={{
+            display: 'flex', alignItems: 'center', padding: '0 20px',
+            flexShrink: 0, borderLeft: `1px solid ${C.border}`,
+          }}>
+            <span
+              onClick={handleToggleHeatmap}
+              style={{ fontSize: 11, fontFamily: MONO, color: C.accent, cursor: 'pointer', whiteSpace: 'nowrap' }}
+            >
+              Violation Breakdown {showHeatmap ? '▴' : '▾'}
+            </span>
+          </div>
         </div>
+
+        {/* Violation heatmap — collapsible (chat parity: SessionQueue.jsx) */}
+        {showHeatmap && (
+          <div style={{
+            background: C.bgSurface, border: `1px solid ${C.border}`,
+            borderRadius: 6, padding: '16px 20px', marginBottom: 16,
+          }}>
+            {loadingHeatmap ? (
+              <div style={{
+                display: 'flex', alignItems: 'center', gap: 10,
+                color: C.textSecondary, fontSize: 13,
+              }}>
+                <LoadingSpinner size={16} /> Loading…
+              </div>
+            ) : heatmapData.length === 0 ? (
+              <div style={{ fontSize: 13, color: C.textSecondary, fontStyle: 'italic', textAlign: 'center' }}>
+                No violation data yet.
+              </div>
+            ) : (
+              <div style={{
+                display: 'flex', flexDirection: 'column', gap: 4,
+                maxHeight: '45vh', overflowY: 'auto',
+              }}>
+                {heatmapData.map((item) => (
+                  <div key={item.category_code} style={{ display: 'flex', alignItems: 'center', height: 32 }}>
+                    <span style={{
+                      fontSize: 13, fontFamily: MONO, color: C.textPrimary,
+                      width: 260, flexShrink: 0,
+                      overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                    }}>
+                      {item.category_code}
+                    </span>
+                    <div style={{
+                      flex: 1, height: 8, background: C.border,
+                      borderRadius: 4, margin: '0 12px', position: 'relative',
+                    }}>
+                      <div style={{
+                        height: '100%', borderRadius: 4,
+                        width: `${(item.count / heatmapMax) * 100}%`,
+                        background: CATEGORY_COLORS[item.category_code] ?? C.textSecondary,
+                      }} />
+                    </div>
+                    <span style={{
+                      fontSize: 13, fontFamily: MONO, color: C.textSecondary,
+                      minWidth: 32, textAlign: 'right',
+                    }}>
+                      {item.count}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
 
         {/* Filters live in the table header (one control per column). This bar
             only hosts the reset action so active filters are easy to back out of. */}

@@ -16,6 +16,7 @@ AUDIO_DB_PATH = str(_PROJECT_ROOT / os.getenv("AUDIO_DB_PATH", "store/audio_revi
 _SCHEMA_PATH = Path(__file__).parent / "audio_schema.sql"
 
 SPEAKER_ROLES = ("ASTROLOGER", "USER")
+SESSION_RISKS = ("HIGH", "MEDIUM", "LOW")
 
 
 def get_audio_connection() -> sqlite3.Connection:
@@ -45,6 +46,7 @@ def initialise_audio_db() -> None:
         "ALTER TABLE audio_flags ADD COLUMN confirmed_at TEXT",
         "ALTER TABLE audio_flags ADD COLUMN created_by TEXT",           # reviewer who made an amendment
         "ALTER TABLE audio_sessions ADD COLUMN duration_seconds REAL",  # real audio duration from the pipeline (ffprobe)
+        "ALTER TABLE audio_sessions ADD COLUMN manual_risk_level TEXT", # L1's whole-session risk rating: HIGH / MEDIUM / LOW
     ]
     with get_audio_connection() as conn:
         for migration in migrations:
@@ -137,13 +139,19 @@ def fetch_audio_sessions_page(
         where.append("s.astrotalk_verdict = ?"); params.append(astrotalk_verdict)
     where_sql = " AND ".join(where)
 
-    # flag_count excludes DISMISSED rows so it matches the chat DB, where a
-    # dismissed flag is hard-deleted and disappears from the queue count.
+    # flag_count counts ACTIVE flags only, matching the viewer and the submit
+    # gate: DISMISSED rows are excluded (chat parity — chat hard-deletes them),
+    # and originals that have an amendment are excluded so an edited flag
+    # counts once (the amendment row), not twice.
     base = f"""
         FROM audio_sessions s
         LEFT JOIN (
             SELECT s_id, COUNT(*) AS flag_count FROM audio_flags
-            WHERE status != 'DISMISSED' OR status IS NULL
+            WHERE (status != 'DISMISSED' OR status IS NULL)
+              AND flag_id NOT IN (
+                  SELECT parent_flag_id FROM audio_flags
+                  WHERE parent_flag_id IS NOT NULL
+              )
             GROUP BY s_id
         ) fc ON fc.s_id = s.s_id
         LEFT JOIN (
@@ -265,6 +273,17 @@ def set_speaker_roles(s_id: int, speaker1_role: str, speaker2_role: str) -> None
         conn.execute(
             "UPDATE audio_sessions SET speaker1_role = ?, speaker2_role = ? WHERE s_id = ?",
             (speaker1_role, speaker2_role, s_id),
+        )
+
+
+def set_audio_session_risk(s_id: int, risk: str) -> None:
+    """Persist the L1 reviewer's whole-session risk rating."""
+    if risk not in SESSION_RISKS:
+        raise ValueError(f"Risk must be one of {SESSION_RISKS}")
+    with get_audio_connection() as conn:
+        conn.execute(
+            "UPDATE audio_sessions SET manual_risk_level = ? WHERE s_id = ?",
+            (risk, s_id),
         )
 
 

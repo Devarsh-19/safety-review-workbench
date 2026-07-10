@@ -45,6 +45,7 @@ from store.audio_db import (
     fetch_audio_session_detail,
     set_speaker_roles,
     submit_audio_session,
+    set_audio_session_risk,
     lock_audio_session,
     unlock_audio_session,
     recompute_audio_session_verdict,
@@ -175,6 +176,11 @@ class AmendAudioFlagRequest(BaseModel):
     intent: str
     severity: str
     reasoning: str = ""
+    reviewer_id: str
+
+
+class SessionRiskRequest(BaseModel):
+    risk: str                   # 'HIGH' | 'MEDIUM' | 'LOW'
     reviewer_id: str
 
 
@@ -957,6 +963,33 @@ def audio_stats(
         return result
 
 
+@app.get("/audio/stats/violations")
+def audio_violation_stats():
+    """Violation breakdown for the audio queue heatmap — mirrors
+    /stats/violations. Counts distinct non-clean sessions per intent,
+    over active flags only (amendments replace their originals, and
+    DISMISSED flags don't count — unlike chat, audio keeps them)."""
+    try:
+        with get_audio_connection() as conn:
+            rows = conn.execute("""
+                SELECT f.intent AS category_code, COUNT(DISTINCT f.s_id) AS count
+                FROM audio_flags f
+                JOIN audio_sessions s ON s.s_id = f.s_id
+                WHERE s.overall_verdict != 'CLEAN'
+                  AND f.intent IS NOT NULL
+                  AND (f.status IS NULL OR f.status != 'DISMISSED')
+                  AND f.flag_id NOT IN (
+                      SELECT parent_flag_id FROM audio_flags
+                      WHERE parent_flag_id IS NOT NULL
+                  )
+                GROUP BY f.intent
+                ORDER BY count DESC
+            """).fetchall()
+        return [dict(row) for row in rows]
+    except Exception:
+        return []
+
+
 @app.get("/audio/sessions")
 def audio_sessions(
     status: Optional[str] = None,
@@ -1217,11 +1250,43 @@ def audio_undismiss_flag(flag_id: int, body: UndismissFlagRequest):
         conn.close()
 
 
+@app.post("/audio/sessions/{s_id}/session-risk")
+def audio_session_risk(s_id: int, body: SessionRiskRequest):
+    """Set the L1 reviewer's whole-session risk rating (HIGH/MEDIUM/LOW).
+    Required before confirm-all and before submitting for L2 review."""
+    _reject_if_audio_locked(_audio_session_or_404(s_id))
+    try:
+        set_audio_session_risk(s_id, (body.risk or "").upper())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    conn = get_audio_connection()
+    try:
+        with conn:
+            conn.execute(
+                """INSERT INTO audio_review_log (s_id, action, reviewer_id, note)
+                   VALUES (?, 'SET_SESSION_RISK', ?, ?)""",
+                (s_id, body.reviewer_id, body.risk.upper()),
+            )
+    finally:
+        conn.close()
+    return {"success": True, "manual_risk_level": body.risk.upper()}
+
+
 @app.post("/audio/sessions/{s_id}/confirm-all-flags")
 def audio_confirm_all_flags(s_id: int, body: LockRequest):
     """Confirm every active, not-yet-confirmed flag on the session at once.
-    Mirrors /sessions/{session_id}/confirm-all-flags."""
-    _reject_if_audio_locked(_audio_session_or_404(s_id))
+    Mirrors /sessions/{session_id}/confirm-all-flags. Requires the session
+    risk rating to be set first — bulk-confirming without assessing the
+    session as a whole is exactly the shortcut this gate exists to prevent."""
+    detail = _audio_session_or_404(s_id)
+    _reject_if_audio_locked(detail)
+    if not detail["session"].get("manual_risk_level"):
+        raise HTTPException(
+            status_code=400,
+            detail="Set the session risk rating (high/medium/low) before confirming all flags",
+        )
     conn = get_audio_connection()
     try:
         with conn:
@@ -1269,6 +1334,10 @@ def audio_submit(s_id: int, body: SubmitRequest):
     if detail["flags"] and not (detail["session"]["speaker1_role"] and detail["session"]["speaker2_role"]):
         raise HTTPException(status_code=400,
                             detail="Assign speaker roles (astrologer/user) before submitting")
+    # The L1 reviewer must rate the whole session's risk before it can go to L2.
+    if not detail["session"].get("manual_risk_level"):
+        raise HTTPException(status_code=400,
+                            detail="Set the session risk rating (high/medium/low) before submitting")
     # Same gate as chat: every active flag must be actioned (confirmed after
     # any edits, or dismissed) before the session can be submitted.
     summary = get_audio_flag_summary(s_id)
