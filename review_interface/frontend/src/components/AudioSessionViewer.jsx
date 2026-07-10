@@ -871,7 +871,11 @@ export default function AudioSessionViewer({ sId, sessionList, reviewerName, rev
               {reviewerRole === 'L2' && !locked && (
                 <button
                   disabled={busy}
-                  onClick={() => doAction(() => lockAudioSession(sId, reviewerName))}
+                  onClick={() => {
+                    // eslint-disable-next-line no-alert
+                    if (!window.confirm(`Lock session ${sId}? This is final and cannot be undone.`)) return;
+                    doAction(() => lockAudioSession(sId, reviewerName));
+                  }}
                   style={{
                     padding: '9px 16px', fontSize: 13, fontWeight: 500,
                     borderRadius: 5, border: `1px solid ${C.border}`,

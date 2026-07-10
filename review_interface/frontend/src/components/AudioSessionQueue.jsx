@@ -89,6 +89,9 @@ export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelect
   // latest one, so slow/out-of-order responses can't overwrite fresh rows.
   const requestIdRef = useRef(0);
 
+  // L2 reviewer progress — collapsible, expanded by default (chat parity)
+  const [showReviewerProgress, setShowReviewerProgress] = useState(true);
+
   // Violation heatmap — collapsible, fetched on first open (chat parity)
   const [showHeatmap, setShowHeatmap] = useState(false);
   const [heatmapData, setHeatmapData] = useState([]);
@@ -165,6 +168,8 @@ export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelect
   useEffect(() => { load(); }, [load]);
 
   const handleLock = (sId) => {
+    // eslint-disable-next-line no-alert
+    if (!window.confirm('Lock this session? This will freeze all flags and the review decision.')) return;
     lockAudioSession(sId, reviewerName)
       .then(load)
       .catch((err) => setError(String(err.message || err)));
@@ -389,6 +394,79 @@ export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelect
           </div>
         </div>
 
+        {/* L2 reviewer progress — assignment-based breakdown per reviewer,
+            collapsible; identical visuals to the chat queue (SessionQueue.jsx) */}
+        {reviewerRole === 'L2' && stats?.reviewer_stats?.length > 0 && (
+          <div style={{
+            background: C.bgSurface, border: `1px solid ${C.border}`,
+            borderRadius: 6, padding: '10px 16px', marginBottom: 16,
+          }}>
+            <button
+              onClick={() => setShowReviewerProgress((v) => !v)}
+              style={{
+                display: 'flex', alignItems: 'center', gap: 6, background: 'none',
+                border: 'none', cursor: 'pointer', padding: 0,
+                marginBottom: showReviewerProgress ? 8 : 0,
+                fontSize: 10, fontFamily: MONO, fontWeight: 600, textTransform: 'uppercase',
+                letterSpacing: '0.06em', color: C.textSecondary,
+              }}
+            >
+              <span>{showReviewerProgress ? '▾' : '▸'}</span>
+              Reviewer Progress
+            </button>
+            {showReviewerProgress && (
+            <div style={{ border: `1px solid ${C.border}`, borderRadius: 6, overflow: 'hidden' }}>
+              <table style={{ width: '100%', borderCollapse: 'collapse', background: C.bgSurface }}>
+                <thead>
+                  <tr style={{ background: C.bgStatsrow }}>
+                    {['Reviewer', 'Assigned', 'Pending', 'Submitted', 'Locked', 'Progress'].map((h) => (
+                      <th key={h} style={{
+                        padding: '6px 12px', textAlign: 'left', fontSize: 10, fontFamily: MONO,
+                        fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em',
+                        color: C.textSecondary, borderBottom: `1px solid ${C.border}`, whiteSpace: 'nowrap',
+                      }}>
+                        {h}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {stats.reviewer_stats.map((r, i) => {
+                    const isLast = i === stats.reviewer_stats.length - 1;
+                    const border = isLast ? 'none' : `1px solid ${C.borderLight}`;
+                    const pct = r.total > 0 ? Math.round(((r.submitted + r.locked) / r.total) * 100) : 0;
+                    const cellSt = { padding: '6px 12px', fontSize: 12, fontFamily: MONO, borderBottom: border };
+                    return (
+                      <tr key={r.reviewer} style={{ background: C.bgSurface }}>
+                        <td style={{ ...cellSt, color: C.textPrimary, fontWeight: 500 }}>{r.reviewer || '—'}</td>
+                        <td style={{ ...cellSt, color: C.textPrimary }}>{r.total}</td>
+                        <td style={{ ...cellSt, color: r.pending > 0 ? C.accent : C.textSecondary }}>{r.pending}</td>
+                        <td style={{ ...cellSt, color: '#185FA5' }}>{r.submitted}</td>
+                        <td style={{ ...cellSt, color: '#444441' }}>{r.locked}</td>
+                        <td style={{ ...cellSt, minWidth: 140 }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                            <div style={{ flex: 1, height: 6, background: '#E2DED8', borderRadius: 3 }}>
+                              <div style={{
+                                height: '100%', borderRadius: 3,
+                                background: pct === 100 ? C.accent : '#185FA5',
+                                width: `${pct}%`, transition: 'width 300ms',
+                              }} />
+                            </div>
+                            <span style={{ fontSize: 11, color: C.textSecondary, minWidth: 30, textAlign: 'right' }}>
+                              {pct}%
+                            </span>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+            )}
+          </div>
+        )}
+
         {/* Violation heatmap — collapsible (chat parity: SessionQueue.jsx) */}
         {showHeatmap && (
           <div style={{
@@ -467,47 +545,6 @@ export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelect
             color: C.severeText, fontSize: 13,
           }}>
             {error}
-          </div>
-        )}
-
-        {/* L2-only: per-reviewer assignment progress (chat parity) */}
-        {reviewerRole === 'L2' && (stats?.reviewer_stats?.length > 0) && (
-          <div style={{
-            background: C.bgSurface, border: `1px solid ${C.border}`,
-            borderRadius: 6, padding: '12px 16px', marginBottom: 12,
-          }}>
-            <div style={{
-              fontSize: 11, fontFamily: MONO, textTransform: 'uppercase',
-              letterSpacing: '0.05em', color: C.textSecondary, marginBottom: 8,
-            }}>
-              L1 Reviewer Progress
-            </div>
-            <table style={{ borderCollapse: 'collapse', fontSize: 12 }}>
-              <thead>
-                <tr>
-                  {['Reviewer', 'Total', 'Pending', 'Submitted', 'Locked'].map((h) => (
-                    <th key={h} style={{
-                      textAlign: h === 'Reviewer' ? 'left' : 'right',
-                      padding: '2px 14px 2px 0', fontFamily: MONO, fontSize: 11,
-                      color: C.textSecondary, fontWeight: 500,
-                    }}>
-                      {h}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {stats.reviewer_stats.map((r) => (
-                  <tr key={r.reviewer}>
-                    <td style={{ padding: '2px 14px 2px 0' }}>{r.reviewer}</td>
-                    <td style={{ padding: '2px 14px 2px 0', textAlign: 'right', fontFamily: MONO }}>{r.total}</td>
-                    <td style={{ padding: '2px 14px 2px 0', textAlign: 'right', fontFamily: MONO }}>{r.pending}</td>
-                    <td style={{ padding: '2px 14px 2px 0', textAlign: 'right', fontFamily: MONO, color: C.accentDark }}>{r.submitted}</td>
-                    <td style={{ padding: '2px 14px 2px 0', textAlign: 'right', fontFamily: MONO }}>{r.locked}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
           </div>
         )}
 

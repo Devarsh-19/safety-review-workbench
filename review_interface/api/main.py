@@ -318,7 +318,7 @@ def violation_stats():
                 JOIN sessions s ON s.session_id = f.session_id
                 WHERE s.overall_verdict != 'CLEAN'
                 GROUP BY f.category_code
-                ORDER BY count DESC
+                ORDER BY count DESC, f.category_code ASC
             """).fetchall()
         return [dict(row) for row in rows]
     except Exception:
@@ -983,7 +983,7 @@ def audio_violation_stats():
                       WHERE parent_flag_id IS NOT NULL
                   )
                 GROUP BY f.intent
-                ORDER BY count DESC
+                ORDER BY count DESC, f.intent ASC
             """).fetchall()
         return [dict(row) for row in rows]
     except Exception:
