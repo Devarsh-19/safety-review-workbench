@@ -1033,6 +1033,7 @@ def audio_sessions(
     reviewer: Optional[str] = None,
     verdict: Optional[str] = None,
     astrotalk_verdict: Optional[str] = None,
+    flag_category: Optional[str] = None,
     sort_col: Optional[str] = None,
     sort_dir: Optional[str] = None,
     limit:  int = Query(default=50, ge=1, le=500),
@@ -1047,6 +1048,7 @@ def audio_sessions(
         flags_min=flags_min, flags_max=flags_max,
         roles=roles, reviewer=reviewer,
         verdict=verdict, astrotalk_verdict=astrotalk_verdict,
+        flag_category=flag_category,
         sort_col=sort_col, sort_dir=sort_dir,
         limit=limit, offset=offset,
     )

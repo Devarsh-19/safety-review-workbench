@@ -173,6 +173,7 @@ export function getAudioSessions(filters = {}) {
   add('reviewer', filters.reviewer);
   add('verdict', filters.verdict);
   add('astrotalk_verdict', filters.astrotalk_verdict);
+  add('flag_category', filters.flag_category);
   add('sort_col', filters.sort_col);
   add('sort_dir', filters.sort_dir);
   if (filters.limit != null) add('limit', filters.limit);
