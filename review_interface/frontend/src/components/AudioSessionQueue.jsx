@@ -52,6 +52,16 @@ const CATEGORY_COLORS = {
   OTHER:                       '#6B6860',
 };
 
+// Intents offered in the flag-category filter, in taxonomy order (matches
+// AUDIO_INTENT_ORDER in review_interface/api/main.py).
+const FLAG_CATEGORIES = [
+  'NSFW', 'NSFW_EXPLICIT', 'NSFW_GROOMING', 'NSFW_APPEARANCE', 'CSAM_RISK',
+  'ABUSIVE_LANGUAGE', 'HATE_SPEECH', 'SELF_HARM', 'VIOLENCE', 'FAKE_REMEDIES',
+  'UNAUTHORIZED_MEDICAL_ADVICE', 'FINANCIAL_SOLICITATION', 'IDENTITY_FRAUD',
+  'INSTIGATION', 'OFF_PLATFORM_SOLICITATION', 'PERSONAL_DATA_COLLECTION',
+  'FEAR_MANIPULATION', 'COMPETITOR_PROMOTION',
+];
+
 const EMPTY_FILTERS = {
   search: '',
   hasVideo: '',
@@ -60,6 +70,7 @@ const EMPTY_FILTERS = {
   durationMax: '',   // minutes
   flagsMin: '',
   flagsMax: '',
+  flagCategory: '',
   roles: '',
   assignedTo: '',
   reviewer: '',
@@ -139,6 +150,7 @@ export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelect
         duration_max: minutesToSeconds(filters.durationMax),
         flags_min: filters.flagsMin,
         flags_max: filters.flagsMax,
+        flag_category: filters.flagCategory,
         roles: filters.roles,
         assigned_to: filters.assignedTo,
         reviewer: filters.reviewer,
@@ -271,21 +283,33 @@ export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelect
       </div>
     ),
     flags: (
-      <div style={{ display: 'flex', gap: 4 }}>
-        <input
-          type="number" min="0"
-          value={filterInputs.flagsMin}
-          onChange={(e) => setFilter('flagsMin', e.target.value)}
-          placeholder="min"
-          style={filterInputStyle}
-        />
-        <input
-          type="number" min="0"
-          value={filterInputs.flagsMax}
-          onChange={(e) => setFilter('flagsMax', e.target.value)}
-          placeholder="max"
-          style={filterInputStyle}
-        />
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+        <select
+          value={filterInputs.flagCategory}
+          onChange={(e) => setFilter('flagCategory', e.target.value)}
+          style={filterSelectStyle}
+        >
+          <option value="">All flags</option>
+          {FLAG_CATEGORIES.map((c) => (
+            <option key={c} value={c}>{c}</option>
+          ))}
+        </select>
+        <div style={{ display: 'flex', gap: 4 }}>
+          <input
+            type="number" min="0"
+            value={filterInputs.flagsMin}
+            onChange={(e) => setFilter('flagsMin', e.target.value)}
+            placeholder="min"
+            style={filterInputStyle}
+          />
+          <input
+            type="number" min="0"
+            value={filterInputs.flagsMax}
+            onChange={(e) => setFilter('flagsMax', e.target.value)}
+            placeholder="max"
+            style={filterInputStyle}
+          />
+        </div>
       </div>
     ),
     roles: (

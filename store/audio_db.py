@@ -90,6 +90,7 @@ def fetch_audio_sessions_page(
     reviewer: str = None,
     verdict: str = None,
     astrotalk_verdict: str = None,
+    flag_category: str = None,
     sort_col: str = None,
     sort_dir: str = None,
     limit: int = 50,
@@ -106,7 +107,10 @@ def fetch_audio_sessions_page(
     where, params = ["1=1"], []
     if status:
         where.append("s.review_status = ?"); params.append(status)
-    else:
+    elif not flag_category:
+        # Role-based default visibility applies only when neither an explicit
+        # status nor a flag-category filter is set: filtering by flag should
+        # surface every matching session regardless of review status (chat parity).
         if reviewer_role == "L1":
             where.append("s.review_status NOT IN ('SUBMITTED_FOR_REVIEW','LOCKED')")
         elif reviewer_role == "L2":
@@ -144,6 +148,20 @@ def fetch_audio_sessions_page(
         where.append("s.overall_verdict = ?"); params.append(verdict)
     if astrotalk_verdict:
         where.append("s.astrotalk_verdict = ?"); params.append(astrotalk_verdict)
+    if flag_category:
+        # Only sessions carrying an ACTIVE flag of this intent: DISMISSED rows
+        # and amended originals are excluded, matching the flag_count column and
+        # the violation heatmap. Intents are stored uppercase (ABUSIVE_LANGUAGE).
+        where.append(
+            """EXISTS (SELECT 1 FROM audio_flags af
+                       WHERE af.s_id = s.s_id
+                         AND UPPER(REPLACE(REPLACE(af.intent,'-','_'),' ','_')) = ?
+                         AND (af.status IS NULL OR af.status != 'DISMISSED')
+                         AND af.flag_id NOT IN (
+                             SELECT parent_flag_id FROM audio_flags
+                             WHERE parent_flag_id IS NOT NULL))"""
+        )
+        params.append(flag_category.strip().upper().replace("-", "_").replace(" ", "_"))
     where_sql = " AND ".join(where)
 
     # flag_count counts ACTIVE flags only, matching the viewer and the submit
