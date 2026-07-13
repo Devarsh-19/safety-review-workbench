@@ -149,6 +149,10 @@ export function getAudioStats(params = {}) {
   return request(`/audio/stats${q}`);
 }
 
+export function getAudioViolationStats() {
+  return request('/audio/stats/violations');
+}
+
 export function getAudioSessions(filters = {}) {
   const params = new URLSearchParams();
   const add = (k, v) => {
@@ -217,11 +221,11 @@ export function dismissAudioFlag(flagId, reviewerId, note = '') {
   });
 }
 
-export function undismissAudioFlag(flagId, reviewerId) {
-  return request(`/audio/flags/${flagId}/undismiss`, {
+export function saveAudioSessionRisk(sId, risk, reviewerId) {
+  return request(`/audio/sessions/${sId}/session-risk`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ reviewer_id: reviewerId }),
+    body: JSON.stringify({ risk, reviewer_id: reviewerId }),
   });
 }
 

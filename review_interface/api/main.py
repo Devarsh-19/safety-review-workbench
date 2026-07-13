@@ -45,6 +45,7 @@ from store.audio_db import (
     fetch_audio_session_detail,
     set_speaker_roles,
     submit_audio_session,
+    set_audio_session_risk,
     lock_audio_session,
     unlock_audio_session,
     recompute_audio_session_verdict,
@@ -175,6 +176,11 @@ class AmendAudioFlagRequest(BaseModel):
     intent: str
     severity: str
     reasoning: str = ""
+    reviewer_id: str
+
+
+class SessionRiskRequest(BaseModel):
+    risk: str                   # 'HIGH' | 'MEDIUM' | 'LOW'
     reviewer_id: str
 
 
@@ -312,7 +318,7 @@ def violation_stats():
                 JOIN sessions s ON s.session_id = f.session_id
                 WHERE s.overall_verdict != 'CLEAN'
                 GROUP BY f.category_code
-                ORDER BY count DESC
+                ORDER BY count DESC, f.category_code ASC
             """).fetchall()
         return [dict(row) for row in rows]
     except Exception:
@@ -957,6 +963,54 @@ def audio_stats(
         return result
 
 
+# Fixed display order for the audio violation breakdown (heatmap + analytics).
+# The severity-grouped 14 come first in this exact order; the remaining
+# taxonomy intents follow, and anything off-taxonomy sorts alphabetically at the
+# very bottom. Keep this in sync with INTENT_ORDER in scripts/audio_analytics.py.
+AUDIO_INTENT_ORDER = (
+    "NSFW", "NSFW_EXPLICIT", "NSFW_GROOMING", "NSFW_APPEARANCE", "CSAM_RISK",
+    "ABUSIVE_LANGUAGE", "HATE_SPEECH", "SELF_HARM", "VIOLENCE", "FAKE_REMEDIES",
+    "UNAUTHORIZED_MEDICAL_ADVICE", "FINANCIAL_SOLICITATION", "IDENTITY_FRAUD",
+    "INSTIGATION", "OFF_PLATFORM_SOLICITATION", "PERSONAL_DATA_COLLECTION",
+    "FEAR_MANIPULATION", "COMPETITOR_PROMOTION",
+)
+_AUDIO_INTENT_RANK = {code: i for i, code in enumerate(AUDIO_INTENT_ORDER)}
+
+
+@app.get("/audio/stats/violations")
+def audio_violation_stats():
+    """Violation breakdown for the audio queue heatmap — mirrors
+    /stats/violations. Counts distinct non-clean sessions per intent,
+    over active flags only (amendments replace their originals, and
+    DISMISSED flags don't count — unlike chat, audio keeps them).
+
+    Rows are returned in the fixed taxonomy order (AUDIO_INTENT_ORDER), not by
+    count, so the heatmap always lists violations in the same sequence."""
+    try:
+        with get_audio_connection() as conn:
+            rows = conn.execute("""
+                SELECT f.intent AS category_code, COUNT(DISTINCT f.s_id) AS count
+                FROM audio_flags f
+                JOIN audio_sessions s ON s.s_id = f.s_id
+                WHERE s.overall_verdict != 'CLEAN'
+                  AND f.intent IS NOT NULL
+                  AND (f.status IS NULL OR f.status != 'DISMISSED')
+                  AND f.flag_id NOT IN (
+                      SELECT parent_flag_id FROM audio_flags
+                      WHERE parent_flag_id IS NOT NULL
+                  )
+                GROUP BY f.intent
+            """).fetchall()
+        result = [dict(row) for row in rows]
+        result.sort(key=lambda r: (
+            _AUDIO_INTENT_RANK.get(r["category_code"], len(AUDIO_INTENT_ORDER)),
+            r["category_code"] or "",
+        ))
+        return result
+    except Exception:
+        return []
+
+
 @app.get("/audio/sessions")
 def audio_sessions(
     status: Optional[str] = None,
@@ -1010,7 +1064,7 @@ def audio_speaker_roles(s_id: int, body: SpeakerRolesRequest):
     if detail["session"]["review_status"] == "LOCKED":
         raise HTTPException(status_code=400, detail="Session is locked — roles can no longer be changed")
     try:
-        set_speaker_roles(s_id, body.speaker1_role, body.speaker2_role)
+        set_speaker_roles(s_id, body.speaker1_role, body.speaker2_role, body.reviewer_id)
         return {"success": True, "speaker1_role": body.speaker1_role,
                 "speaker2_role": body.speaker2_role}
     except ValueError as exc:
@@ -1158,8 +1212,10 @@ def audio_dismiss_flag(flag_id: int, body: DismissFlagRequest):
             _reject_if_audio_locked(_audio_session_or_404(s_id))
             original_flag_id = target["parent_flag_id"] if target["parent_flag_id"] else flag_id
 
+            # Hard delete, chat parity: the original and any amendment go
+            # away entirely; the review log keeps the audit trail.
             conn.execute(
-                "UPDATE audio_flags SET status = 'DISMISSED' WHERE flag_id = ? OR parent_flag_id = ?",
+                "DELETE FROM audio_flags WHERE flag_id = ? OR parent_flag_id = ?",
                 (original_flag_id, original_flag_id),
             )
 
@@ -1177,51 +1233,44 @@ def audio_dismiss_flag(flag_id: int, body: DismissFlagRequest):
     finally:
         conn.close()
 
-class UndismissFlagRequest(BaseModel):
-    reviewer_id: str
 
-@app.post("/audio/flags/{flag_id}/undismiss")
-def audio_undismiss_flag(flag_id: int, body: UndismissFlagRequest):
-    """Restore a dismissed flag back to ACTIVE."""
+@app.post("/audio/sessions/{s_id}/session-risk")
+def audio_session_risk(s_id: int, body: SessionRiskRequest):
+    """Set the L1 reviewer's whole-session risk rating (HIGH/MEDIUM/LOW).
+    Required before confirm-all and before submitting for L2 review."""
+    _reject_if_audio_locked(_audio_session_or_404(s_id))
+    try:
+        set_audio_session_risk(s_id, (body.risk or "").upper())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
     conn = get_audio_connection()
     try:
         with conn:
-            target = conn.execute(
-                "SELECT flag_id, s_id, parent_flag_id FROM audio_flags WHERE flag_id = ?",
-                (flag_id,),
-            ).fetchone()
-            if target is None:
-                raise HTTPException(status_code=404, detail=f"Audio flag {flag_id} not found")
-
-            s_id = target["s_id"]
-            _reject_if_audio_locked(_audio_session_or_404(s_id))
-            original_flag_id = target["parent_flag_id"] if target["parent_flag_id"] else flag_id
-
             conn.execute(
-                "UPDATE audio_flags SET status = 'ACTIVE' WHERE flag_id = ? OR parent_flag_id = ?",
-                (original_flag_id, original_flag_id),
+                """INSERT INTO audio_review_log (s_id, action, reviewer_id, note)
+                   VALUES (?, 'SET_SESSION_RISK', ?, ?)""",
+                (s_id, body.reviewer_id, body.risk.upper()),
             )
-
-            conn.execute(
-                """INSERT INTO audio_review_log (s_id, flag_id, action, reviewer_id)
-                   VALUES (?, ?, 'UNDISMISSED', ?)""",
-                (s_id, original_flag_id, body.reviewer_id),
-            )
-            recompute_audio_session_verdict(s_id, conn)
-        return {"success": True}
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
     finally:
         conn.close()
+    return {"success": True, "manual_risk_level": body.risk.upper()}
 
 
 @app.post("/audio/sessions/{s_id}/confirm-all-flags")
 def audio_confirm_all_flags(s_id: int, body: LockRequest):
     """Confirm every active, not-yet-confirmed flag on the session at once.
-    Mirrors /sessions/{session_id}/confirm-all-flags."""
-    _reject_if_audio_locked(_audio_session_or_404(s_id))
+    Mirrors /sessions/{session_id}/confirm-all-flags. Requires the session
+    risk rating to be set first — bulk-confirming without assessing the
+    session as a whole is exactly the shortcut this gate exists to prevent."""
+    detail = _audio_session_or_404(s_id)
+    _reject_if_audio_locked(detail)
+    if not detail["session"].get("manual_risk_level"):
+        raise HTTPException(
+            status_code=400,
+            detail="Set the session risk rating (high/medium/low) before confirming all flags",
+        )
     conn = get_audio_connection()
     try:
         with conn:
@@ -1269,6 +1318,12 @@ def audio_submit(s_id: int, body: SubmitRequest):
     if detail["flags"] and not (detail["session"]["speaker1_role"] and detail["session"]["speaker2_role"]):
         raise HTTPException(status_code=400,
                             detail="Assign speaker roles (astrologer/user) before submitting")
+    # The L1 reviewer must rate the whole session's risk before it can go to
+    # L2 — but only when flags remain. A session whose flags were all
+    # dismissed (deleted) is clean and can be submitted directly.
+    if detail["flags"] and not detail["session"].get("manual_risk_level"):
+        raise HTTPException(status_code=400,
+                            detail="Set the session risk rating (high/medium/low) before submitting")
     # Same gate as chat: every active flag must be actioned (confirmed after
     # any edits, or dismissed) before the session can be submitted.
     summary = get_audio_flag_summary(s_id)
@@ -1298,7 +1353,7 @@ def audio_lock(s_id: int, body: LockRequest):
 def audio_unlock(s_id: int, body: LockRequest):
     _require_l2(body.reviewer_id, "unlock sessions")
     try:
-        unlock_audio_session(s_id)
+        unlock_audio_session(s_id, body.reviewer_id)
         return {"success": True}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))

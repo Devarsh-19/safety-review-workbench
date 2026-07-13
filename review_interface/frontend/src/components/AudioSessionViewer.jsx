@@ -16,8 +16,8 @@ import {
   confirmAudioFlag,
   amendAudioFlag,
   dismissAudioFlag,
-  undismissAudioFlag,
   confirmAllAudioFlags,
+  saveAudioSessionRisk,
 } from '../api';
 
 function formatTime(seconds) {
@@ -30,6 +30,13 @@ function formatTime(seconds) {
 }
 
 const ROLES = ['ASTROLOGER', 'USER'];
+// Whole-session risk rating the L1 must set before confirm-all / submit.
+const SESSION_RISKS = ['HIGH', 'MEDIUM', 'LOW'];
+const RISK_COLORS = {
+  HIGH:   { bg: 'severeBg',  border: 'severeBorder',  text: 'severeText' },
+  MEDIUM: { bg: 'flaggedBg', border: 'flaggedBorder', text: 'flaggedText' },
+  LOW:    { bg: 'cleanBg',   border: 'cleanBorder',   text: 'cleanText' },
+};
 const opposite = (role) => (role === 'ASTROLOGER' ? 'USER' : 'ASTROLOGER');
 const SEVERITIES = ['RED', 'AMBER'];
 const INTENT_TAXONOMY = [
@@ -173,6 +180,19 @@ export default function AudioSessionViewer({ sId, sessionList, reviewerName, rev
   // with a hint instead of surfacing a raw HTTP 400 after the click.
   const rolesMissing = flags.length > 0 && !(session?.speaker1_role && session?.speaker2_role);
 
+  // Mirrors the backend gates on confirm-all and submit: the L1 must rate the
+  // whole session's risk (high/medium/low) before either action is allowed —
+  // but only while the session still has flags. Dismissing deletes flags, so
+  // a session with none left can be submitted directly without a rating.
+  const sessionRisk = session?.manual_risk_level || null;
+  const riskRequired = activeFlags.length > 0;
+  const riskMissing = riskRequired && !sessionRisk;
+
+  const setSessionRisk = (risk) => {
+    if (readOnly || busy) return;
+    doAction(() => saveAudioSessionRisk(sId, risk, reviewerName));
+  };
+
   const byStartTime = (a, b) => {
     const aStart = Number(a.ts_start ?? segById[a.seg_id]?.ts_start ?? Number.MAX_SAFE_INTEGER);
     const bStart = Number(b.ts_start ?? segById[b.seg_id]?.ts_start ?? Number.MAX_SAFE_INTEGER);
@@ -216,10 +236,6 @@ export default function AudioSessionViewer({ sId, sessionList, reviewerName, rev
       setDismissingFlagId(null);
       setDismissReason('');
     }));
-  };
-
-  const undoDismiss = (f) => {
-    doAction(() => undismissAudioFlag(f.flag_id, reviewerName));
   };
 
   const roleForLane = (laneIdx) =>
@@ -325,7 +341,6 @@ export default function AudioSessionViewer({ sId, sessionList, reviewerName, rev
           ) : laneFlags.map((f) => {
             const seg = segById[f.seg_id];
             const confirmed = f.status === 'CONFIRMED';
-            const dismissed = f.status === 'DISMISSED';
             const isEditing = editingFlag === f.flag_id;
             const isDismissing = dismissingFlagId === f.flag_id;
             const isSevere = f.severity === 'SEVERE' || f.severity === 'HIGH' || f.severity === 'RED';
@@ -335,14 +350,11 @@ export default function AudioSessionViewer({ sId, sessionList, reviewerName, rev
             const seekable = !!audioUrl && tsStart != null;
             return (
               <div key={f.flag_id} style={{
-                border: dismissed ? `1px dashed ${C.border}`
-                  : `1px solid ${confirmed ? (isSevere ? C.severeBorder : isFlagged ? C.flaggedBorder : C.cleanBorder) : C.flaggedBorder}`,
-                background: dismissed ? C.bgMuted
-                  : (confirmed ? (isSevere ? C.severeBg : isFlagged ? C.flaggedBg : C.cleanBg) : C.flaggedBg),
+                border: `1px solid ${confirmed ? (isSevere ? C.severeBorder : isFlagged ? C.flaggedBorder : C.cleanBorder) : C.flaggedBorder}`,
+                background: confirmed ? (isSevere ? C.severeBg : isFlagged ? C.flaggedBg : C.cleanBg) : C.flaggedBg,
                 borderRadius: 5,
                 padding: '10px 12px',
                 marginBottom: 8,
-                opacity: dismissed ? 0.75 : 1,
               }}>
                 <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
                   <button
@@ -397,31 +409,6 @@ export default function AudioSessionViewer({ sId, sessionList, reviewerName, rev
                       CONFIRMED{f.confirmed_by ? ` · ${f.confirmed_by}` : ''}
                     </span>
                   )}
-                  {dismissed && (
-                    <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-                      <span
-                        style={{
-                          fontSize: 10, fontFamily: MONO, padding: '1px 6px', borderRadius: 3,
-                          background: '#EEEEEE', border: `1px solid ${C.border}`, color: C.textSecondary,
-                        }}
-                      >
-                        DISMISSED
-                      </span>
-                      {!readOnly && (
-                        <button
-                          disabled={busy}
-                          onClick={() => undoDismiss(f)}
-                          style={{
-                            fontSize: 10, fontFamily: MONO, padding: '1px 6px', borderRadius: 3,
-                            background: C.bgSurface, border: `1px solid ${C.border}`, color: C.textPrimary,
-                            cursor: busy ? 'not-allowed' : 'pointer',
-                          }}
-                        >
-                          Undo
-                        </button>
-                      )}
-                    </div>
-                  )}
                 </div>
                 {f.transcript && (
                   <div style={{ fontSize: 13, color: C.textPrimary, marginTop: 6, lineHeight: 1.5 }}>
@@ -435,7 +422,7 @@ export default function AudioSessionViewer({ sId, sessionList, reviewerName, rev
                 )}
 
                 {/* Flag actions — confirm / edit / dismiss (hidden when readOnly) */}
-                {!readOnly && !isEditing && !dismissed && !isDismissing && (
+                {!readOnly && !isEditing && !isDismissing && (
                   <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
                     {!confirmed && (
                       <button
@@ -482,7 +469,7 @@ export default function AudioSessionViewer({ sId, sessionList, reviewerName, rev
                     background: '#FEF2F2', border: `1px solid ${C.severeBorder}`,
                   }}>
                     <div style={{ fontSize: 13, color: '#A32D2D', marginBottom: 8 }}>
-                      Dismiss this flag? This marks it as a false detection.
+                      Dismiss this flag? This cannot be undone.
                     </div>
                     <input
                       value={dismissReason}
@@ -653,6 +640,20 @@ export default function AudioSessionViewer({ sId, sessionList, reviewerName, rev
               <VerdictBadge verdict={session.overall_verdict} />
               <StatusBadge status={session.review_status} />
               <HasVideoBadge value={session.has_video} />
+              {sessionRisk && (
+                <span
+                  title="Session risk rating set by the L1 reviewer"
+                  style={{
+                    fontSize: 11, fontFamily: MONO, fontWeight: 600, padding: '2px 8px',
+                    borderRadius: 3, textTransform: 'uppercase', letterSpacing: '0.04em',
+                    background: C[RISK_COLORS[sessionRisk]?.bg] || C.bgMuted,
+                    border: `1px solid ${C[RISK_COLORS[sessionRisk]?.border] || C.border}`,
+                    color: C[RISK_COLORS[sessionRisk]?.text] || C.textPrimary,
+                  }}
+                >
+                  {sessionRisk} RISK
+                </span>
+              )}
               <span style={{ fontSize: 12, color: C.textSecondary }}>
                 {session.lang || 'unknown language'} · {segments.length} segments · {activeFlags.length} flags
                 {unactionedCount > 0 ? ` (${unactionedCount} unactioned)` : ''}
@@ -736,8 +737,48 @@ export default function AudioSessionViewer({ sId, sessionList, reviewerName, rev
             <div style={{
               marginTop: 16, background: C.bgSurface,
               border: `1px solid ${C.border}`, borderRadius: 6,
-              padding: '14px 18px', display: 'flex', gap: 10, alignItems: 'center',
+              padding: '14px 18px', display: 'flex', flexDirection: 'column', gap: 12,
             }}>
+              {/* Session risk rating — mandatory before Confirm All / Submit */}
+              {!readOnly && reviewerRole !== 'L2' && (
+                <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                  <span style={{
+                    fontSize: 12, fontFamily: MONO, textTransform: 'uppercase',
+                    letterSpacing: '0.04em', color: C.textPrimary, fontWeight: 600,
+                  }}>
+                    Session risk{riskMissing ? ' *' : ''}:
+                  </span>
+                  {SESSION_RISKS.map((r) => {
+                    const active = sessionRisk === r;
+                    const colors = RISK_COLORS[r];
+                    return (
+                      <button
+                        key={r}
+                        disabled={busy}
+                        onClick={() => setSessionRisk(r)}
+                        title={`Rate the whole session as ${r.toLowerCase()} risk`}
+                        style={{
+                          padding: '5px 14px', fontSize: 12, fontFamily: MONO, fontWeight: 600,
+                          borderRadius: 4,
+                          border: `1px solid ${active ? C[colors.text] : C.border}`,
+                          background: active ? C[colors.bg] : C.bgSurface,
+                          color: active ? C[colors.text] : C.textSecondary,
+                          cursor: busy ? 'not-allowed' : 'pointer',
+                        }}
+                      >
+                        {active ? '● ' : ''}{r}
+                      </button>
+                    );
+                  })}
+                  {riskMissing && (
+                    <span style={{ fontSize: 12, color: C.flaggedText }}>
+                      Required before confirming all flags or submitting for L2 review
+                    </span>
+                  )}
+                </div>
+              )}
+
+              <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
               {!readOnly && reviewerRole !== 'L2' && (
                 <>
                   <input
@@ -752,33 +793,38 @@ export default function AudioSessionViewer({ sId, sessionList, reviewerName, rev
                   />
                   {unactionedCount > 0 && (
                     <button
-                      disabled={busy}
+                      disabled={busy || riskMissing}
                       onClick={() => doAction(() => confirmAllAudioFlags(sId, reviewerName))}
-                      title="Confirm every unactioned flag at once"
+                      title={riskMissing
+                        ? 'Set the session risk rating (high/medium/low) first'
+                        : 'Confirm every unactioned flag at once'}
                       style={{
                         padding: '9px 16px', fontSize: 13, fontWeight: 500,
-                        borderRadius: 5, border: `1px solid ${C.accent}`,
-                        background: C.accentLight, color: C.accentDark,
-                        cursor: busy ? 'not-allowed' : 'pointer', whiteSpace: 'nowrap',
+                        borderRadius: 5, border: `1px solid ${riskMissing ? C.border : C.accent}`,
+                        background: riskMissing ? C.bgMuted : C.accentLight,
+                        color: riskMissing ? C.textMuted : C.accentDark,
+                        cursor: (busy || riskMissing) ? 'not-allowed' : 'pointer', whiteSpace: 'nowrap',
                       }}
                     >
                       ✓ Confirm All ({unactionedCount})
                     </button>
                   )}
                   <button
-                    disabled={busy || unactionedCount > 0 || rolesMissing}
+                    disabled={busy || unactionedCount > 0 || rolesMissing || riskMissing}
                     title={unactionedCount > 0
                       ? `${unactionedCount} flag(s) must be confirmed, edited or dismissed first`
                       : rolesMissing
                         ? 'Assign speaker roles (astrologer/user) before submitting'
-                        : 'Submit this session for L2 review'}
+                        : riskMissing
+                          ? 'Set the session risk rating (high/medium/low) before submitting'
+                          : 'Submit this session for L2 review'}
                     onClick={() => doAction(() => submitAudioSession(sId, reviewerName, note))}
                     style={{
                       padding: '9px 16px', fontSize: 13, fontWeight: 500,
                       borderRadius: 5, border: 'none',
-                      background: (busy || unactionedCount > 0 || rolesMissing) ? '#D4D0C9' : C.accent,
-                      color: (busy || unactionedCount > 0 || rolesMissing) ? C.textMuted : '#FFFFFF',
-                      cursor: (busy || unactionedCount > 0 || rolesMissing) ? 'not-allowed' : 'pointer',
+                      background: (busy || unactionedCount > 0 || rolesMissing || riskMissing) ? '#D4D0C9' : C.accent,
+                      color: (busy || unactionedCount > 0 || rolesMissing || riskMissing) ? C.textMuted : '#FFFFFF',
+                      cursor: (busy || unactionedCount > 0 || rolesMissing || riskMissing) ? 'not-allowed' : 'pointer',
                       whiteSpace: 'nowrap',
                     }}
                   >
@@ -794,7 +840,11 @@ export default function AudioSessionViewer({ sId, sessionList, reviewerName, rev
               {reviewerRole === 'L2' && !locked && (
                 <button
                   disabled={busy}
-                  onClick={() => doAction(() => lockAudioSession(sId, reviewerName))}
+                  onClick={() => {
+                    // eslint-disable-next-line no-alert
+                    if (!window.confirm(`Lock session ${sId}? This freezes all flags and the review decision. An L2 reviewer can unlock it later if needed.`)) return;
+                    doAction(() => lockAudioSession(sId, reviewerName));
+                  }}
                   style={{
                     padding: '9px 16px', fontSize: 13, fontWeight: 500,
                     borderRadius: 5, border: `1px solid ${C.border}`,
@@ -824,6 +874,7 @@ export default function AudioSessionViewer({ sId, sessionList, reviewerName, rev
                   This session is submitted or locked — read only.
                 </span>
               )}
+              </div>
             </div>
           </>
         )}

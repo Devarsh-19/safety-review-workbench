@@ -3,17 +3,19 @@ fix_flag_case.py
 
 Normalises lowercase flag values to UPPER CASE in the flags table. Only rows
 that actually contain a lowercase letter are touched (idempotent — safe to
-re-run). By default it fixes flags.category_code; pass --all to also normalise
-source, status, severity and false_positive_risk.
+re-run). By default it fixes the category column (flags.category_code, or
+audio_flags.intent with --audio); pass --all to also normalise source, status,
+severity (and false_positive_risk on chat).
 
 DRY-RUN BY DEFAULT — running with no flags only previews what would change.
 Pass --commit to actually write the updates.
 
 Usage:
-  python scripts/fix_flag_case.py                 # preview category_code (dry-run)
-  python scripts/fix_flag_case.py --commit        # apply category_code fix
-  python scripts/fix_flag_case.py --all           # preview all flag columns
-  python scripts/fix_flag_case.py --all --commit  # apply to all flag columns
+  python scripts/fix_flag_case.py                 # preview chat category_code (dry-run)
+  python scripts/fix_flag_case.py --commit        # apply chat category_code fix
+  python scripts/fix_flag_case.py --all --commit  # apply to all chat flag columns
+  python scripts/fix_flag_case.py --audio         # preview audio_flags.intent (dry-run)
+  python scripts/fix_flag_case.py --audio --all --commit  # apply to all audio flag columns
 """
 
 import argparse
@@ -24,22 +26,38 @@ from dotenv import load_dotenv
 load_dotenv()
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from store.db import get_connection, DB_PATH  # noqa: E402
+from store.db import get_connection, DB_PATH                          # noqa: E402
+from store.audio_db import get_audio_connection, AUDIO_DB_PATH        # noqa: E402
 
-# Flag columns that should always be stored in UPPER CASE.
-DEFAULT_COLUMNS = ["category_code"]
-ALL_COLUMNS = ["category_code", "source", "status", "severity", "false_positive_risk"]
+# Flag columns that should always be stored in UPPER CASE, per workspace.
+TARGETS = {
+    "chat": {
+        "db_path":   DB_PATH,
+        "connect":   get_connection,
+        "table":     "flags",
+        "default":   ["category_code"],
+        "all":       ["category_code", "source", "status", "severity", "false_positive_risk"],
+    },
+    "audio": {
+        "db_path":   AUDIO_DB_PATH,
+        "connect":   get_audio_connection,
+        "table":     "audio_flags",
+        "default":   ["intent"],
+        "all":       ["intent", "source", "status", "severity"],
+    },
+}
 
 
-def fix_case(columns: list[str], commit: bool = False) -> int:
-    conn = get_connection()
+def fix_case(target: dict, columns: list[str], commit: bool = False) -> int:
+    table = target["table"]
+    conn = target["connect"]()
     try:
         grand_total = 0
         for col in columns:
             # Rows with at least one lowercase letter.
             rows = conn.execute(
                 f"""SELECT flag_id, {col} AS val
-                    FROM flags
+                    FROM {table}
                     WHERE {col} IS NOT NULL AND {col} GLOB '*[a-z]*'
                     ORDER BY flag_id"""
             ).fetchall()
@@ -61,7 +79,7 @@ def fix_case(columns: list[str], commit: bool = False) -> int:
 
             if commit:
                 conn.execute(
-                    f"UPDATE flags SET {col} = UPPER({col}) "
+                    f"UPDATE {table} SET {col} = UPPER({col}) "
                     f"WHERE {col} IS NOT NULL AND {col} GLOB '*[a-z]*'"
                 )
         if commit:
@@ -81,21 +99,27 @@ def main() -> None:
     )
     parser.add_argument(
         "--all", action="store_true",
-        help="Fix all flag columns, not just category_code.",
+        help="Fix all flag columns, not just the category column.",
+    )
+    parser.add_argument(
+        "--audio", action="store_true",
+        help="Target the audio review DB (audio_flags) instead of the chat DB.",
     )
     args = parser.parse_args()
 
-    columns = ALL_COLUMNS if args.all else DEFAULT_COLUMNS
+    target = TARGETS["audio" if args.audio else "chat"]
+    columns = target["all"] if args.all else target["default"]
 
     print("=" * 60)
     print("  Fix flag case (lowercase -> UPPERCASE)")
     print("=" * 60)
-    print(f"  Database : {DB_PATH}")
+    print(f"  Database : {target['db_path']}")
+    print(f"  Table    : {target['table']}")
     print(f"  Columns  : {', '.join(columns)}")
     print(f"  Mode     : {'COMMIT' if args.commit else 'DRY-RUN'}")
     print()
 
-    total = fix_case(columns, commit=args.commit)
+    total = fix_case(target, columns, commit=args.commit)
     print()
     if total == 0:
         print("Nothing to fix. All values already uppercase.")

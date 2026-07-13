@@ -17,6 +17,9 @@ node_modules/
 *.csv
 *.json
 *.db
+# SQLite WAL-mode sidecar files
+*.db-wal
+*.db-shm
 # ...but package manifests are source, not data — keep them versioned
 !review_interface/frontend/package.json
 !review_interface/frontend/package-lock.json

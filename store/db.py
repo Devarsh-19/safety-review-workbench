@@ -12,9 +12,15 @@ _SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 
 
 def get_connection() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
+    # timeout + WAL + busy_timeout: concurrent reviewers on the LAN. WAL lets
+    # readers and the writer proceed in parallel; busy_timeout makes a second
+    # writer wait instead of failing with "database is locked".
+    conn = sqlite3.connect(DB_PATH, timeout=15)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA busy_timeout = 15000")
+    conn.execute("PRAGMA synchronous = NORMAL")
     return conn
 
 

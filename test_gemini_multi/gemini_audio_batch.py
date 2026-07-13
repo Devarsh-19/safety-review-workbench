@@ -1186,10 +1186,12 @@ def write_outputs(results: list[dict[str, Any]], output_csv: Path, output_jsonl:
 
 
 def moderation_json_path(input_csv: Path) -> Path:
-    """Aggregate response file named after the input CSV plus the run date,
-    e.g. sample_audio_2026-07-09_audio_moderation.json."""
-    date_tag = datetime.now().strftime("%Y-%m-%d")
-    return DEFAULT_JSON_DIR / f"{input_csv.stem}_{date_tag}_audio_moderation.json"
+    """Aggregate response file named after the input CSV, e.g.
+    sample_audio_2026-07-10_audio_moderation.json for input
+    sample_audio_2026-07-10.csv. The name is derived only from the input stem
+    (no separate run-date tag), so every run against the same input appends to
+    the same JSON file and resume can read completed sessions back from it."""
+    return DEFAULT_JSON_DIR / f"{input_csv.stem}_audio_moderation.json"
 
 
 def append_raw_json(
@@ -1359,17 +1361,31 @@ def write_raw_response(raw_json_dir: Path, session_id: str, response_json: str) 
     return raw_json_path
 
 
-def load_completed_sessions(output_csv: Path) -> set[str]:
-    if not output_csv.exists():
+def load_completed_sessions(moderation_json: Path) -> set[str]:
+    """Completed session_ids from the moderation JSON output file.
+
+    Read from the moderation JSON (the aggregate file append_raw_json writes to
+    as each session finishes) rather than the CSV: append_raw_json runs only on
+    the success path, so every record in it is a completed session, and each one
+    carries the session id as ``s_id``. The CSV embeds JSON blobs
+    (segments/flags/pauses) full of commas and quotes, so a single malformed
+    field can shift columns and corrupt the session_id/status parse.
+    """
+    if not moderation_json.exists():
         return set()
     try:
-        previous = pd.read_csv(output_csv, dtype={"session_id": str})
-    except Exception:
+        data = json.loads(moderation_json.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
         return set()
-    if "session_id" not in previous or "status" not in previous:
+    if not isinstance(data, list):
         return set()
-    completed = previous[previous["status"].eq("success")]
-    return set(completed["session_id"].astype(str))
+    completed: set[str] = set()
+    for record in data:
+        if isinstance(record, dict):
+            session_id = record.get("s_id")
+            if session_id is not None and str(session_id) != "":
+                completed.add(str(session_id))
+    return completed
 
 
 def load_previous_records(output_csv: Path) -> list[dict[str, Any]]:
@@ -1390,12 +1406,15 @@ async def process_session(
     cache_manager: AudioCacheManager | None,
     audio_dir: Path,
     raw_json_dir: Path,
+    ffmpeg_semaphore: asyncio.Semaphore,
 ) -> tuple[str, dict[str, Any]]:
     """Download, probe, and evaluate one session. Always returns a record —
     failures come back as status='error' rows, never as raised exceptions.
 
     ffmpeg/ffprobe subprocesses run in worker threads; the Gemini calls are
     truly async (client.aio), so sessions overlap up to the semaphore limit.
+    The ffmpeg stage is gated by a separate, smaller ffmpeg_semaphore so a few
+    memory-hungry decodes never pile up even when session concurrency is high.
     """
     session_id = str(row["session_id"])
     recording_url = str(row["recording_url"])
@@ -1408,34 +1427,41 @@ async def process_session(
 
     print(f"{tag}: converting/downloading audio")
     try:
-        has_video = await asyncio.to_thread(probe_has_video, recording_url)
-        if has_video:
-            print(f"{tag}: source media contains video")
+        # All the heavy ffmpeg/ffprobe work (HLS decode, MP3 encode, and the
+        # silencedetect passes) is gated by a separate, smaller semaphore so
+        # only a few decodes hold memory at once. The slot is released at the
+        # end of this block — before the Gemini upload/generate below, which is
+        # network-bound and cheap on RAM — so session concurrency stays high
+        # while peak memory stays bounded by ffmpeg_semaphore, not concurrency.
+        async with ffmpeg_semaphore:
+            has_video = await asyncio.to_thread(probe_has_video, recording_url)
+            if has_video:
+                print(f"{tag}: source media contains video")
 
-        source_channels = await asyncio.to_thread(probe_audio_channels, recording_url)
-        await asyncio.to_thread(
-            convert_to_mp3, recording_url, audio_path, args.force_download, source_channels or 1
-        )
-        duration_seconds = await asyncio.to_thread(probe_audio_duration, audio_path)
-        local_long_pauses = await asyncio.to_thread(detect_long_pauses, audio_path, duration_seconds)
-        if local_long_pauses:
-            print(f"{tag}: {len(local_long_pauses)} long pause(s) need review")
+            source_channels = await asyncio.to_thread(probe_audio_channels, recording_url)
+            await asyncio.to_thread(
+                convert_to_mp3, recording_url, audio_path, args.force_download, source_channels or 1
+            )
+            duration_seconds = await asyncio.to_thread(probe_audio_duration, audio_path)
+            local_long_pauses = await asyncio.to_thread(detect_long_pauses, audio_path, duration_seconds)
+            if local_long_pauses:
+                print(f"{tag}: {len(local_long_pauses)} long pause(s) need review")
 
-        # Stereo call recordings carry one party per channel: derive the exact
-        # speaker turn map locally and hand it to Gemini as ground truth
-        # (probe the local file — cached files from older runs may be mono).
-        speaker_turn_map: str | None = None
-        local_channels = await asyncio.to_thread(probe_audio_channels, str(audio_path))
-        if local_channels and local_channels >= 2:
-            spans_by_channel = [
-                await asyncio.to_thread(
-                    detect_channel_speech_spans, audio_path, channel_index, duration_seconds
-                )
-                for channel_index in (0, 1)
-            ]
-            speaker_turn_map = build_speaker_turn_map(spans_by_channel)
-            if speaker_turn_map:
-                print(f"{tag}: stereo source — channel-based speaker map attached")
+            # Stereo call recordings carry one party per channel: derive the exact
+            # speaker turn map locally and hand it to Gemini as ground truth
+            # (probe the local file — cached files from older runs may be mono).
+            speaker_turn_map: str | None = None
+            local_channels = await asyncio.to_thread(probe_audio_channels, str(audio_path))
+            if local_channels and local_channels >= 2:
+                spans_by_channel = [
+                    await asyncio.to_thread(
+                        detect_channel_speech_spans, audio_path, channel_index, duration_seconds
+                    )
+                    for channel_index in (0, 1)
+                ]
+                speaker_turn_map = build_speaker_turn_map(spans_by_channel)
+                if speaker_turn_map:
+                    print(f"{tag}: stereo source — channel-based speaker map attached")
 
         if args.skip_gemini:
             record = flatten_result(
@@ -1544,25 +1570,32 @@ async def run_batch(args: argparse.Namespace) -> pd.DataFrame:
     # in the output CSV are skipped; error rows are retried. --rerun-all
     # reprocesses everything from scratch.
     resume = not args.rerun_all
-    completed_sessions = load_completed_sessions(output_csv) if resume else set()
+    moderation_json = moderation_json_path(input_csv)
+    completed_sessions = load_completed_sessions(moderation_json) if resume else set()
     results: list[dict[str, Any]] = load_previous_records(output_csv) if resume else []
     already_done = sum(1 for sid in df["session_id"].astype(str) if sid in completed_sessions)
     if already_done:
         print(
             f"[INFO] Resuming: {already_done} of {len(df)} session(s) already completed "
-            f"in {output_csv.name} and will be skipped (use --rerun-all to reprocess)."
+            f"in {moderation_json.name} and will be skipped (use --rerun-all to reprocess)."
         )
     cache_manager: AudioCacheManager | None = None
     cache_storage_cost_recorded = 0.0
 
     semaphore = asyncio.Semaphore(max(1, args.concurrency))
+    # Independent, smaller cap on the ffmpeg/ffprobe stage: peak memory is set
+    # by how many decodes run at once, not by how many sessions are in flight.
+    # Keep this well below --concurrency so the Gemini calls stay parallel while
+    # ffmpeg memory stays bounded. Never let it exceed the session concurrency.
+    ffmpeg_semaphore = asyncio.Semaphore(max(1, min(args.ffmpeg_concurrency, args.concurrency)))
 
     async def bounded(index: int, row: pd.Series) -> tuple[str, dict[str, Any]]:
         async with semaphore:
             try:
                 return await asyncio.wait_for(
                     process_session(
-                        index, len(df), row, args, client, cache_manager, audio_dir, raw_json_dir
+                        index, len(df), row, args, client, cache_manager, audio_dir,
+                        raw_json_dir, ffmpeg_semaphore,
                     ),
                     SESSION_HARD_TIMEOUT_SECONDS,
                 )
@@ -1683,6 +1716,17 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=16,
         help="Number of sessions processed in parallel (download + Gemini). Use 1 for the old sequential behaviour.",
+    )
+    parser.add_argument(
+        "--ffmpeg-concurrency",
+        type=int,
+        default=4,
+        help=(
+            "Max concurrent ffmpeg/ffprobe decodes, capping peak memory independently of "
+            "--concurrency. The Gemini calls stay parallel up to --concurrency; only the "
+            "memory-hungry local audio stage is throttled. Lower this (not --concurrency) "
+            "if the machine runs out of memory. Clamped to at most --concurrency."
+        ),
     )
     parser.add_argument("--force-download", action="store_true", help="Redownload/reconvert MP3 files.")
     parser.add_argument(
