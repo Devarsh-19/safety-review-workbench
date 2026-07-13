@@ -963,12 +963,29 @@ def audio_stats(
         return result
 
 
+# Fixed display order for the audio violation breakdown (heatmap + analytics).
+# The severity-grouped 14 come first in this exact order; the remaining
+# taxonomy intents follow, and anything off-taxonomy sorts alphabetically at the
+# very bottom. Keep this in sync with INTENT_ORDER in scripts/audio_analytics.py.
+AUDIO_INTENT_ORDER = (
+    "NSFW", "NSFW_EXPLICIT", "NSFW_GROOMING", "NSFW_APPEARANCE", "CSAM_RISK",
+    "ABUSIVE_LANGUAGE", "HATE_SPEECH", "SELF_HARM", "VIOLENCE", "FAKE_REMEDIES",
+    "UNAUTHORIZED_MEDICAL_ADVICE", "FINANCIAL_SOLICITATION", "IDENTITY_FRAUD",
+    "INSTIGATION", "OFF_PLATFORM_SOLICITATION", "PERSONAL_DATA_COLLECTION",
+    "FEAR_MANIPULATION", "COMPETITOR_PROMOTION",
+)
+_AUDIO_INTENT_RANK = {code: i for i, code in enumerate(AUDIO_INTENT_ORDER)}
+
+
 @app.get("/audio/stats/violations")
 def audio_violation_stats():
     """Violation breakdown for the audio queue heatmap — mirrors
     /stats/violations. Counts distinct non-clean sessions per intent,
     over active flags only (amendments replace their originals, and
-    DISMISSED flags don't count — unlike chat, audio keeps them)."""
+    DISMISSED flags don't count — unlike chat, audio keeps them).
+
+    Rows are returned in the fixed taxonomy order (AUDIO_INTENT_ORDER), not by
+    count, so the heatmap always lists violations in the same sequence."""
     try:
         with get_audio_connection() as conn:
             rows = conn.execute("""
@@ -983,9 +1000,13 @@ def audio_violation_stats():
                       WHERE parent_flag_id IS NOT NULL
                   )
                 GROUP BY f.intent
-                ORDER BY count DESC, f.intent ASC
             """).fetchall()
-        return [dict(row) for row in rows]
+        result = [dict(row) for row in rows]
+        result.sort(key=lambda r: (
+            _AUDIO_INTENT_RANK.get(r["category_code"], len(AUDIO_INTENT_ORDER)),
+            r["category_code"] or "",
+        ))
+        return result
     except Exception:
         return []
 

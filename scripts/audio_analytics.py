@@ -46,6 +46,24 @@ DEFAULT_DB = PROJECT_ROOT / "store" / "audio_review.db"
 CONF_THRESHOLD = defaultdict(lambda: 0.5, {"CSAM_RISK": 0.2})
 NEAR_BAND = 0.1  # a flag is "near threshold" if within this much of its bar
 
+# Fixed display order for the violation breakdown: the severity-grouped 14
+# first, then the remaining taxonomy intents, then anything off-taxonomy
+# alphabetically at the bottom. Keep in sync with AUDIO_INTENT_ORDER in
+# review_interface/api/main.py (the UI heatmap uses the same order).
+INTENT_ORDER = (
+    "NSFW", "NSFW_EXPLICIT", "NSFW_GROOMING", "NSFW_APPEARANCE", "CSAM_RISK",
+    "ABUSIVE_LANGUAGE", "HATE_SPEECH", "SELF_HARM", "VIOLENCE", "FAKE_REMEDIES",
+    "UNAUTHORIZED_MEDICAL_ADVICE", "FINANCIAL_SOLICITATION", "IDENTITY_FRAUD",
+    "INSTIGATION", "OFF_PLATFORM_SOLICITATION", "PERSONAL_DATA_COLLECTION",
+    "FEAR_MANIPULATION", "COMPETITOR_PROMOTION",
+)
+_INTENT_RANK = {code: i for i, code in enumerate(INTENT_ORDER)}
+
+
+def intent_sort_key(intent: str) -> tuple[int, str]:
+    """Canonical order key: taxonomy position, then alpha for off-taxonomy codes."""
+    return (_INTENT_RANK.get(intent, len(INTENT_ORDER)), intent)
+
 
 # --------------------------------------------------------------------------- #
 # Loading
@@ -146,7 +164,8 @@ def violation_breakdown(flags_by_session: dict) -> list[dict]:
     print(f"  {'INTENT':<{name_w}}   FLAGS   SESSIONS   SEVERITY (by flag)")
     print("  " + "-" * (name_w + 40))
     rows_out = []
-    for intent, n in per_intent_flags.most_common():
+    for intent in sorted(per_intent_flags, key=intent_sort_key):
+        n = per_intent_flags[intent]
         sev = per_intent_sev[intent]
         sev_str = ", ".join(f"{k}:{v}" for k, v in sev.most_common())
         sess = len(per_intent_sessions[intent])
