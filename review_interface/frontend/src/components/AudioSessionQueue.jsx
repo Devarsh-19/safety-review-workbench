@@ -30,26 +30,26 @@ const STATUS_FILTERS = [
 // Bar colours for the violation heatmap — same palette as the chat queue
 // (SessionQueue.jsx CATEGORY_COLORS) so both dashboards read identically.
 const CATEGORY_COLORS = {
-  OFF_PLATFORM_SOLICITATION:   '#0F6E56',
-  NSFW:                        '#A32D2D',
-  NSFW_EXPLICIT:               '#A32D2D',
-  NSFW_GROOMING:               '#A32D2D',
-  NSFW_APPEARANCE:             '#854F0B',
-  CSAM_RISK:                   '#6B0000',
-  FEAR_MANIPULATION:           '#854F0B',
-  FINANCIAL_SOLICITATION:      '#854F0B',
-  PERSONAL_DATA_COLLECTION:    '#185FA5',
-  ABUSIVE_LANGUAGE:            '#A32D2D',
-  HATE_SPEECH:                 '#A32D2D',
-  IDENTITY_FRAUD:              '#185FA5',
-  FAKE_REMEDIES:               '#854F0B',
+  OFF_PLATFORM_SOLICITATION: '#0F6E56',
+  NSFW: '#A32D2D',
+  NSFW_EXPLICIT: '#A32D2D',
+  NSFW_GROOMING: '#A32D2D',
+  NSFW_APPEARANCE: '#854F0B',
+  CSAM_RISK: '#6B0000',
+  FEAR_MANIPULATION: '#854F0B',
+  FINANCIAL_SOLICITATION: '#854F0B',
+  PERSONAL_DATA_COLLECTION: '#185FA5',
+  ABUSIVE_LANGUAGE: '#A32D2D',
+  HATE_SPEECH: '#A32D2D',
+  IDENTITY_FRAUD: '#185FA5',
+  FAKE_REMEDIES: '#854F0B',
   UNAUTHORIZED_MEDICAL_ADVICE: '#3B6D11',
-  SELF_HARM:                   '#6B0000',
-  VIOLENCE:                    '#A32D2D',
-  INSTIGATION:                 '#8A2BE2',
-  COMPETITOR_PROMOTION:        '#6B6860',
-  EXTERNAL_MEDIA_CONTENT:      '#185FA5',
-  OTHER:                       '#6B6860',
+  SELF_HARM: '#6B0000',
+  VIOLENCE: '#A32D2D',
+  INSTIGATION: '#8A2BE2',
+  COMPETITOR_PROMOTION: '#6B6860',
+  EXTERNAL_MEDIA_CONTENT: '#185FA5',
+  OTHER: '#6B6860',
 };
 
 // Intents offered in the flag-category filter, in taxonomy order (matches
@@ -187,13 +187,15 @@ export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelect
       .catch((err) => setError(String(err.message || err)));
   };
 
+  const totalFlagged = (stats?.count_severe ?? 0) + (stats?.count_flagged ?? 0);
+
   const statCells = [
-    { label: 'Total', value: stats?.total_sessions ?? 0 },
-    { label: 'Pending', value: stats?.total_pending ?? 0 },
-    { label: 'Submitted', value: stats?.count_submitted ?? 0 },
-    { label: 'Locked', value: stats?.count_locked ?? 0 },
-    { label: 'Severe', value: stats?.count_severe ?? 0 },
-    { label: 'Flagged', value: stats?.count_flagged ?? 0 },
+    { label: 'Total', value: stats?.total_sessions ?? 0, color: C.textPrimary },
+    { label: 'Pending', value: stats?.total_pending ?? 0, color: (stats?.total_pending ?? 0) > 0 ? C.accent : C.textSecondary },
+    { label: 'Submitted', value: stats?.count_submitted ?? 0, color: (stats?.count_submitted ?? 0) > 0 ? '#185FA5' : C.textSecondary },
+    { label: 'Clean', value: stats?.count_clean ?? 0, color: (stats?.count_clean ?? 0) > 0 ? C.cleanText : C.textSecondary },
+    { label: 'Locked', value: stats?.count_locked ?? 0, color: (stats?.count_locked ?? 0) > 0 ? '#444441' : C.textSecondary },
+    { label: 'Flagged', value: totalFlagged, color: totalFlagged > 0 ? C.severeText : C.textSecondary },
   ];
 
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
@@ -376,11 +378,50 @@ export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelect
     action: null,
   };
 
+  const countTp = stats?.count_tp ?? 0;
+  const countFp = stats?.count_fp ?? 0;
+  const countFn = stats?.count_fn ?? 0;
+  const countTn = stats?.count_tn ?? 0;
+  const totalReviewedEval = countTp + countFp + countFn + countTn;
+  const pctTp = totalReviewedEval ? ((countTp / totalReviewedEval) * 100).toFixed(2) : '0.00';
+  const pctFp = totalReviewedEval ? ((countFp / totalReviewedEval) * 100).toFixed(2) : '0.00';
+  const pctFn = totalReviewedEval ? ((countFn / totalReviewedEval) * 100).toFixed(2) : '0.00';
+  const pctTn = totalReviewedEval ? ((countTn / totalReviewedEval) * 100).toFixed(2) : '0.00';
+
+  const classReportCells = [
+    { label: 'True Positive', sub: 'LLM Flagged - AstroTalk Flagged', val: countTp, pct: pctTp, color: C.severeText },
+    { label: 'False Positive', sub: 'LLM Clean - AstroTalk Flagged', val: countFp, pct: pctFp, color: '#854F0B' },
+    { label: 'False Negative', sub: 'LLM Flagged - AstroTalk Clean', val: countFn, pct: pctFn, color: C.severeText },
+    { label: 'True Negative', sub: 'LLM Clean - AstroTalk Clean', val: countTn, pct: pctTn, color: C.cleanText },
+  ];
+
   return (
     <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
       <TopBar reviewerName={`${reviewerName} · Audio Review`} />
 
       <div style={{ flex: 1, overflow: 'auto', padding: 24, background: C.bgPage }}>
+        {/* Classification Report (L2 only) */}
+        {reviewerRole === 'L2' && (
+          <div style={{ marginBottom: 16 }}>
+            <div style={{ fontSize: 12, fontFamily: MONO, fontWeight: 600, textTransform: 'uppercase', color: C.textSecondary, marginBottom: 8, letterSpacing: '0.06em' }}>
+              Model Classification Report
+            </div>
+            <div style={{ display: 'flex', border: `1px solid ${C.border}`, borderRadius: 5, overflow: 'hidden', background: C.bgSurface }}>
+              {classReportCells.map((cell, idx) => (
+                <div key={cell.label} style={{ flex: 1, padding: '12px 16px', borderRight: idx < 3 ? `1px solid ${C.border}` : 'none' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 4 }}>
+                    <div style={{ fontSize: 16, fontFamily: MONO, fontWeight: 600, color: cell.color }}>
+                      {cell.val} <span style={{ fontSize: 12, fontWeight: 400, color: C.textSecondary }}>({cell.pct}%)</span>
+                    </div>
+                  </div>
+                  <div style={{ fontSize: 12, fontWeight: 500, color: C.textPrimary }}>{cell.label}</div>
+                  <div style={{ fontSize: 10, color: C.textSecondary, marginTop: 2 }}>{cell.sub}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
         {/* Stats strip */}
         <div style={{
           display: 'flex',
@@ -397,7 +438,7 @@ export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelect
               textAlign: 'center',
               borderRight: i < statCells.length - 1 ? `1px solid ${C.border}` : 'none',
             }}>
-              <div style={{ fontSize: 20, fontFamily: MONO, fontWeight: 500, color: C.textPrimary }}>
+              <div style={{ fontSize: 20, fontFamily: MONO, fontWeight: 500, color: cell.color || C.textPrimary }}>
                 {cell.value}
               </div>
               <div style={{ fontSize: 11, color: C.textSecondary, marginTop: 2 }}>
@@ -436,54 +477,54 @@ export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelect
               Reviewer Progress
             </button>
             {showReviewerProgress && (
-            <div style={{ border: `1px solid ${C.border}`, borderRadius: 6, overflow: 'hidden' }}>
-              <table style={{ width: '100%', borderCollapse: 'collapse', background: C.bgSurface }}>
-                <thead>
-                  <tr style={{ background: C.bgStatsrow }}>
-                    {['Reviewer', 'Assigned', 'Pending', 'Submitted', 'Locked', 'Progress'].map((h) => (
-                      <th key={h} style={{
-                        padding: '6px 12px', textAlign: 'left', fontSize: 10, fontFamily: MONO,
-                        fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em',
-                        color: C.textSecondary, borderBottom: `1px solid ${C.border}`, whiteSpace: 'nowrap',
-                      }}>
-                        {h}
-                      </th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {stats.reviewer_stats.map((r, i) => {
-                    const isLast = i === stats.reviewer_stats.length - 1;
-                    const border = isLast ? 'none' : `1px solid ${C.borderLight}`;
-                    const pct = r.total > 0 ? Math.round(((r.submitted + r.locked) / r.total) * 100) : 0;
-                    const cellSt = { padding: '6px 12px', fontSize: 12, fontFamily: MONO, borderBottom: border };
-                    return (
-                      <tr key={r.reviewer} style={{ background: C.bgSurface }}>
-                        <td style={{ ...cellSt, color: C.textPrimary, fontWeight: 500 }}>{r.reviewer || '—'}</td>
-                        <td style={{ ...cellSt, color: C.textPrimary }}>{r.total}</td>
-                        <td style={{ ...cellSt, color: r.pending > 0 ? C.accent : C.textSecondary }}>{r.pending}</td>
-                        <td style={{ ...cellSt, color: '#185FA5' }}>{r.submitted}</td>
-                        <td style={{ ...cellSt, color: '#444441' }}>{r.locked}</td>
-                        <td style={{ ...cellSt, minWidth: 140 }}>
-                          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                            <div style={{ flex: 1, height: 6, background: '#E2DED8', borderRadius: 3 }}>
-                              <div style={{
-                                height: '100%', borderRadius: 3,
-                                background: pct === 100 ? C.accent : '#185FA5',
-                                width: `${pct}%`, transition: 'width 300ms',
-                              }} />
+              <div style={{ border: `1px solid ${C.border}`, borderRadius: 6, overflow: 'hidden' }}>
+                <table style={{ width: '100%', borderCollapse: 'collapse', background: C.bgSurface }}>
+                  <thead>
+                    <tr style={{ background: C.bgStatsrow }}>
+                      {['Reviewer', 'Assigned', 'Pending', 'Submitted', 'Locked', 'Progress'].map((h) => (
+                        <th key={h} style={{
+                          padding: '6px 12px', textAlign: 'left', fontSize: 10, fontFamily: MONO,
+                          fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em',
+                          color: C.textSecondary, borderBottom: `1px solid ${C.border}`, whiteSpace: 'nowrap',
+                        }}>
+                          {h}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {stats.reviewer_stats.map((r, i) => {
+                      const isLast = i === stats.reviewer_stats.length - 1;
+                      const border = isLast ? 'none' : `1px solid ${C.borderLight}`;
+                      const pct = r.total > 0 ? Math.round(((r.submitted + r.locked) / r.total) * 100) : 0;
+                      const cellSt = { padding: '6px 12px', fontSize: 12, fontFamily: MONO, borderBottom: border };
+                      return (
+                        <tr key={r.reviewer} style={{ background: C.bgSurface }}>
+                          <td style={{ ...cellSt, color: C.textPrimary, fontWeight: 500 }}>{r.reviewer || '—'}</td>
+                          <td style={{ ...cellSt, color: C.textPrimary }}>{r.total}</td>
+                          <td style={{ ...cellSt, color: r.pending > 0 ? C.accent : C.textSecondary }}>{r.pending}</td>
+                          <td style={{ ...cellSt, color: '#185FA5' }}>{r.submitted}</td>
+                          <td style={{ ...cellSt, color: '#444441' }}>{r.locked}</td>
+                          <td style={{ ...cellSt, minWidth: 140 }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                              <div style={{ flex: 1, height: 6, background: '#E2DED8', borderRadius: 3 }}>
+                                <div style={{
+                                  height: '100%', borderRadius: 3,
+                                  background: pct === 100 ? C.accent : '#185FA5',
+                                  width: `${pct}%`, transition: 'width 300ms',
+                                }} />
+                              </div>
+                              <span style={{ fontSize: 11, color: C.textSecondary, minWidth: 30, textAlign: 'right' }}>
+                                {pct}%
+                              </span>
                             </div>
-                            <span style={{ fontSize: 11, color: C.textSecondary, minWidth: 30, textAlign: 'right' }}>
-                              {pct}%
-                            </span>
-                          </div>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
             )}
           </div>
         )}

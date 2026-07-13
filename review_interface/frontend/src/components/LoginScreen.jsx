@@ -12,6 +12,7 @@ const REVIEWERS = [
   { name: 'Vineet',   role: 'L1' },
   { name: 'Devarsh',  role: 'L1' },
   { name: 'Amogh',    role: 'L2' },
+  { name: 'Locked',   role: 'L2' },
 ];
 
 const WORKSPACES = [

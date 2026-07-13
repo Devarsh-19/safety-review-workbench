@@ -24,7 +24,7 @@ from store.audio_db import get_audio_connection, initialise_audio_db, AUDIO_DB_P
 
 # Modify this list to change who gets sessions and in what rotation order.
 # REVIEWERS = ["Nikhil", "Vineet", "Divyansh"]
-REVIEWERS = ["Gaurav"]
+REVIEWERS = ["Nikhil","Vineet","Divyansh","Gaurav", "Yusuf"]
 
 
 def assign_sessions(dry_run: bool = False) -> dict:
@@ -84,7 +84,6 @@ def reset_assignments() -> None:
     conn.commit()
     conn.close()
     print(f"Cleared assignments for {cur.rowcount:,} audio sessions.")
-
 
 def print_assignment_summary() -> None:
     conn = get_audio_connection()

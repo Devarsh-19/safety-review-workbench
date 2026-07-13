@@ -930,7 +930,11 @@ def audio_stats(
                     SUM(CASE WHEN review_status = 'LOCKED'               THEN 1 ELSE 0 END) AS count_locked,
                     SUM(CASE WHEN overall_verdict = 'SEVERE'             THEN 1 ELSE 0 END) AS count_severe,
                     SUM(CASE WHEN overall_verdict = 'FLAGGED'            THEN 1 ELSE 0 END) AS count_flagged,
-                    SUM(CASE WHEN overall_verdict = 'CLEAN'              THEN 1 ELSE 0 END) AS count_clean
+                    SUM(CASE WHEN overall_verdict = 'CLEAN'              THEN 1 ELSE 0 END) AS count_clean,
+                    SUM(CASE WHEN astrotalk_verdict IN ('FLAGGED', 'SEVERE') AND overall_verdict IN ('FLAGGED', 'SEVERE') THEN 1 ELSE 0 END) AS count_tp,
+                    SUM(CASE WHEN astrotalk_verdict IN ('FLAGGED', 'SEVERE') AND overall_verdict = 'CLEAN' THEN 1 ELSE 0 END) AS count_fp,
+                    SUM(CASE WHEN astrotalk_verdict = 'CLEAN' AND overall_verdict IN ('FLAGGED', 'SEVERE') THEN 1 ELSE 0 END) AS count_fn,
+                    SUM(CASE WHEN astrotalk_verdict = 'CLEAN' AND overall_verdict = 'CLEAN' THEN 1 ELSE 0 END) AS count_tn
                 FROM audio_sessions{scope}
             """, params).fetchone()
             result = {k: (row[k] or 0) for k in row.keys()}
@@ -957,6 +961,7 @@ def audio_stats(
             "total_sessions": 0, "total_pending": 0, "count_submitted": 0,
             "count_locked": 0, "count_severe": 0, "count_flagged": 0,
             "count_clean": 0, "total_reviewed": 0,
+            "count_tp": 0, "count_fp": 0, "count_fn": 0, "count_tn": 0,
         }
         if reviewer_role == "L2":
             result["reviewer_stats"] = []

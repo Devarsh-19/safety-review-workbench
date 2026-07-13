@@ -111,12 +111,14 @@ def fetch_audio_sessions_page(
         # Role-based default visibility applies only when neither an explicit
         # status nor a flag-category filter is set: filtering by flag should
         # surface every matching session regardless of review status (chat parity).
-        if reviewer_role == "L1":
+        if reviewer_name == "Locked":
+            where.append("s.review_status = 'LOCKED'")
+        elif reviewer_role == "L1":
             where.append("s.review_status NOT IN ('SUBMITTED_FOR_REVIEW','LOCKED')")
         elif reviewer_role == "L2":
             where.append("s.review_status != 'LOCKED'")
 
-    if reviewer_role == "L1" and reviewer_name:
+    if reviewer_role == "L1" and reviewer_name and reviewer_name != "Locked":
         where.append("s.assigned_to = ?"); params.append(reviewer_name)
     elif assigned_to:
         where.append("s.assigned_to LIKE ?"); params.append(f"%{assigned_to}%")
