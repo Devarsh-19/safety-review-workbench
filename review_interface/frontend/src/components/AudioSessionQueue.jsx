@@ -354,11 +354,50 @@ export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelect
     action: null,
   };
 
+  const countTp = stats?.count_tp ?? 0;
+  const countFp = stats?.count_fp ?? 0;
+  const countFn = stats?.count_fn ?? 0;
+  const countTn = stats?.count_tn ?? 0;
+  const totalReviewedEval = countTp + countFp + countFn + countTn;
+  const pctTp = totalReviewedEval ? Math.round((countTp / totalReviewedEval) * 100) : 0;
+  const pctFp = totalReviewedEval ? Math.round((countFp / totalReviewedEval) * 100) : 0;
+  const pctFn = totalReviewedEval ? Math.round((countFn / totalReviewedEval) * 100) : 0;
+  const pctTn = totalReviewedEval ? Math.round((countTn / totalReviewedEval) * 100) : 0;
+
+  const classReportCells = [
+    { label: 'True Positive', sub: 'Human Flagged - AstroTalk Flagged', val: countTp, pct: pctTp, color: C.severeText },
+    { label: 'False Positive', sub: 'Human Clean - AstroTalk Flagged',  val: countFp, pct: pctFp, color: '#854F0B' },
+    { label: 'False Negative', sub: 'Human Flagged - AstroTalk Clean',  val: countFn, pct: pctFn, color: C.severeText },
+    { label: 'True Negative', sub: 'Human Clean - AstroTalk Clean',    val: countTn, pct: pctTn, color: C.cleanText },
+  ];
+
   return (
     <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
       <TopBar reviewerName={`${reviewerName} · Audio Review`} />
 
       <div style={{ flex: 1, overflow: 'auto', padding: 24, background: C.bgPage }}>
+        {/* Classification Report (L2 only) */}
+        {reviewerRole === 'L2' && (
+          <div style={{ marginBottom: 16 }}>
+            <div style={{ fontSize: 12, fontFamily: MONO, fontWeight: 600, textTransform: 'uppercase', color: C.textSecondary, marginBottom: 8, letterSpacing: '0.06em' }}>
+              Model Classification Report (Reviewed Sessions)
+            </div>
+            <div style={{ display: 'flex', border: `1px solid ${C.border}`, borderRadius: 5, overflow: 'hidden', background: C.bgSurface }}>
+              {classReportCells.map((cell, idx) => (
+                <div key={cell.label} style={{ flex: 1, padding: '12px 16px', borderRight: idx < 3 ? `1px solid ${C.border}` : 'none' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 4 }}>
+                    <div style={{ fontSize: 16, fontFamily: MONO, fontWeight: 600, color: cell.color }}>
+                      {cell.val} <span style={{ fontSize: 12, fontWeight: 400, color: C.textSecondary }}>({cell.pct}%)</span>
+                    </div>
+                  </div>
+                  <div style={{ fontSize: 12, fontWeight: 500, color: C.textPrimary }}>{cell.label}</div>
+                  <div style={{ fontSize: 10, color: C.textSecondary, marginTop: 2 }}>{cell.sub}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
         {/* Stats strip */}
         <div style={{
           display: 'flex',
