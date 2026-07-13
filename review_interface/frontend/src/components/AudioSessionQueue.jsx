@@ -175,13 +175,15 @@ export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelect
       .catch((err) => setError(String(err.message || err)));
   };
 
+  const totalFlagged = (stats?.count_severe ?? 0) + (stats?.count_flagged ?? 0);
+
   const statCells = [
-    { label: 'Total', value: stats?.total_sessions ?? 0 },
-    { label: 'Pending', value: stats?.total_pending ?? 0 },
-    { label: 'Submitted', value: stats?.count_submitted ?? 0 },
-    { label: 'Locked', value: stats?.count_locked ?? 0 },
-    { label: 'Severe', value: stats?.count_severe ?? 0 },
-    { label: 'Flagged', value: stats?.count_flagged ?? 0 },
+    { label: 'Total',     value: stats?.total_sessions ?? 0, color: C.textPrimary },
+    { label: 'Pending',   value: stats?.total_pending  ?? 0, color: (stats?.total_pending  ?? 0) > 0 ? C.accent      : C.textSecondary },
+    { label: 'Submitted', value: stats?.count_submitted ?? 0, color: (stats?.count_submitted ?? 0) > 0 ? '#185FA5'   : C.textSecondary },
+    { label: 'Clean',     value: stats?.count_clean     ?? 0, color: (stats?.count_clean     ?? 0) > 0 ? C.cleanText  : C.textSecondary },
+    { label: 'Locked',    value: stats?.count_locked    ?? 0, color: (stats?.count_locked    ?? 0) > 0 ? '#444441'    : C.textSecondary },
+    { label: 'Flagged',   value: totalFlagged,               color: totalFlagged > 0 ? C.severeText : C.textSecondary },
   ];
 
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
@@ -373,7 +375,7 @@ export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelect
               textAlign: 'center',
               borderRight: i < statCells.length - 1 ? `1px solid ${C.border}` : 'none',
             }}>
-              <div style={{ fontSize: 20, fontFamily: MONO, fontWeight: 500, color: C.textPrimary }}>
+              <div style={{ fontSize: 20, fontFamily: MONO, fontWeight: 500, color: cell.color || C.textPrimary }}>
                 {cell.value}
               </div>
               <div style={{ fontSize: 11, color: C.textSecondary, marginTop: 2 }}>
