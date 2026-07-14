@@ -187,7 +187,7 @@ export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelect
       .catch((err) => setError(String(err.message || err)));
   };
 
-  const totalFlagged = (stats?.count_severe ?? 0) + (stats?.count_flagged ?? 0);
+  const totalFlagged = stats?.count_flagged ?? 0;
 
   const statCells = [
     { label: 'Total', value: stats?.total_sessions ?? 0, color: C.textPrimary },
@@ -195,7 +195,7 @@ export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelect
     { label: 'Submitted', value: stats?.count_submitted ?? 0, color: (stats?.count_submitted ?? 0) > 0 ? '#185FA5' : C.textSecondary },
     { label: 'Clean', value: stats?.count_clean ?? 0, color: (stats?.count_clean ?? 0) > 0 ? C.cleanText : C.textSecondary },
     { label: 'Locked', value: stats?.count_locked ?? 0, color: (stats?.count_locked ?? 0) > 0 ? '#444441' : C.textSecondary },
-    { label: 'Flagged', value: totalFlagged, color: totalFlagged > 0 ? C.severeText : C.textSecondary },
+    { label: 'Flagged', value: totalFlagged, color: totalFlagged > 0 ? C.flaggedText : C.textSecondary },
   ];
 
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
@@ -348,7 +348,6 @@ export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelect
         style={filterSelectStyle}
       >
         <option value="">All</option>
-        <option value="SEVERE">Severe</option>
         <option value="FLAGGED">Flagged</option>
         <option value="CLEAN">Clean</option>
       </select>
@@ -389,9 +388,9 @@ export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelect
   const pctTn = totalReviewedEval ? ((countTn / totalReviewedEval) * 100).toFixed(2) : '0.00';
 
   const classReportCells = [
-    { label: 'True Positive', sub: 'LLM Flagged - AstroTalk Flagged', val: countTp, pct: pctTp, color: C.severeText },
+    { label: 'True Positive', sub: 'LLM Flagged - AstroTalk Flagged', val: countTp, pct: pctTp, color: C.flaggedText },
     { label: 'False Positive', sub: 'LLM Clean - AstroTalk Flagged', val: countFp, pct: pctFp, color: '#854F0B' },
-    { label: 'False Negative', sub: 'LLM Flagged - AstroTalk Clean', val: countFn, pct: pctFn, color: C.severeText },
+    { label: 'False Negative', sub: 'LLM Flagged - AstroTalk Clean', val: countFn, pct: pctFn, color: C.flaggedText },
     { label: 'True Negative', sub: 'LLM Clean - AstroTalk Clean', val: countTn, pct: pctTn, color: C.cleanText },
   ];
 

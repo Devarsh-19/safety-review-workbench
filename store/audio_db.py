@@ -19,6 +19,27 @@ SPEAKER_ROLES = ("ASTROLOGER", "USER")
 SESSION_RISKS = ("HIGH", "MEDIUM", "LOW")
 
 
+def _normalize_audio_verdict(verdict: str | None) -> str | None:
+    """Audio session verdicts are binary: FLAGGED or CLEAN.
+    Legacy SEVERE values are treated as FLAGGED."""
+    if verdict is None:
+        return None
+    normalized = str(verdict).strip().upper()
+    if not normalized:
+        return None
+    if normalized == "SEVERE":
+        return "FLAGGED"
+    return normalized
+
+
+def _audio_verdict_sql(column: str) -> str:
+    return f"CASE WHEN {column} = 'SEVERE' THEN 'FLAGGED' ELSE {column} END"
+
+
+AUDIO_OVERALL_VERDICT_SQL = _audio_verdict_sql("s.overall_verdict")
+AUDIO_ASTROTALK_VERDICT_SQL = _audio_verdict_sql("s.astrotalk_verdict")
+
+
 def get_audio_connection() -> sqlite3.Connection:
     # timeout + WAL + busy_timeout: many reviewers hit the API concurrently
     # from different laptops. WAL lets readers and the writer proceed in
@@ -34,6 +55,8 @@ def get_audio_connection() -> sqlite3.Connection:
 
 
 def initialise_audio_db() -> None:
+    from engine.verdict_rules import get_db_confidence_for_verdict
+
     schema = _SCHEMA_PATH.read_text(encoding="utf-8")
     with get_audio_connection() as conn:
         conn.executescript(schema)
@@ -63,6 +86,22 @@ def initialise_audio_db() -> None:
             except Exception:
                 pass  # Column already exists — safe to ignore
 
+        # Audio session verdicts are binary: any legacy SEVERE rows collapse to
+        # FLAGGED so the DB, API, and frontend stay aligned.
+        conn.execute(
+            """UPDATE audio_sessions
+               SET overall_verdict = 'FLAGGED',
+                   confidence_score = ?
+               WHERE overall_verdict = 'SEVERE'""",
+            (get_db_confidence_for_verdict("FLAGGED"),),
+        )
+        conn.execute(
+            """UPDATE audio_sessions
+               SET astrotalk_verdict = 'FLAGGED'
+               WHERE astrotalk_verdict = 'SEVERE'"""
+        )
+        conn.commit()
+
     print(f"Audio database initialised at {AUDIO_DB_PATH}")
 
 
@@ -70,6 +109,10 @@ def _normalize_audio_session_row(row: dict) -> dict:
     normalized = dict(row)
     if "has_video" in normalized and normalized["has_video"] is not None:
         normalized["has_video"] = bool(normalized["has_video"])
+    if "overall_verdict" in normalized:
+        normalized["overall_verdict"] = _normalize_audio_verdict(normalized["overall_verdict"])
+    if "astrotalk_verdict" in normalized:
+        normalized["astrotalk_verdict"] = _normalize_audio_verdict(normalized["astrotalk_verdict"])
     return normalized
 
 
@@ -146,10 +189,12 @@ def fetch_audio_sessions_page(
     if reviewer:
         where.append("(s.submitted_by LIKE ? OR s.reviewer_id LIKE ?)")
         params.extend([f"%{reviewer}%", f"%{reviewer}%"])
-    if verdict:
-        where.append("s.overall_verdict = ?"); params.append(verdict)
-    if astrotalk_verdict:
-        where.append("s.astrotalk_verdict = ?"); params.append(astrotalk_verdict)
+    normalized_verdict = _normalize_audio_verdict(verdict)
+    normalized_astrotalk_verdict = _normalize_audio_verdict(astrotalk_verdict)
+    if normalized_verdict:
+        where.append(f"{AUDIO_OVERALL_VERDICT_SQL} = ?"); params.append(normalized_verdict)
+    if normalized_astrotalk_verdict:
+        where.append(f"{AUDIO_ASTROTALK_VERDICT_SQL} = ?"); params.append(normalized_astrotalk_verdict)
     if flag_category:
         # Only sessions carrying an ACTIVE flag of this intent: DISMISSED rows
         # and amended originals are excluded, matching the flag_count column and
@@ -193,7 +238,7 @@ def fetch_audio_sessions_page(
         'duration': 'COALESCE(s.duration_seconds, sc.max_ts_end, 0)',
         'segments': 'segment_count',
         'flags': 'flag_count',
-        'verdict': 's.overall_verdict',
+        'verdict': AUDIO_OVERALL_VERDICT_SQL,
         'status': 's.review_status',
     }
     
@@ -250,16 +295,19 @@ def _active_audio_flag_rows(rows) -> list:
 
 def recompute_audio_session_verdict(s_id: int, conn) -> str:
     """Recompute and persist overall_verdict + confidence_score from the
-    session's active flags, using the SAME rules as the chat DB
-    (engine/verdict_rules.py): SEVERE / FLAGGED / CLEAN, including the
-    flagged-combination escalations."""
-    from engine.verdict_rules import get_db_verdict_for_flags, get_db_confidence_for_verdict
+    session's active flags.
+    Audio LLM session verdicts are binary: any active non-dismissed flag makes
+    the session FLAGGED; otherwise it is CLEAN."""
+    from engine.verdict_rules import get_db_confidence_for_verdict
 
     rows = conn.execute(
         "SELECT flag_id, intent, status, parent_flag_id FROM audio_flags WHERE s_id = ?", (s_id,)
     ).fetchall()
-    codes = [r["intent"] for r in _active_audio_flag_rows(rows) if r["intent"] and r["status"] != "DISMISSED"]
-    verdict    = get_db_verdict_for_flags(codes)
+    has_active_flags = any(
+        r["status"] != "DISMISSED"
+        for r in _active_audio_flag_rows(rows)
+    )
+    verdict    = "FLAGGED" if has_active_flags else "CLEAN"
     confidence = get_db_confidence_for_verdict(verdict)
     conn.execute(
         "UPDATE audio_sessions SET overall_verdict = ?, confidence_score = ? WHERE s_id = ?",

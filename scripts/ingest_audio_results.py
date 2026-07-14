@@ -378,8 +378,8 @@ def ingest_session(conn, obj: dict, auto_submit: bool = True, auto_lock: bool = 
         )
         n_flags += 1
 
-    # Verdict from the flags now in the DB (respects amendments/dismissals) —
-    # same rules as the chat DB, including flagged-combination escalations.
+    # Verdict from the flags now in the DB (respects amendments/dismissals).
+    # Audio session verdicts are binary: any remaining active flag => FLAGGED.
     verdict = recompute_audio_session_verdict(s_id, conn)
 
     # Chat parity: a session with no flags at all is CLEAN and goes straight

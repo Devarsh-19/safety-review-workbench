@@ -24,7 +24,7 @@ from store.audio_db import get_audio_connection, initialise_audio_db, AUDIO_DB_P
 
 # Modify this list to change who gets sessions and in what rotation order.
 # REVIEWERS = ["Nikhil", "Vineet", "Divyansh"]
-REVIEWERS = ["Nikhil","Vineet","Divyansh","Gaurav", "Yusuf"]
+REVIEWERS = ["Devarsh"]
 
 
 def assign_sessions(dry_run: bool = False) -> dict:
