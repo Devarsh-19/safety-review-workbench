@@ -1455,16 +1455,12 @@ def audio_session_risk(s_id: int, body: SessionRiskRequest):
 @app.post("/audio/sessions/{s_id}/confirm-all-flags")
 def audio_confirm_all_flags(s_id: int, body: LockRequest):
     """Confirm every active, not-yet-confirmed flag on the session at once.
-    Mirrors /sessions/{session_id}/confirm-all-flags. Requires the session
-    risk rating to be set first — bulk-confirming without assessing the
-    session as a whole is exactly the shortcut this gate exists to prevent."""
+    Mirrors /sessions/{session_id}/confirm-all-flags. The whole-session risk
+    rating is still enforced at submit time, so it is intentionally NOT gated
+    here — that avoids a dead-end for L2 (who has no risk selector) and lets
+    reviewers confirm flags before rating the session."""
     detail = _audio_session_or_404(s_id)
     _reject_if_audio_locked(detail)
-    if not detail["session"].get("manual_risk_level"):
-        raise HTTPException(
-            status_code=400,
-            detail="Set the session risk rating (high/medium/low) before confirming all flags",
-        )
     conn = get_audio_connection()
     try:
         with conn:

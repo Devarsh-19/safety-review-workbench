@@ -851,17 +851,14 @@ export default function AudioSessionViewer({ sId, sessionList, reviewerName, rev
               {!readOnly && unactionedCount > 0 && (
                 <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
                   <button
-                    disabled={busy || riskMissing}
+                    disabled={busy}
                     onClick={() => doAction(() => confirmAllAudioFlags(sId, reviewerName))}
-                    title={riskMissing
-                      ? 'Set the session risk rating (high/medium/low) first'
-                      : 'Confirm every unactioned flag at once'}
+                    title="Confirm every unactioned flag at once"
                     style={{
                       padding: '7px 14px', fontSize: 12, fontFamily: MONO, fontWeight: 600,
-                      borderRadius: 4, border: `1px solid ${riskMissing ? C.border : C.accent}`,
-                      background: riskMissing ? C.bgMuted : C.accent,
-                      color: riskMissing ? C.textMuted : '#FFFFFF',
-                      cursor: (busy || riskMissing) ? 'not-allowed' : 'pointer', whiteSpace: 'nowrap',
+                      borderRadius: 4, border: `1px solid ${C.accent}`,
+                      background: C.accent, color: '#FFFFFF',
+                      cursor: busy ? 'not-allowed' : 'pointer', whiteSpace: 'nowrap',
                     }}
                   >
                     ✓ Confirm All ({unactionedCount})
