@@ -155,14 +155,17 @@ def main() -> None:
             print("  Nothing to lock.")
             return
 
-        placeholders = ",".join("?" for _ in lockable)
-        conn.execute(
-            f"""UPDATE audio_sessions
+        # Per-row UPDATE via executemany rather than a single `WHERE s_id IN
+        # (?, ?, …)`: a large lockable set would blow past SQLite's bound-
+        # variable limit ("too many SQL variables"). Same pattern as
+        # auto_lock_clean_submitted_audio.py.
+        conn.executemany(
+            """UPDATE audio_sessions
                 SET review_status = 'LOCKED',
                     locked_by     = ?,
                     locked_at     = datetime('now')
-                WHERE s_id IN ({placeholders})""",
-            [args.locked_by, *lockable],
+                WHERE s_id = ?""",
+            [(args.locked_by, sid) for sid in lockable],
         )
         conn.commit()
         print(f"  LOCKED {len(lockable)} audio session(s) as '{args.locked_by}'.")
