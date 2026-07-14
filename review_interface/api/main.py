@@ -1502,6 +1502,74 @@ def audio_confirm_all_flags(s_id: int, body: LockRequest):
         conn.close()
 
 
+@app.post("/audio/sessions/{s_id}/dismiss-all-flags")
+def audio_dismiss_all_flags(s_id: int, body: LockRequest):
+    """Dismiss every active, not-yet-confirmed flag on the session at once.
+    Mirrors /sessions/{session_id}/dismiss-all-flags: hard-deletes each
+    unconfirmed active flag (amendment row plus its original), leaves
+    already-confirmed flags untouched, recomputes the verdict ONCE."""
+    detail = _audio_session_or_404(s_id)
+    _reject_if_audio_locked(detail)
+    conn = get_audio_connection()
+    try:
+        with conn:
+            rows = conn.execute(
+                "SELECT flag_id, parent_flag_id, status FROM audio_flags WHERE s_id = ?",
+                (s_id,),
+            ).fetchall()
+            amended_parents = {
+                r["parent_flag_id"] for r in rows if r["parent_flag_id"] is not None
+            }
+            active = [
+                r for r in rows
+                if (r["parent_flag_id"] is not None or r["flag_id"] not in amended_parents)
+            ]
+            to_dismiss = [r for r in active if r["status"] != "CONFIRMED"]
+            for r in to_dismiss:
+                original_id = r["parent_flag_id"] if r["parent_flag_id"] else r["flag_id"]
+                conn.execute(
+                    "DELETE FROM audio_flags WHERE flag_id = ? OR parent_flag_id = ?",
+                    (original_id, original_id),
+                )
+                conn.execute(
+                    """INSERT INTO audio_review_log (s_id, flag_id, action, reviewer_id, note)
+                       VALUES (?, ?, 'DISMISSED', ?, '')""",
+                    (s_id, original_id, body.reviewer_id),
+                )
+            recompute_audio_session_verdict(s_id, conn)
+        return {"success": True, "dismissed_count": len(to_dismiss)}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        conn.close()
+
+
+@app.post("/audio/sessions/{s_id}/session-note")
+def audio_save_session_note(s_id: int, body: SessionNoteRequest):
+    """Persist a reviewer's overall observation note on an audio session.
+    Especially useful for mono-channel recordings where flags can't be
+    attributed to a speaker lane. Mirrors /sessions/{id}/session-note."""
+    detail = _audio_session_or_404(s_id)
+    _reject_if_audio_locked(detail)
+    # Belt-and-suspenders migration in case the column is absent in a legacy DB.
+    try:
+        with get_audio_connection() as conn:
+            conn.execute("ALTER TABLE audio_sessions ADD COLUMN session_note TEXT")
+    except Exception:
+        pass
+    try:
+        with get_audio_connection() as conn:
+            conn.execute(
+                "UPDATE audio_sessions SET session_note = ? WHERE s_id = ?",
+                (body.note, s_id),
+            )
+        return {"success": True}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
 @app.post("/audio/sessions/{s_id}/submit")
 def audio_submit(s_id: int, body: SubmitRequest):
     detail = _audio_session_or_404(s_id)

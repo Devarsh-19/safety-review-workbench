@@ -17,6 +17,10 @@ const MAP = {
 
 const LABELS = {
   UNPROCESSED: 'Unprocessed',
+  // Audio flag severities are stored as RED/AMBER but shown on the same
+  // High/Medium scale as the rest of the workbench — never the raw colour word.
+  RED: 'High',
+  AMBER: 'Medium',
 };
 
 export default function VerdictBadge({ verdict }) {

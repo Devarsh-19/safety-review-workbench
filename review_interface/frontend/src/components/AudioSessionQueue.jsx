@@ -191,11 +191,11 @@ export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelect
 
   const statCells = [
     { label: 'Total', value: stats?.total_sessions ?? 0, color: C.textPrimary },
-    { label: 'Pending', value: stats?.total_pending ?? 0, color: (stats?.total_pending ?? 0) > 0 ? C.accent : C.textSecondary },
+    { label: 'Pending for L1 Review', value: stats?.total_pending ?? 0, color: (stats?.total_pending ?? 0) > 0 ? C.accent : C.textSecondary },
     { label: 'Submitted', value: stats?.count_submitted ?? 0, color: (stats?.count_submitted ?? 0) > 0 ? '#185FA5' : C.textSecondary },
     { label: 'Clean', value: stats?.count_clean ?? 0, color: (stats?.count_clean ?? 0) > 0 ? C.cleanText : C.textSecondary },
     { label: 'Locked', value: stats?.count_locked ?? 0, color: (stats?.count_locked ?? 0) > 0 ? '#444441' : C.textSecondary },
-    { label: 'Flagged', value: totalFlagged, color: totalFlagged > 0 ? C.flaggedText : C.textSecondary },
+    { label: 'Flagged by LLM Sessions', value: totalFlagged, color: totalFlagged > 0 ? C.flaggedText : C.textSecondary },
   ];
 
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
@@ -396,7 +396,7 @@ export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelect
 
   return (
     <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
-      <TopBar reviewerName={`${reviewerName} · Audio Review`} />
+      <TopBar reviewerName={`${reviewerName} · Audio Review`} reviewerRole={reviewerRole} />
 
       <div style={{ flex: 1, overflow: 'auto', padding: 24, background: C.bgPage }}>
         {/* Classification Report (L2 only) */}

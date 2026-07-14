@@ -366,7 +366,7 @@ export default function SessionQueue({ reviewerName, reviewerRole, onSelectSessi
 
   return (
     <div style={{ height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-      <TopBar reviewerName={reviewerName} />
+      <TopBar reviewerName={reviewerName} reviewerRole={reviewerRole} />
 
       {/* Sub-bar: filters + right controls */}
       <div style={{

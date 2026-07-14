@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS audio_sessions (
     review_status       TEXT    DEFAULT 'PENDING',          -- 'PENDING', 'SUBMITTED_FOR_REVIEW', 'LOCKED', 'REVIEWED' (after unlock, same as chat)
     reviewer_id         TEXT,
     reviewer_note       TEXT,
+    session_note        TEXT,                               -- reviewer's overall observation note (esp. mono-channel sessions)
     reviewed_at         TEXT,
     assigned_to         TEXT    DEFAULT NULL,
     submitted_by        TEXT,

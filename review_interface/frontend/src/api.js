@@ -247,6 +247,22 @@ export function confirmAllAudioFlags(sId, reviewerId) {
   });
 }
 
+export function dismissAllAudioFlags(sId, reviewerId) {
+  return request(`/audio/sessions/${sId}/dismiss-all-flags`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ reviewer_id: reviewerId }),
+  });
+}
+
+export function saveAudioSessionNote(sId, note, reviewerId) {
+  return request(`/audio/sessions/${sId}/session-note`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ note, reviewer_id: reviewerId }),
+  });
+}
+
 export function submitAudioSession(sId, reviewerId, note) {
   return request(`/audio/sessions/${sId}/submit`, {
     method: 'POST',
