@@ -13,6 +13,9 @@ const REVIEWERS = [
   { name: 'Devarsh',  role: 'L1' },
   { name: 'Amogh',    role: 'L2' },
   { name: 'Locked',   role: 'L2' },   // read-only view of LOCKED sessions only
+  // Audio-only, read-only client persona: sees ONLY finalised (LOCKED) sessions
+  // that were flagged. `workspaces` restricts which login workspaces list it.
+  { name: 'Astrotalk Review', role: 'L2', workspaces: ['audio'] },
 ];
 
 const WORKSPACES = [
@@ -41,6 +44,22 @@ export default function LoginScreen({ onLogin }) {
     // (otherwise e.g. a late chat response shows chat counts under Audio).
     return () => { cancelled = true; };
   }, [mode]);
+
+  // Reviewers available in the currently-selected workspace. An entry with no
+  // `workspaces` field is available everywhere; otherwise it is listed only in
+  // the workspaces it names (e.g. "Astrotalk Review" is audio-only).
+  const availableReviewers = REVIEWERS.filter(
+    (r) => !r.workspaces || r.workspaces.includes(mode)
+  );
+
+  const selectWorkspace = (id) => {
+    setMode(id);
+    // Clear the chosen name if it isn't valid in the new workspace.
+    const stillValid = REVIEWERS.some(
+      (r) => r.name === name && (!r.workspaces || r.workspaces.includes(id))
+    );
+    if (!stillValid) setName('');
+  };
 
   const disabled = !name;
 
@@ -151,7 +170,7 @@ export default function LoginScreen({ onLogin }) {
                   <button
                     key={w.id}
                     type="button"
-                    onClick={() => setMode(w.id)}
+                    onClick={() => selectWorkspace(w.id)}
                     style={{
                       flex: 1,
                       padding: '10px 12px',
@@ -210,7 +229,7 @@ export default function LoginScreen({ onLogin }) {
               }}
             >
               <option value="" disabled>Select your name…</option>
-              {REVIEWERS.map((r) => (
+              {availableReviewers.map((r) => (
                 <option key={r.name} value={r.name}>{r.name}</option>
               ))}
             </select>

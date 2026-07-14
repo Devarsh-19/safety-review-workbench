@@ -147,9 +147,17 @@ def fetch_audio_sessions_page(
     - L1 (no explicit status filter): submitted/locked sessions hidden
     - L2 (no explicit status filter): only SUBMITTED_FOR_REVIEW sessions shown
     - L1 with a name: only sessions assigned to them
+    - "Astrotalk Review": only LOCKED + flagged sessions (read-only client view)
     """
     where, params = ["1=1"], []
-    if status:
+    # "Astrotalk Review" is a read-only client persona hard-restricted to
+    # finalised (LOCKED) sessions that were flagged. Enforced unconditionally so
+    # no status/assignee filter can widen the view; other filters (flag category,
+    # language, duration …) still narrow within this subset.
+    if reviewer_name == "Astrotalk Review":
+        where.append("s.review_status = 'LOCKED'")
+        where.append(f"{AUDIO_OVERALL_VERDICT_SQL} = 'FLAGGED'")
+    elif status:
         where.append("s.review_status = ?"); params.append(status)
     elif not flag_category:
         # Role-based default visibility applies only when neither an explicit
