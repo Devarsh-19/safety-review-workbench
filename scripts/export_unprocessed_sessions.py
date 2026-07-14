@@ -193,18 +193,28 @@ def run(out_path: Path | None, do_delete: bool = False, commit: bool = False) ->
 def _export(conn, out_path: Path) -> set:
     """Write the target sessions to out_path and return the set of session_ids
     actually written (this is the exact set --del operates on)."""
+    # `flagged` per-turn = 1 if the turn carries any ACTIVE flag. We fetch all
+    # flagged (session_id, turn_id) pairs in ONE pass and look them up in memory
+    # instead of a correlated per-turn EXISTS (which, with only idx_flags_status
+    # available, scans the flags table once per turn — O(turns * flags)).
+    # turn_id IS NOT NULL matches the old per-row EXISTS: SQL never treats
+    # NULL = NULL as true, so NULL-turn_id flags (batch_runner writes some) don't
+    # flag any turn. Excluding them here keeps the set-lookup semantics identical.
+    flagged_turns = {
+        (r[0], r[1])
+        for r in conn.execute(
+            f"""SELECT session_id, turn_id FROM flags
+                WHERE status = 'ACTIVE'
+                  AND turn_id IS NOT NULL
+                  AND session_id IN ({_TARGET_SUBQUERY})"""
+        )
+    }
+
     # Pull every turn for the target sessions, in raw input CSV format.
     # Subquery (not an IN list) keeps us clear of SQLite's variable cap.
-    # `flagged` is derived per-turn: 1 if the turn carries any ACTIVE flag.
     rows = conn.execute(
         f"""SELECT t.turn_id, t.session_id, t.speaker, t.message_text,
-                   t.is_automated, t.timestamp, t.language_detected, t.has_link,
-                   EXISTS(
-                       SELECT 1 FROM flags f
-                       WHERE f.session_id = t.session_id
-                         AND f.turn_id    = t.turn_id
-                         AND f.status     = 'ACTIVE'
-                   ) AS flagged
+                   t.is_automated, t.timestamp, t.language_detected, t.has_link
             FROM turns t
             WHERE t.session_id IN ({_TARGET_SUBQUERY})
             ORDER BY t.session_id, t.turn_id"""
@@ -226,7 +236,7 @@ def _export(conn, out_path: Path) -> set:
                 "sent_at_ist":          _fmt_ist(t["timestamp"]),
                 "language_detected":    t["language_detected"] if t["language_detected"] is not None else "",
                 "has_link":             t["has_link"],
-                "flagged":              t["flagged"],
+                "flagged":              1 if (t["session_id"], t["turn_id"]) in flagged_turns else 0,
             })
 
     print(f"  Turns written                    : {len(rows)}")
