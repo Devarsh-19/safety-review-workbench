@@ -478,8 +478,8 @@ export default function SessionQueue({ reviewerName, reviewerRole, onSelectSessi
       {/* Stats strip */}
       <div style={{ flexShrink: 0, display: 'flex', alignItems: 'stretch', background: C.bgStatsrow, borderBottom: `1px solid ${C.border}` }}>
         {statCells.map((cell) => (
-          <div key={cell.label} style={{ flex: 1, padding: '10px 20px',
-            borderRight: `1px solid ${C.border}` }}>
+          <div key={cell.label} style={{ flex: 1, padding: '10px 16px',
+            borderRight: `1px solid ${C.border}`, whiteSpace: 'nowrap' }}>
             <div style={{ fontSize: 18, fontFamily: MONO, fontWeight: 500, color: cell.color }}>
               {cell.value}
             </div>
