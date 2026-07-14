@@ -30,9 +30,16 @@ export default function LoginScreen({ onLogin }) {
   // Stats strip follows the selected workspace: chat stats or audio stats.
   // Both endpoints return total_pending / total_reviewed / total_sessions.
   useEffect(() => {
+    let cancelled = false;
     setStats(null);
     const fetchStats = mode === 'audio' ? getAudioStats : getStats;
-    fetchStats().then(setStats).catch(() => {});
+    fetchStats()
+      .then((data) => { if (!cancelled) setStats(data); })
+      .catch(() => {});
+    // Guard against out-of-order responses: if `mode` changes before this
+    // request resolves, its result is stale and must not overwrite the panel
+    // (otherwise e.g. a late chat response shows chat counts under Audio).
+    return () => { cancelled = true; };
   }, [mode]);
 
   const disabled = !name;

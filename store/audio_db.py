@@ -145,7 +145,7 @@ def fetch_audio_sessions_page(
     whole table, not just the visible page.
     Role-based default visibility mirrors the chat DB (fetch_sessions_page):
     - L1 (no explicit status filter): submitted/locked sessions hidden
-    - L2 (no explicit status filter): locked sessions hidden
+    - L2 (no explicit status filter): only SUBMITTED_FOR_REVIEW sessions shown
     - L1 with a name: only sessions assigned to them
     """
     where, params = ["1=1"], []
@@ -160,7 +160,7 @@ def fetch_audio_sessions_page(
         elif reviewer_role == "L1":
             where.append("s.review_status NOT IN ('SUBMITTED_FOR_REVIEW','LOCKED')")
         elif reviewer_role == "L2":
-            where.append("s.review_status != 'LOCKED'")
+            where.append("s.review_status = 'SUBMITTED_FOR_REVIEW'")
 
     if reviewer_role == "L1" and reviewer_name and reviewer_name != "Locked":
         where.append("s.assigned_to = ?"); params.append(reviewer_name)
