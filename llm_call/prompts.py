@@ -213,7 +213,7 @@ Name: Sexually Inappropriate Content (General)
 Severity: Red
 Description: Sexually inappropriate content that does not fit more specific NSFW sub-categories.
 Examples: Sharing or requesting nude/explicit images; wearing revealing attire on video calls; \
-sending adult GIFs/stickers; "tere g mai toad sakta hu" (vulgar sexual reference)
+sending adult GIFs/stickers
 Counter-examples: Relationship advice in astrological context; cultural terms of endearment; \
 discussion of marital compatibility or romantic timing in horoscope
 
