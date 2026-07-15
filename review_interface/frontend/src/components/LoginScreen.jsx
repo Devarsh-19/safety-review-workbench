@@ -16,6 +16,9 @@ const REVIEWERS = [
   // Audio-only, read-only client persona: sees ONLY finalised (LOCKED) sessions
   // that were flagged. `workspaces` restricts which login workspaces list it.
   { name: 'Astrotalk Review', role: 'L2', workspaces: ['audio'] },
+  // Audio-only L1 bucket for non-Hindi/English/Hinglish (regional-language)
+  // sessions, populated by scripts/assign_multilingual_audio.py.
+  { name: 'Multilingual', role: 'L1', workspaces: ['audio'] },
 ];
 
 const WORKSPACES = [
