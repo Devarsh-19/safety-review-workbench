@@ -5,6 +5,7 @@ Separate universe from the chat DB (store/db.py): its own file, own env var
 """
 
 import os
+import re
 import sqlite3
 from pathlib import Path
 
@@ -40,6 +41,41 @@ AUDIO_OVERALL_VERDICT_SQL = _audio_verdict_sql("s.overall_verdict")
 AUDIO_ASTROTALK_VERDICT_SQL = _audio_verdict_sql("s.astrotalk_verdict")
 
 
+# --- Language classification -------------------------------------------------
+# The audio `lang` column is free-text and may hold a single language ("hindi",
+# "tamil") or a combination ("hindi, english", "hindi-english"). These helpers
+# are the single source of truth for what counts as an allowed language, shared
+# by the DB (Multilingual reviewer filter) and scripts/assign_multilingual_audio.py.
+KEEP_LANGUAGES = {"hindi", "english", "hinglish"}
+
+# Connector words that can appear between languages in a compound value; ignored
+# when tokenising ("hindi and english" -> {hindi, english}).
+_LANG_CONNECTORS = {"and", "mix", "mixed", "with"}
+
+
+def language_tokens(lang: str) -> list[str]:
+    """Split a free-text lang value into recognised language tokens (lower-cased,
+    split on any run of non-letters, connector words dropped). [] when nothing
+    meaningful remains (NULL / empty / punctuation only)."""
+    norm = (lang or "").strip().lower()
+    return [t for t in re.split(r"[^a-z]+", norm) if t and t not in _LANG_CONNECTORS]
+
+
+def is_all_allowed_language(lang) -> bool:
+    """True when lang has >=1 token and EVERY token is an allowed language."""
+    tokens = language_tokens(lang)
+    return bool(tokens) and all(t in KEEP_LANGUAGES for t in tokens)
+
+
+def is_multilingual_language(lang) -> int:
+    """1 when lang has >=1 recognised token AND at least one token is NOT an
+    allowed (Hindi/English/Hinglish) language; else 0. Registered as the SQLite
+    function is_multilingual_lang() for use in WHERE clauses. Sessions with no
+    recognisable language return 0 (not shown to the Multilingual reviewer)."""
+    tokens = language_tokens(lang)
+    return int(bool(tokens) and any(t not in KEEP_LANGUAGES for t in tokens))
+
+
 def get_audio_connection() -> sqlite3.Connection:
     # timeout + WAL + busy_timeout: many reviewers hit the API concurrently
     # from different laptops. WAL lets readers and the writer proceed in
@@ -51,6 +87,9 @@ def get_audio_connection() -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA busy_timeout = 15000")
     conn.execute("PRAGMA synchronous = NORMAL")
+    # Expose the language classifier to SQL so the Multilingual reviewer's queue
+    # can filter to non-Hindi/English/Hinglish sessions in the WHERE clause.
+    conn.create_function("is_multilingual_lang", 1, is_multilingual_language, deterministic=True)
     return conn
 
 
@@ -145,11 +184,23 @@ def fetch_audio_sessions_page(
     whole table, not just the visible page.
     Role-based default visibility mirrors the chat DB (fetch_sessions_page):
     - L1 (no explicit status filter): submitted/locked sessions hidden
+    - L1 (any): regional (non-Hindi/English/Hinglish) sessions hidden entirely
     - L2 (no explicit status filter): only SUBMITTED_FOR_REVIEW sessions shown
     - L1 with a name: only sessions assigned to them
     - "Astrotalk Review": only LOCKED + flagged sessions (read-only client view)
+    - "Multilingual": only non-Hindi/English/Hinglish sessions, never LOCKED
+      (language-defined; not scoped by assignment)
     """
     where, params = ["1=1"], []
+
+    # "Multilingual" is a language-defined reviewer: it sees ONLY sessions whose
+    # language is not a Hindi/English/Hinglish combination, and never LOCKED.
+    # Enforced unconditionally (independent of assignment or other filters).
+    multilingual = reviewer_name == "Multilingual"
+    if multilingual:
+        where.append("is_multilingual_lang(s.lang) = 1")
+        where.append("s.review_status != 'LOCKED'")
+
     # "Astrotalk Review" is a read-only client persona hard-restricted to
     # finalised (LOCKED) sessions that were flagged. Enforced unconditionally so
     # no status/assignee filter can widen the view; other filters (flag category,
@@ -165,15 +216,26 @@ def fetch_audio_sessions_page(
         # surface every matching session regardless of review status (chat parity).
         if reviewer_name == "Locked":
             where.append("s.review_status = 'LOCKED'")
+        elif multilingual:
+            pass  # visibility fully defined by the language + not-LOCKED filter above
         elif reviewer_role == "L1":
             where.append("s.review_status NOT IN ('SUBMITTED_FOR_REVIEW','LOCKED')")
         elif reviewer_role == "L2":
             where.append("s.review_status = 'SUBMITTED_FOR_REVIEW'")
 
-    if reviewer_role == "L1" and reviewer_name and reviewer_name != "Locked":
+    # Multilingual is language-defined (see above), so it is NOT scoped to
+    # sessions assigned to it — it sees every non-Hindi/English/Hinglish session.
+    if reviewer_role == "L1" and reviewer_name and reviewer_name not in ("Locked", "Multilingual"):
         where.append("s.assigned_to = ?"); params.append(reviewer_name)
     elif assigned_to:
         where.append("s.assigned_to LIKE ?"); params.append(f"%{assigned_to}%")
+
+    # Regional-language sessions belong to the Multilingual reviewer ONLY: hide
+    # them from every other L1 reviewer's queue, regardless of status or other
+    # filters. (Multilingual's own view is handled by the language filter above;
+    # L2 still sees submitted regional sessions so they can be finalised.)
+    if reviewer_role == "L1" and not multilingual:
+        where.append("is_multilingual_lang(s.lang) = 0")
 
     if search:
         where.append("CAST(s.s_id AS TEXT) LIKE ?"); params.append(f"%{search}%")
