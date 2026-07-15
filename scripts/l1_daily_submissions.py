@@ -1,22 +1,25 @@
 """
 l1_daily_submissions.py
 
-Read-only report: distinct sessions submitted for review by each L1 reviewer,
-per calendar day. "Submitted" means the session carries a submitted_by /
-submitted_at stamp (set by submit_session_for_review); the non-human auto
-submitter 'LLM' is excluded, so only human L1 reviewers are counted.
+Read-only report: distinct sessions each L1 reviewer submitted for review per
+calendar day. Only sessions currently in review_status 'SUBMITTED_FOR_REVIEW'
+are counted (once L2 locks a session it leaves that status and drops out).
+"Submitted" means the session carries a submitted_by / submitted_at stamp (set
+by submit_session_for_review); the non-human auto submitter 'LLM' is excluded,
+so only human L1 reviewers are counted.
 
 The day is date(submitted_at) (UTC, as stored). Because submitted_at holds one
 timestamp per session, COUNT(DISTINCT session_id) is the number of sessions that
 L1 reviewer submitted that day.
 
-Works on both stores, auto-detected:
-  * chat review DB  — table 'sessions',       id 'session_id'  (store/astrotalk.db)
-  * audio review DB — table 'audio_sessions',  id 's_id'        (store/audio_review.db)
+Works on both stores:
+  * chat review DB  — table 'sessions',       id 'session_id'  (store/astrotalk.db)   [default]
+  * audio review DB — table 'audio_sessions',  id 's_id'        (store/audio_review.db) [--audio]
 
 Usage:
-  python scripts/l1_daily_submissions.py                      # default chat DB
-  python scripts/l1_daily_submissions.py --db store/audio_review.db
+  python scripts/l1_daily_submissions.py                      # chat DB (default)
+  python scripts/l1_daily_submissions.py --audio              # audio DB
+  python scripts/l1_daily_submissions.py --db path/to.db      # explicit DB
   python scripts/l1_daily_submissions.py --csv out.csv        # also write long CSV
   python scripts/l1_daily_submissions.py --since 2026-07-01   # only days >= date
 
@@ -25,12 +28,21 @@ Read-only: never writes to the database.
 
 import argparse
 import csv
+import os
 import sqlite3
 import sys
 from pathlib import Path
 
+from dotenv import load_dotenv
+load_dotenv()
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DB = PROJECT_ROOT / "store" / "astrotalk.db"
+# --audio target: the audio review DB, honouring AUDIO_DB_PATH (see store/audio_db.py).
+AUDIO_DB = PROJECT_ROOT / os.getenv("AUDIO_DB_PATH", "store/audio_review.db")
+
+# Only sessions still awaiting L2 are counted.
+SUBMITTED_STATUS = "SUBMITTED_FOR_REVIEW"
 
 # Non-human submitters excluded from the L1 tally.
 NON_L1_SUBMITTERS = ("LLM",)
@@ -52,7 +64,7 @@ def fetch_rows(conn: sqlite3.Connection, table: str, id_col: str,
                since: str | None) -> list[tuple[str, str, int]]:
     """[(day, l1_user, distinct_session_count), ...] ordered by day, then user."""
     placeholders = ", ".join("?" for _ in NON_L1_SUBMITTERS)
-    params: list = list(NON_L1_SUBMITTERS)
+    params: list = [SUBMITTED_STATUS, *NON_L1_SUBMITTERS]
     since_clause = ""
     if since:
         since_clause = "AND date(submitted_at) >= ?"
@@ -62,7 +74,8 @@ def fetch_rows(conn: sqlite3.Connection, table: str, id_col: str,
                submitted_by               AS l1,
                COUNT(DISTINCT {id_col})   AS n
         FROM {table}
-        WHERE submitted_by IS NOT NULL
+        WHERE review_status = ?
+          AND submitted_by IS NOT NULL
           AND submitted_by NOT IN ({placeholders})
           AND submitted_at IS NOT NULL
           {since_clause}
@@ -143,15 +156,23 @@ def write_csv(rows: list[tuple[str, str, int]], path: Path) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser(
         description="Distinct sessions submitted per L1 reviewer per day (read-only).")
-    ap.add_argument("--db", default=str(DEFAULT_DB),
-                    help=f"SQLite DB path (default: {DEFAULT_DB}).")
+    ap.add_argument("--audio", action="store_true",
+                    help="Use the audio review DB (store/audio_review.db or "
+                         "$AUDIO_DB_PATH) instead of the chat DB.")
+    ap.add_argument("--db",
+                    help="Explicit SQLite DB path (overrides --audio and the default chat DB).")
     ap.add_argument("--since", metavar="YYYY-MM-DD",
                     help="Only include days on/after this date.")
     ap.add_argument("--csv", metavar="PATH",
                     help="Also write the long (date, user, count) rows to a CSV.")
     args = ap.parse_args()
 
-    db_path = Path(args.db)
+    if args.db:
+        db_path = Path(args.db)
+    elif args.audio:
+        db_path = Path(AUDIO_DB)
+    else:
+        db_path = Path(DEFAULT_DB)
     if not db_path.exists():
         sys.exit(f"Database not found: {db_path}")
 
@@ -167,6 +188,7 @@ def main() -> None:
     print("=" * 62)
     print(f"  DB     : {db_path}")
     print(f"  Table  : {table} (id: {id_col})")
+    print(f"  Status : {SUBMITTED_STATUS} only")
     print(f"  Excludes submitted_by in {NON_L1_SUBMITTERS}"
           + (f"; since {args.since}" if args.since else ""))
     print()
