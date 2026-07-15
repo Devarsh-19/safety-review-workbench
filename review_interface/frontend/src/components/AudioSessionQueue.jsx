@@ -382,7 +382,10 @@ export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelect
   const countFn = stats?.count_fn ?? 0;
   const countTn = stats?.count_tn ?? 0;
   const totalReviewedEval = countTp + countFp + countFn + countTn;
-  const pctTp = totalReviewedEval ? ((countTp / totalReviewedEval) * 100).toFixed(2) : '0.00';
+  // "at_flag = True" population = sessions AstroTalk flagged = TP + FP.
+  // True Positive % is therefore precision: TP / (TP + FP).
+  const totalAtFlag = countTp + countFp;
+  const pctTp = totalAtFlag ? ((countTp / totalAtFlag) * 100).toFixed(2) : '0.00';
   const pctFp = totalReviewedEval ? ((countFp / totalReviewedEval) * 100).toFixed(2) : '0.00';
   const pctFn = totalReviewedEval ? ((countFn / totalReviewedEval) * 100).toFixed(2) : '0.00';
   const pctTn = totalReviewedEval ? ((countTn / totalReviewedEval) * 100).toFixed(2) : '0.00';
