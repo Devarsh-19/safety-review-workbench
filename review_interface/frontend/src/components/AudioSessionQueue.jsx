@@ -197,9 +197,11 @@ export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelect
     { label: 'Pending for L1 Review', value: stats?.total_pending ?? 0, color: (stats?.total_pending ?? 0) > 0 ? C.accent : C.textSecondary },
     { label: 'Submitted for L2 Review', value: stats?.count_submitted ?? 0, color: (stats?.count_submitted ?? 0) > 0 ? '#185FA5' : C.textSecondary },
     { label: 'Clean', value: stats?.count_clean ?? 0, color: (stats?.count_clean ?? 0) > 0 ? C.cleanText : C.textSecondary },
-    { label: 'Locked · Clean', value: lockedClean, color: lockedClean > 0 ? C.cleanText : C.textSecondary },
-    { label: 'Locked · Flagged', value: lockedFlagged, color: lockedFlagged > 0 ? C.flaggedText : C.textSecondary },
-    { label: 'Locked · Total', value: lockedTotal, color: lockedTotal > 0 ? '#444441' : C.textSecondary },
+    { label: 'Locked Total', value: lockedTotal, color: lockedTotal > 0 ? '#444441' : C.textSecondary,
+      children: [
+        { label: 'Clean', value: lockedClean, color: lockedClean > 0 ? C.cleanText : C.textSecondary },
+        { label: 'Flagged', value: lockedFlagged, color: lockedFlagged > 0 ? C.flaggedText : C.textSecondary },
+      ] },
     { label: 'Total Flagged session by LLM', value: totalFlagged, color: totalFlagged > 0 ? C.flaggedText : C.textSecondary },
   ];
 
@@ -451,6 +453,15 @@ export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelect
               <div style={{ fontSize: 11, color: C.textSecondary, marginTop: 2 }}>
                 {cell.label}
               </div>
+              {cell.children && (
+                <div style={{ marginTop: 6, display: 'flex', gap: 10, justifyContent: 'center' }}>
+                  {cell.children.map((ch) => (
+                    <div key={ch.label} style={{ fontSize: 10, color: C.textSecondary }}>
+                      <span style={{ fontFamily: MONO, fontWeight: 600, color: ch.color }}>{ch.value}</span> {ch.label}
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           ))}
           <div style={{
