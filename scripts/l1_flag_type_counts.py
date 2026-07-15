@@ -1,11 +1,11 @@
 """
 l1_flag_type_counts.py
 
-Read-only report: per L1 reviewer, how many distinct sessions carry each flag
-type (NSFW, CSAM_RISK, ABUSIVE_LANGUAGE, …) among the sessions they submitted.
-The count is distinct sessions, so two NSFW flags on one session count once.
-Prints a nested dictionary { l1_user: { FLAG_TYPE: distinct_session_count } }
-plus a { l1_user: number of distinct flag types } summary.
+Read-only report: how many distinct L1-submitted sessions carry each flag type
+(NSFW, CSAM_RISK, ABUSIVE_LANGUAGE, …). Prints a flat dictionary
+{ FLAG_TYPE: distinct_session_count } sorted highest-first, e.g.
+{'CSAM_RISK': 32, 'ABUSIVE_LANGUAGE': 15, ...}. The count is distinct sessions,
+so two NSFW flags on one session count once.
 
 Attribution: a flag is credited to the L1 who submitted its session
 (sessions.submitted_by / audio_sessions.submitted_by). The flags tables don't
@@ -75,8 +75,12 @@ def detect_store(conn: sqlite3.Connection) -> str:
 
 
 def fetch_counts(conn: sqlite3.Connection, store: str,
-                 since: str | None) -> dict[str, dict[str, int]]:
-    """Nested { l1_user: { FLAG_TYPE: count } }."""
+                 since: str | None) -> dict[str, int]:
+    """{ FLAG_TYPE: distinct_session_count }, highest count first.
+
+    Distinct sessions across all L1-submitted sessions — each session is counted
+    once per flag type it carries, regardless of how many flags of that type or
+    which L1 submitted it."""
     s = SCHEMA[store]
     ph = ", ".join("?" for _ in NON_L1_SUBMITTERS)
     params: list = list(NON_L1_SUBMITTERS)
@@ -86,9 +90,8 @@ def fetch_counts(conn: sqlite3.Connection, store: str,
         params.append(since)
     norm_type = f"UPPER(REPLACE(REPLACE(TRIM(f.{s['type']}), '-', '_'), ' ', '_'))"
     sql = f"""
-        SELECT se.submitted_by            AS l1,
-               {norm_type}                AS ftype,
-               COUNT(DISTINCT f.{s['sid']}) AS n
+        SELECT {norm_type}                  AS ftype,
+               COUNT(DISTINCT f.{s['sid']})  AS n
         FROM {s['flags']} f
         JOIN {s['sessions']} se ON se.{s['sid']} = f.{s['sid']}
         WHERE se.submitted_by IS NOT NULL
@@ -100,13 +103,10 @@ def fetch_counts(conn: sqlite3.Connection, store: str,
               SELECT parent_flag_id FROM {s['flags']} WHERE parent_flag_id IS NOT NULL
           )
           {since_clause}
-        GROUP BY l1, ftype
-        ORDER BY l1, ftype
+        GROUP BY ftype
+        ORDER BY n DESC, ftype
     """
-    out: dict[str, dict[str, int]] = {}
-    for l1, ftype, n in conn.execute(sql, params).fetchall():
-        out.setdefault(l1, {})[ftype] = n
-    return out
+    return {ftype: n for ftype, n in conn.execute(sql, params).fetchall()}
 
 
 def main() -> None:
@@ -139,23 +139,20 @@ def main() -> None:
     finally:
         conn.close()
 
-    distinct_types = {user: len(types) for user, types in counts.items()}
-
     if args.json:
-        print(json.dumps(counts, indent=2, sort_keys=True))
+        # Preserve the count-descending order in the JSON too.
+        print(json.dumps(counts, indent=2, sort_keys=False))
         return
 
-    print("# Distinct sessions per flag type, per L1 user")
+    print("# Distinct L1-submitted sessions per flag type")
     print(f"#   DB    : {db_path}")
     print(f"#   Store : {store}"
           + (f"   since {args.since}" if args.since else ""))
     print(f"#   Excludes submitted_by in {NON_L1_SUBMITTERS}; "
           "DISMISSED + amendment-superseded flags")
     print()
-    print(pformat(counts, sort_dicts=True, width=100))
-    print()
-    print("# Distinct flag types per L1 user")
-    print(pformat(distinct_types, sort_dicts=True, width=100))
+    # sort_dicts=False keeps the query's count-descending order.
+    print(pformat(counts, sort_dicts=False, width=60))
 
 
 if __name__ == "__main__":
