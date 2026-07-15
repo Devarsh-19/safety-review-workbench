@@ -188,14 +188,19 @@ export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelect
   };
 
   const totalFlagged = stats?.count_flagged ?? 0;
+  const lockedClean = stats?.count_locked_clean ?? 0;
+  const lockedFlagged = stats?.count_locked_flagged ?? 0;
+  const lockedTotal = lockedClean + lockedFlagged;
 
   const statCells = [
     { label: 'Total', value: stats?.total_sessions ?? 0, color: C.textPrimary },
     { label: 'Pending for L1 Review', value: stats?.total_pending ?? 0, color: (stats?.total_pending ?? 0) > 0 ? C.accent : C.textSecondary },
-    { label: 'Submitted', value: stats?.count_submitted ?? 0, color: (stats?.count_submitted ?? 0) > 0 ? '#185FA5' : C.textSecondary },
+    { label: 'Submitted for L2 Review', value: stats?.count_submitted ?? 0, color: (stats?.count_submitted ?? 0) > 0 ? '#185FA5' : C.textSecondary },
     { label: 'Clean', value: stats?.count_clean ?? 0, color: (stats?.count_clean ?? 0) > 0 ? C.cleanText : C.textSecondary },
-    { label: 'Locked', value: stats?.count_locked ?? 0, color: (stats?.count_locked ?? 0) > 0 ? '#444441' : C.textSecondary },
-    { label: 'Flagged by LLM Sessions', value: totalFlagged, color: totalFlagged > 0 ? C.flaggedText : C.textSecondary },
+    { label: 'Locked · Clean', value: lockedClean, color: lockedClean > 0 ? C.cleanText : C.textSecondary },
+    { label: 'Locked · Flagged', value: lockedFlagged, color: lockedFlagged > 0 ? C.flaggedText : C.textSecondary },
+    { label: 'Locked · Total', value: lockedTotal, color: lockedTotal > 0 ? '#444441' : C.textSecondary },
+    { label: 'Total Flagged session by LLM', value: totalFlagged, color: totalFlagged > 0 ? C.flaggedText : C.textSecondary },
   ];
 
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));

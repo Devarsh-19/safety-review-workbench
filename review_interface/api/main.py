@@ -1116,6 +1116,8 @@ def audio_stats(
                     SUM(CASE WHEN review_status = 'PENDING'              THEN 1 ELSE 0 END) AS total_pending,
                     SUM(CASE WHEN review_status = 'SUBMITTED_FOR_REVIEW' THEN 1 ELSE 0 END) AS count_submitted,
                     SUM(CASE WHEN review_status = 'LOCKED'               THEN 1 ELSE 0 END) AS count_locked,
+                    SUM(CASE WHEN review_status = 'LOCKED' AND overall_verdict = 'CLEAN'                THEN 1 ELSE 0 END) AS count_locked_clean,
+                    SUM(CASE WHEN review_status = 'LOCKED' AND overall_verdict IN ('FLAGGED', 'SEVERE') THEN 1 ELSE 0 END) AS count_locked_flagged,
                     0                                                    AS count_severe,
                     SUM(CASE WHEN overall_verdict IN ('FLAGGED', 'SEVERE') THEN 1 ELSE 0 END) AS count_flagged,
                     SUM(CASE WHEN overall_verdict = 'CLEAN'              THEN 1 ELSE 0 END) AS count_clean,
@@ -1147,7 +1149,8 @@ def audio_stats(
     except Exception:
         result = {
             "total_sessions": 0, "total_pending": 0, "count_submitted": 0,
-            "count_locked": 0, "count_severe": 0, "count_flagged": 0,
+            "count_locked": 0, "count_locked_clean": 0, "count_locked_flagged": 0,
+            "count_severe": 0, "count_flagged": 0,
             "count_clean": 0, "total_reviewed": 0,
             "count_tp": 0, "count_fp": 0, "count_fn": 0, "count_tn": 0,
         }
