@@ -69,9 +69,9 @@ def is_all_allowed_language(lang) -> bool:
 
 def is_multilingual_language(lang) -> int:
     """1 when lang has >=1 recognised token AND at least one token is NOT an
-    allowed (Hindi/English/Hinglish) language; else 0. Registered as the SQLite
-    function is_multilingual_lang() for use in WHERE clauses. Sessions with no
-    recognisable language return 0 (not shown to the Multilingual reviewer)."""
+    allowed (Hindi/English/Hinglish) language; else 0. Used at assignment time
+    (scripts/assign_audio_sessions.py) to route regional sessions to the
+    "Multilingual" reviewer. Sessions with no recognisable language return 0."""
     tokens = language_tokens(lang)
     return int(bool(tokens) and any(t not in KEEP_LANGUAGES for t in tokens))
 
@@ -87,9 +87,6 @@ def get_audio_connection() -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA busy_timeout = 15000")
     conn.execute("PRAGMA synchronous = NORMAL")
-    # Expose the language classifier to SQL so the Multilingual reviewer's queue
-    # can filter to non-Hindi/English/Hinglish sessions in the WHERE clause.
-    conn.create_function("is_multilingual_lang", 1, is_multilingual_language, deterministic=True)
     return conn
 
 
@@ -184,22 +181,13 @@ def fetch_audio_sessions_page(
     whole table, not just the visible page.
     Role-based default visibility mirrors the chat DB (fetch_sessions_page):
     - L1 (no explicit status filter): submitted/locked sessions hidden
-    - L1 (any): regional (non-Hindi/English/Hinglish) sessions hidden entirely
     - L2 (no explicit status filter): only SUBMITTED_FOR_REVIEW sessions shown
-    - L1 with a name: only sessions assigned to them
+    - L1 with a name: only sessions assigned to them. "Multilingual" is a plain
+      assignee like any other L1 reviewer — regional (non-Hindi/English/Hinglish)
+      sessions are routed to it at assignment time (assign_audio_sessions.py).
     - "Astrotalk Review": only LOCKED + flagged sessions (read-only client view)
-    - "Multilingual": only non-Hindi/English/Hinglish sessions, never LOCKED
-      (language-defined; not scoped by assignment)
     """
     where, params = ["1=1"], []
-
-    # "Multilingual" is a language-defined reviewer: it sees ONLY sessions whose
-    # language is not a Hindi/English/Hinglish combination, and never LOCKED.
-    # Enforced unconditionally (independent of assignment or other filters).
-    multilingual = reviewer_name == "Multilingual"
-    if multilingual:
-        where.append("is_multilingual_lang(s.lang) = 1")
-        where.append("s.review_status != 'LOCKED'")
 
     # "Astrotalk Review" is a read-only client persona hard-restricted to
     # finalised (LOCKED) sessions that were flagged. Enforced unconditionally so
@@ -216,26 +204,18 @@ def fetch_audio_sessions_page(
         # surface every matching session regardless of review status (chat parity).
         if reviewer_name == "Locked":
             where.append("s.review_status = 'LOCKED'")
-        elif multilingual:
-            pass  # visibility fully defined by the language + not-LOCKED filter above
         elif reviewer_role == "L1":
             where.append("s.review_status NOT IN ('SUBMITTED_FOR_REVIEW','LOCKED')")
         elif reviewer_role == "L2":
             where.append("s.review_status = 'SUBMITTED_FOR_REVIEW'")
 
-    # Multilingual is language-defined (see above), so it is NOT scoped to
-    # sessions assigned to it — it sees every non-Hindi/English/Hinglish session.
-    if reviewer_role == "L1" and reviewer_name and reviewer_name not in ("Locked", "Multilingual"):
+    # L1 reviewers (including "Multilingual", now a plain assignee) are scoped to
+    # the sessions assigned to them. Regional-language sessions are routed to
+    # "Multilingual" at assignment time, so no language-based filtering is needed.
+    if reviewer_role == "L1" and reviewer_name and reviewer_name != "Locked":
         where.append("s.assigned_to = ?"); params.append(reviewer_name)
     elif assigned_to:
         where.append("s.assigned_to LIKE ?"); params.append(f"%{assigned_to}%")
-
-    # Regional-language sessions belong to the Multilingual reviewer ONLY: hide
-    # them from every other L1 reviewer's queue, regardless of status or other
-    # filters. (Multilingual's own view is handled by the language filter above;
-    # L2 still sees submitted regional sessions so they can be finalised.)
-    if reviewer_role == "L1" and not multilingual:
-        where.append("is_multilingual_lang(s.lang) = 0")
 
     if search:
         where.append("CAST(s.s_id AS TEXT) LIKE ?"); params.append(f"%{search}%")

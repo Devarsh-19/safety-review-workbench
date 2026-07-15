@@ -1099,13 +1099,9 @@ def audio_stats(
     reviewer_name: Optional[str] = None,
     reviewer_role: Optional[str] = None,
 ):
-    # "Multilingual" is language-defined: scope its cards to the same population
-    # its queue shows (non-Hindi/English/Hinglish, never LOCKED), not by assignee.
-    if reviewer_name == "Multilingual":
-        scope  = " WHERE is_multilingual_lang(lang) = 1 AND review_status != 'LOCKED'"
-        params = ()
-    # L1: scope all counts to sessions assigned to this reviewer (chat parity)
-    elif reviewer_role == "L1" and reviewer_name:
+    # L1 (incl. "Multilingual", now a plain assignee): scope all counts to the
+    # sessions assigned to this reviewer (chat parity).
+    if reviewer_role == "L1" and reviewer_name:
         scope  = " WHERE assigned_to = ?"
         params = (reviewer_name,)
     else:
