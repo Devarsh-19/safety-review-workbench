@@ -2,11 +2,11 @@
 l1_daily_submissions.py
 
 Read-only report: distinct sessions each L1 reviewer submitted for review per
-calendar day. Only sessions currently in review_status 'SUBMITTED_FOR_REVIEW'
-are counted (once L2 locks a session it leaves that status and drops out).
-"Submitted" means the session carries a submitted_by / submitted_at stamp (set
-by submit_session_for_review); the non-human auto submitter 'LLM' is excluded,
-so only human L1 reviewers are counted.
+calendar day, whether the session is still SUBMITTED_FOR_REVIEW or has since been
+LOCKED. A session counts only if a human L1 submitted it for review (it carries a
+submitted_by / submitted_at stamp); sessions locked WITHOUT being submitted — e.g.
+auto-processed clean sessions that went straight to LOCKED with submitted_by
+'LLM' / 'AUTO_LOCK' — are NOT counted.
 
 The day is date(submitted_at) (UTC, as stored). Because submitted_at holds one
 timestamp per session, COUNT(DISTINCT session_id) is the number of sessions that
@@ -41,11 +41,15 @@ DEFAULT_DB = PROJECT_ROOT / "store" / "astrotalk.db"
 # --audio target: the audio review DB, honouring AUDIO_DB_PATH (see store/audio_db.py).
 AUDIO_DB = PROJECT_ROOT / os.getenv("AUDIO_DB_PATH", "store/audio_review.db")
 
-# Only sessions still awaiting L2 are counted.
-SUBMITTED_STATUS = "SUBMITTED_FOR_REVIEW"
+# Count sessions in either of these statuses (submitted for review, or locked
+# after having been submitted). PENDING and any other status are ignored.
+COUNTED_STATUSES = ("SUBMITTED_FOR_REVIEW", "LOCKED")
 
-# Non-human submitters excluded from the L1 tally.
-NON_L1_SUBMITTERS = ("LLM",)
+# Non-human submitters excluded from the L1 tally: 'LLM' (auto-submitted clean
+# sessions) and 'AUTO_LOCK' (sessions the auto-process script locked without a
+# human ever submitting them). Filtering these keeps only real L1 submissions —
+# so a LOCKED session only counts if a human submitted it for review first.
+NON_L1_SUBMITTERS = ("LLM", "AUTO_LOCK")
 
 
 def detect_table(conn: sqlite3.Connection) -> tuple[str, str]:
@@ -63,8 +67,9 @@ def detect_table(conn: sqlite3.Connection) -> tuple[str, str]:
 def fetch_rows(conn: sqlite3.Connection, table: str, id_col: str,
                since: str | None) -> list[tuple[str, str, int]]:
     """[(day, l1_user, distinct_session_count), ...] ordered by day, then user."""
-    placeholders = ", ".join("?" for _ in NON_L1_SUBMITTERS)
-    params: list = [SUBMITTED_STATUS, *NON_L1_SUBMITTERS]
+    status_ph = ", ".join("?" for _ in COUNTED_STATUSES)
+    sub_ph = ", ".join("?" for _ in NON_L1_SUBMITTERS)
+    params: list = [*COUNTED_STATUSES, *NON_L1_SUBMITTERS]
     since_clause = ""
     if since:
         since_clause = "AND date(submitted_at) >= ?"
@@ -74,9 +79,9 @@ def fetch_rows(conn: sqlite3.Connection, table: str, id_col: str,
                submitted_by               AS l1,
                COUNT(DISTINCT {id_col})   AS n
         FROM {table}
-        WHERE review_status = ?
+        WHERE review_status IN ({status_ph})
           AND submitted_by IS NOT NULL
-          AND submitted_by NOT IN ({placeholders})
+          AND submitted_by NOT IN ({sub_ph})
           AND submitted_at IS NOT NULL
           {since_clause}
         GROUP BY day, l1
@@ -188,7 +193,7 @@ def main() -> None:
     print("=" * 62)
     print(f"  DB     : {db_path}")
     print(f"  Table  : {table} (id: {id_col})")
-    print(f"  Status : {SUBMITTED_STATUS} only")
+    print(f"  Status : {' + '.join(COUNTED_STATUSES)} (submitted by a human L1)")
     print(f"  Excludes submitted_by in {NON_L1_SUBMITTERS}"
           + (f"; since {args.since}" if args.since else ""))
     print()
