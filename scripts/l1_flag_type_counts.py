@@ -1,10 +1,11 @@
 """
 l1_flag_type_counts.py
 
-Read-only report: per L1 reviewer, how many flags of each flag type (NSFW,
-CSAM_RISK, ABUSIVE_LANGUAGE, …) live on the sessions they submitted. Prints a
-nested dictionary { l1_user: { FLAG_TYPE: count } } plus a { l1_user: number of
-distinct flag types } summary.
+Read-only report: per L1 reviewer, how many distinct sessions carry each flag
+type (NSFW, CSAM_RISK, ABUSIVE_LANGUAGE, …) among the sessions they submitted.
+The count is distinct sessions, so two NSFW flags on one session count once.
+Prints a nested dictionary { l1_user: { FLAG_TYPE: distinct_session_count } }
+plus a { l1_user: number of distinct flag types } summary.
 
 Attribution: a flag is credited to the L1 who submitted its session
 (sessions.submitted_by / audio_sessions.submitted_by). The flags tables don't
@@ -87,7 +88,7 @@ def fetch_counts(conn: sqlite3.Connection, store: str,
     sql = f"""
         SELECT se.submitted_by            AS l1,
                {norm_type}                AS ftype,
-               COUNT(*)                   AS n
+               COUNT(DISTINCT f.{s['sid']}) AS n
         FROM {s['flags']} f
         JOIN {s['sessions']} se ON se.{s['sid']} = f.{s['sid']}
         WHERE se.submitted_by IS NOT NULL
@@ -144,7 +145,7 @@ def main() -> None:
         print(json.dumps(counts, indent=2, sort_keys=True))
         return
 
-    print("# Flags per flag type, per L1 user")
+    print("# Distinct sessions per flag type, per L1 user")
     print(f"#   DB    : {db_path}")
     print(f"#   Store : {store}"
           + (f"   since {args.since}" if args.since else ""))
