@@ -179,7 +179,11 @@ export default function SessionQueue({ reviewerName, reviewerRole, onSelectSessi
       dMinDur, dMaxDur, dMinTurns, dMaxTurns, sortCol, sortDir, page]);
 
   useEffect(() => {
-    setLoading(true);
+    // Do NOT flip `loading` back to true on refetches. `loading` starts true for
+    // the first mount and is cleared once the first fetch resolves; after that we
+    // keep the current rows on screen while a new fetch runs in the background.
+    // Otherwise every debounced search keystroke blanked the whole table to a
+    // "Loading sessions…" spinner, which made typing a session ID jarring.
     fetchAll().finally(() => setLoading(false));
   }, [fetchAll]);
 
