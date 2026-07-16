@@ -6,7 +6,7 @@ import StatusBadge from './StatusBadge';
 import VerdictBadge from './VerdictBadge';
 import LoadingSpinner from './LoadingSpinner';
 import HasVideoBadge from './HasVideoBadge';
-import { getAudioSessions, getAudioStats, lockAudioSession, getAudioViolationStats } from '../api';
+import { getAudioSessions, getAudioStats, lockAudioSession, lockAllSubmittedAudioSessions, getAudioViolationStats } from '../api';
 
 const PAGE_SIZE = 50;
 
@@ -185,6 +185,22 @@ export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelect
     lockAudioSession(sId, reviewerName)
       .then(load)
       .catch((err) => setError(String(err.message || err)));
+  };
+
+  // L2 bulk action: lock every session currently submitted for review.
+  const [lockingAll, setLockingAll] = useState(false);
+  const submittedCount = stats?.count_submitted ?? 0;
+  const handleLockAllSubmitted = () => {
+    if (submittedCount === 0 || lockingAll) return;
+    // eslint-disable-next-line no-alert
+    if (!window.confirm(
+      `Lock all ${submittedCount} session(s) submitted for review? This freezes their flags and review decisions.`
+    )) return;
+    setLockingAll(true);
+    lockAllSubmittedAudioSessions(reviewerName)
+      .then(load)
+      .catch((err) => setError(String(err.message || err)))
+      .finally(() => setLockingAll(false));
   };
 
   const totalFlagged = stats?.count_flagged ?? 0;
@@ -601,20 +617,41 @@ export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelect
           </div>
         )}
 
-        {/* Filters live in the table header (one control per column). This bar
-            only hosts the reset action so active filters are easy to back out of. */}
-        {hasActiveFilters && (
-          <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 8 }}>
-            <button
-              onClick={clearFilters}
-              style={{
-                padding: '6px 12px', fontSize: 12, borderRadius: 4,
-                border: `1px solid ${C.border}`, background: C.bgSurface,
-                color: C.textPrimary, cursor: 'pointer',
-              }}
-            >
-              ✕ Clear all filters
-            </button>
+        {/* Toolbar directly above the table (below the per-column filters and
+            the Action column). Left: L2 bulk-lock action. Right: filter reset. */}
+        {(reviewerRole === 'L2' || hasActiveFilters) && (
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+            <div>
+              {reviewerRole === 'L2' && (
+                <button
+                  onClick={handleLockAllSubmitted}
+                  disabled={lockingAll || submittedCount === 0}
+                  title={submittedCount === 0 ? 'No sessions are submitted for review' : ''}
+                  style={{
+                    padding: '6px 12px', fontSize: 12, borderRadius: 4,
+                    border: `1px solid ${submittedCount > 0 ? C.accent : C.border}`,
+                    background: submittedCount > 0 ? C.accent : C.bgSurface,
+                    color: submittedCount > 0 ? '#FFFFFF' : C.textSecondary,
+                    cursor: (lockingAll || submittedCount === 0) ? 'not-allowed' : 'pointer',
+                    opacity: lockingAll ? 0.7 : 1,
+                  }}
+                >
+                  {lockingAll ? 'Locking…' : `🔒 Lock all submitted (${submittedCount})`}
+                </button>
+              )}
+            </div>
+            {hasActiveFilters ? (
+              <button
+                onClick={clearFilters}
+                style={{
+                  padding: '6px 12px', fontSize: 12, borderRadius: 4,
+                  border: `1px solid ${C.border}`, background: C.bgSurface,
+                  color: C.textPrimary, cursor: 'pointer',
+                }}
+              >
+                ✕ Clear all filters
+              </button>
+            ) : <span />}
           </div>
         )}
 

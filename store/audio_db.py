@@ -460,6 +460,37 @@ def lock_audio_session(s_id: int, reviewer_id: str) -> None:
         )
 
 
+def lock_all_submitted_audio_sessions(reviewer_id: str) -> int:
+    """Bulk-lock every audio session currently SUBMITTED_FOR_REVIEW.
+
+    Mirrors lock_audio_session (including one 'LOCK' audio_review_log row per
+    session); returns how many were locked so the L2 'Lock all submitted'
+    action can report the count.
+    """
+    with get_audio_connection() as conn:
+        s_ids = [
+            r["s_id"] for r in conn.execute(
+                "SELECT s_id FROM audio_sessions WHERE review_status = 'SUBMITTED_FOR_REVIEW'"
+            ).fetchall()
+        ]
+        if not s_ids:
+            return 0
+        conn.execute(
+            """UPDATE audio_sessions
+               SET review_status = 'LOCKED',
+                   locked_by     = ?,
+                   locked_at     = datetime('now')
+               WHERE review_status = 'SUBMITTED_FOR_REVIEW'""",
+            (reviewer_id,),
+        )
+        conn.executemany(
+            """INSERT INTO audio_review_log (s_id, action, reviewer_id, note)
+               VALUES (?, 'LOCK', ?, '')""",
+            [(s_id, reviewer_id) for s_id in s_ids],
+        )
+        return len(s_ids)
+
+
 def unlock_audio_session(s_id: int, reviewer_id: str = None) -> None:
     # Same transition as the chat DB: unlock lands on REVIEWED, not back on
     # SUBMITTED_FOR_REVIEW (see store/db.py unlock_session).

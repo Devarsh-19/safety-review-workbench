@@ -34,6 +34,7 @@ from store.db import (
     mark_needs_final_review,
     get_session_flag_summary,
     lock_session,
+    lock_all_submitted_sessions,
     unlock_session,
     initialise_db,
     recompute_session_verdict,
@@ -47,6 +48,7 @@ from store.audio_db import (
     submit_audio_session,
     set_audio_session_risk,
     lock_audio_session,
+    lock_all_submitted_audio_sessions,
     unlock_audio_session,
     recompute_audio_session_verdict,
     get_audio_flag_summary,
@@ -656,6 +658,21 @@ def manual_flag(session_id: str, body: ManualFlagRequest):
         raise HTTPException(status_code=500, detail=str(exc))
     finally:
         conn.close()
+
+
+@app.post("/sessions/lock-all-submitted")
+def lock_all_submitted_endpoint(body: LockRequest):
+    """L2 bulk action: lock every chat session currently SUBMITTED_FOR_REVIEW.
+
+    Declared before /sessions/{session_id}/lock so the literal path wins the
+    route match. Returns the number of sessions locked.
+    """
+    _require_l2(body.reviewer_id, "lock sessions")
+    try:
+        locked = lock_all_submitted_sessions(body.reviewer_id)
+        return {"success": True, "locked": locked, "locked_by": body.reviewer_id}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 @app.post("/sessions/{session_id}/lock")
@@ -1597,6 +1614,21 @@ def audio_submit(s_id: int, body: SubmitRequest):
     try:
         submit_audio_session(s_id, body.reviewer_id, body.note or None)
         return {"success": True, "s_id": s_id}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/audio/sessions/lock-all-submitted")
+def audio_lock_all_submitted(body: LockRequest):
+    """L2 bulk action: lock every audio session currently SUBMITTED_FOR_REVIEW.
+
+    Declared before /audio/sessions/{s_id}/lock so the literal path wins the
+    route match. Returns the number of sessions locked.
+    """
+    _require_l2(body.reviewer_id, "lock sessions")
+    try:
+        locked = lock_all_submitted_audio_sessions(body.reviewer_id)
+        return {"success": True, "locked": locked, "locked_by": body.reviewer_id}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 

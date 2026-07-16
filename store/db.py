@@ -456,6 +456,24 @@ def lock_session(session_id: str, reviewer_id: str) -> None:
         )
 
 
+def lock_all_submitted_sessions(reviewer_id: str) -> int:
+    """Bulk-lock every session currently SUBMITTED_FOR_REVIEW in one pass.
+
+    Same per-session effect as lock_session; returns how many were locked so
+    the caller (L2 'Lock all submitted' action) can report the count.
+    """
+    with get_connection() as conn:
+        cur = conn.execute(
+            """UPDATE sessions
+               SET review_status = 'LOCKED',
+                   locked_by     = ?,
+                   locked_at     = datetime('now')
+               WHERE review_status = 'SUBMITTED_FOR_REVIEW'""",
+            (reviewer_id,),
+        )
+        return cur.rowcount
+
+
 def unlock_session(session_id: str) -> None:
     with get_connection() as conn:
         conn.execute(

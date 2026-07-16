@@ -148,6 +148,15 @@ export function markNeedsFinalReview(sessionId, reviewerId) {
   });
 }
 
+// L2 bulk action: lock every chat session currently SUBMITTED_FOR_REVIEW.
+export function lockAllSubmittedSessions(reviewerId) {
+  return request('/sessions/lock-all-submitted', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ reviewer_id: reviewerId }),
+  });
+}
+
 // ── Audio review ───────────────────────────────────────────────────────────
 
 export function getAudioStats(params = {}) {
@@ -281,6 +290,15 @@ export function lockAudioSession(sId, reviewerId) {
 
 export function unlockAudioSession(sId, reviewerId) {
   return request(`/audio/sessions/${sId}/unlock`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ reviewer_id: reviewerId }),
+  });
+}
+
+// L2 bulk action: lock every audio session currently SUBMITTED_FOR_REVIEW.
+export function lockAllSubmittedAudioSessions(reviewerId) {
+  return request('/audio/sessions/lock-all-submitted', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ reviewer_id: reviewerId }),

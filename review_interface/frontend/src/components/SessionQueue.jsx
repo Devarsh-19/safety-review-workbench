@@ -5,7 +5,7 @@ import Footer from './Footer';
 import VerdictBadge from './VerdictBadge';
 import StatusBadge from './StatusBadge';
 import LoadingSpinner from './LoadingSpinner';
-import { getSessions, getStats, submitReview, exportCsv, getViolationStats } from '../api';
+import { getSessions, getStats, submitReview, exportCsv, getViolationStats, lockAllSubmittedSessions } from '../api';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -293,6 +293,21 @@ export default function SessionQueue({ reviewerName, reviewerRole, onSelectSessi
     } catch (_) {}
   };
 
+  // L2 bulk action: lock every session currently submitted for review.
+  const [lockingAll, setLockingAll] = useState(false);
+  const handleLockAllSubmitted = async () => {
+    if (submitted === 0 || lockingAll) return;
+    if (!window.confirm(
+      `Lock all ${submitted} session(s) submitted for review? This freezes their flags and review decisions.`
+    )) return;
+    setLockingAll(true);
+    try {
+      await lockAllSubmittedSessions(reviewerName);
+      await fetchAll();
+    } catch (_) {}
+    finally { setLockingAll(false); }
+  };
+
   // ── Feature 5 — Export CSV ─────────────────────────────────────────────
 
   const handleExport = () => {
@@ -463,8 +478,25 @@ export default function SessionQueue({ reviewerName, reviewerRole, onSelectSessi
           )}
         </div>
 
-        {/* Right group: Export */}
+        {/* Right group: L2 bulk-lock + Export */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0 }}>
+          {reviewerRole === 'L2' && (
+            <button
+              onClick={handleLockAllSubmitted}
+              disabled={lockingAll || submitted === 0}
+              title={submitted === 0 ? 'No sessions are submitted for review' : ''}
+              style={{
+                fontSize: 12, padding: '5px 14px', borderRadius: 4,
+                border: `1px solid ${submitted > 0 ? C.accent : C.border}`,
+                background: submitted > 0 ? C.accent : C.bgSurface,
+                color: submitted > 0 ? '#FFFFFF' : C.textSecondary,
+                cursor: (lockingAll || submitted === 0) ? 'not-allowed' : 'pointer',
+                opacity: lockingAll ? 0.7 : 1,
+              }}
+            >
+              {lockingAll ? 'Locking…' : `🔒 Lock all submitted (${submitted})`}
+            </button>
+          )}
           <button
             onClick={handleExport}
             style={{
