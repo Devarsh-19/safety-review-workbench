@@ -1,7 +1,7 @@
 """
-delete_nsfw_family_flags_audio.py
+dismiss_nsfw_family_flags_audio.py
 
-Cleanup for the audio review database (store/audio_review.db): delete the flags
+Cleanup for the audio review database (store/audio_review.db): dismiss the flags
 of any session whose flags are ENTIRELY within the NSFW family and few in number.
 
 A session qualifies when BOTH hold:
@@ -15,25 +15,23 @@ A session qualifies when BOTH hold:
      (active and not dismissed — the ones a reviewer actually sees). Sessions
      with 0 live flags, or more than 5, are skipped.
 
-For qualifying sessions every NSFW-family flag row is hard-deleted (since by
-rule 1 those are all the flags the session has), and overall_verdict is
-recomputed — a session left with no active flags becomes CLEAN.
+Dismissal follows the audio script convention (see remove_audio_output.py): a
+SOFT dismiss — each live flag row is set to status = 'DISMISSED' (restorable via
+undismiss), a 'DISMISSED' row is written to audio_review_log, and the session
+verdict is recomputed (a session left with no active flag becomes CLEAN). Flags
+are NEVER hard-deleted.
 
-Active-flag semantics reuse store/audio_db.py (_active_audio_flag_rows /
-recompute_audio_session_verdict) so counts match the queue, the analytics and
-the export scripts.
-
-SCOPE: only PENDING sessions are cleaned by default. Sessions that are
-SUBMITTED_FOR_REVIEW, LOCKED or REVIEWED are never touched (their flags are
-part of in-flight or finalised review work). Pass --status ALL to override.
+SCOPE: by default only PENDING and LOCKED sessions are cleaned. Sessions that
+are SUBMITTED_FOR_REVIEW or REVIEWED are left alone. Override with --status.
 
 DRY-RUN BY DEFAULT — running with no flags only previews what would change.
-Pass --commit to actually delete.
+Pass --commit to actually dismiss.
 
 Usage:
-  python scripts/delete_nsfw_family_flags_audio.py            # preview PENDING (dry-run)
-  python scripts/delete_nsfw_family_flags_audio.py --commit   # apply to PENDING
-  python scripts/delete_nsfw_family_flags_audio.py --status ALL --commit   # every status
+  python scripts/dismiss_nsfw_family_flags_audio.py            # preview PENDING+LOCKED (dry-run)
+  python scripts/dismiss_nsfw_family_flags_audio.py --commit   # apply to PENDING+LOCKED
+  python scripts/dismiss_nsfw_family_flags_audio.py --status PENDING          # single status
+  python scripts/dismiss_nsfw_family_flags_audio.py --status ALL --commit     # every status
 """
 
 import argparse
@@ -55,18 +53,24 @@ from store.audio_db import (  # noqa: E402
 # Intents that a session may contain and still qualify for cleanup.
 ALLOWED_INTENTS = {"NSFW", "NSFW_GROOMING", "NSFW_APPEARANCE"}
 MAX_LIVE_FLAGS = 5
+DEFAULT_STATUSES = ("PENDING", "LOCKED")
+
+REVIEWER_ID = "AUTO_DISMISS"
+NOTE = "Auto-dismiss: session's only flags were NSFW-family (1-5 live)"
 
 
 def _norm(intent) -> str:
     return (intent or "").strip().upper()
 
 
-def find_qualifying_sessions(conn, status_filter: str | None):
-    """Return (eligible, skipped_other_intent, skipped_count) session lists.
+def find_qualifying_sessions(conn, statuses):
+    """Return (eligible, skipped_other_intent, skipped_bad_count).
 
-    eligible: list of dicts {s_id, review_status, n_live, n_rows} ready to clean.
-    The two skipped lists are only used for the summary breakdown.
+    eligible: list of dicts {s_id, review_status, live_flag_ids} ready to clean.
+    statuses: iterable of review_status values to consider (None -> all statuses).
     """
+    status_set = set(statuses) if statuses else None
+
     status_by_sid = {
         r["s_id"]: r["review_status"]
         for r in conn.execute("SELECT s_id, review_status FROM audio_sessions").fetchall()
@@ -84,7 +88,7 @@ def find_qualifying_sessions(conn, status_filter: str | None):
 
     for s_id, rows in rows_by_sid.items():
         review_status = status_by_sid.get(s_id)
-        if status_filter and review_status != status_filter:
+        if status_set is not None and review_status not in status_set:
             continue
 
         # Rule 1: every row must be NSFW-family (strict — includes amendment
@@ -96,40 +100,38 @@ def find_qualifying_sessions(conn, status_filter: str | None):
 
         # Rule 2: 1..5 LIVE flags (active and not dismissed).
         live = [r for r in _active_audio_flag_rows(rows) if (r["status"] or "") != "DISMISSED"]
-        n_live = len(live)
-        if not (1 <= n_live <= MAX_LIVE_FLAGS):
+        if not (1 <= len(live) <= MAX_LIVE_FLAGS):
             skipped_bad_count += 1
             continue
 
         eligible.append({
             "s_id": s_id,
             "review_status": review_status or "—",
-            "n_live": n_live,
-            "n_rows": len(rows),
+            "live_flag_ids": [r["flag_id"] for r in live],
         })
 
     eligible.sort(key=lambda e: e["s_id"])
     return eligible, skipped_other_intent, skipped_bad_count
 
 
-def run(commit: bool, status_filter: str | None) -> int:
+def run(commit: bool, statuses) -> int:
     conn = get_audio_connection()
     try:
-        eligible, skipped_other, skipped_count = find_qualifying_sessions(conn, status_filter)
+        eligible, skipped_other, skipped_count = find_qualifying_sessions(conn, statuses)
 
         if not eligible:
-            print("No qualifying sessions found. Nothing to delete.")
+            print("No qualifying sessions found. Nothing to dismiss.")
             print(f"  (skipped: {skipped_other} with other intents, "
                   f"{skipped_count} outside the 1-{MAX_LIVE_FLAGS} live-flag range)")
             return 0
 
-        total_rows = sum(e["n_rows"] for e in eligible)
+        total_flags = sum(len(e["live_flag_ids"]) for e in eligible)
         print(f"Found {len(eligible):,} qualifying session(s) "
-              f"({total_rows:,} flag row(s) to delete):\n")
-        print(f"  {'SESSION':<10} {'STATUS':<24} {'LIVE FLAGS':>10} {'ROWS DEL':>9}")
-        print(f"  {'-'*10} {'-'*24} {'-'*10} {'-'*9}")
+              f"({total_flags:,} live flag(s) to dismiss):\n")
+        print(f"  {'SESSION':<10} {'STATUS':<24} {'LIVE FLAGS':>10}")
+        print(f"  {'-'*10} {'-'*24} {'-'*10}")
         for e in eligible:
-            print(f"  {e['s_id']:<10} {e['review_status']:<24} {e['n_live']:>10} {e['n_rows']:>9}")
+            print(f"  {e['s_id']:<10} {e['review_status']:<24} {len(e['live_flag_ids']):>10}")
         print()
 
         status_counts = Counter(e["review_status"] for e in eligible)
@@ -142,16 +144,25 @@ def run(commit: bool, status_filter: str | None) -> int:
         print()
 
         if not commit:
-            print(f"DRY RUN — would delete {total_rows:,} flag row(s) across "
-                  f"{len(eligible):,} session(s) and recompute their verdicts. "
+            print(f"DRY RUN — would dismiss {total_flags:,} live flag(s) across "
+                  f"{len(eligible):,} session(s) and recompute their verdicts (now CLEAN). "
                   f"No changes written. Re-run with --commit to apply.")
             return len(eligible)
 
         for e in eligible:
-            conn.execute("DELETE FROM audio_flags WHERE s_id = ?", (e["s_id"],))
+            for fid in e["live_flag_ids"]:
+                conn.execute(
+                    "UPDATE audio_flags SET status = 'DISMISSED' WHERE flag_id = ?",
+                    (fid,),
+                )
+                conn.execute(
+                    """INSERT INTO audio_review_log (s_id, flag_id, action, reviewer_id, note)
+                       VALUES (?, ?, 'DISMISSED', ?, ?)""",
+                    (e["s_id"], fid, REVIEWER_ID, NOTE),
+                )
             recompute_audio_session_verdict(e["s_id"], conn)
         conn.commit()
-        print(f"Done. Deleted {total_rows:,} flag row(s) from {len(eligible):,} "
+        print(f"Done. Dismissed {total_flags:,} live flag(s) across {len(eligible):,} "
               f"session(s); verdicts recomputed (now CLEAN).")
         return len(eligible)
     finally:
@@ -160,30 +171,31 @@ def run(commit: bool, status_filter: str | None) -> int:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Delete NSFW-family-only flags (1-5 live) from audio sessions."
+        description="Dismiss NSFW-family-only flags (1-5 live) from audio sessions."
     )
     parser.add_argument("--commit", action="store_true",
-                        help="Actually delete (default is dry-run preview only).")
-    parser.add_argument("--status", default="PENDING",
-                        help="Limit to sessions with this review_status. "
-                             "Default: PENDING (only PENDING sessions are cleaned; "
-                             "SUBMITTED_FOR_REVIEW / LOCKED / REVIEWED are never touched). "
-                             "Pass 'ALL' to consider every status.")
+                        help="Actually dismiss (default is dry-run preview only).")
+    parser.add_argument("--status", default=",".join(DEFAULT_STATUSES),
+                        help="Comma-separated review_status values to clean. "
+                             "Default: PENDING,LOCKED. Pass 'ALL' to consider every status.")
     args = parser.parse_args()
 
-    # 'ALL' disables the status filter; any other value restricts to that status.
-    status_filter = None if str(args.status).strip().upper() == "ALL" else args.status
+    # 'ALL' disables the status filter; otherwise a comma-separated set.
+    if str(args.status).strip().upper() == "ALL":
+        statuses = None
+    else:
+        statuses = tuple(s.strip().upper() for s in args.status.split(",") if s.strip())
 
     print("=" * 64)
-    print("  Delete NSFW-family-only flags (1-5 live) from audio sessions")
+    print("  Dismiss NSFW-family-only flags (1-5 live) from audio sessions")
     print("=" * 64)
     print(f"  Database : {AUDIO_DB_PATH}")
     print(f"  Intents  : {', '.join(sorted(ALLOWED_INTENTS))}")
-    print(f"  Scope    : {status_filter or 'ALL statuses'}")
+    print(f"  Scope    : {', '.join(statuses) if statuses else 'ALL statuses'}")
     print(f"  Mode     : {'COMMIT' if args.commit else 'DRY-RUN'}")
     print()
 
-    run(commit=args.commit, status_filter=status_filter)
+    run(commit=args.commit, statuses=statuses)
 
 
 if __name__ == "__main__":
