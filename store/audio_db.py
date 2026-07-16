@@ -185,17 +185,29 @@ def fetch_audio_sessions_page(
     - L1 with a name: only sessions assigned to them. "Multilingual" is a plain
       assignee like any other L1 reviewer — regional (non-Hindi/English/Hinglish)
       sessions are routed to it at assignment time (assign_audio_sessions.py).
-    - "Astrotalk Review": only LOCKED + flagged sessions (read-only client view)
+    - "Astrotalk Review": only NSFW_EXPLICIT sessions that are
+      SUBMITTED_FOR_REVIEW or LOCKED (read-only client view)
     """
     where, params = ["1=1"], []
 
     # "Astrotalk Review" is a read-only client persona hard-restricted to
-    # finalised (LOCKED) sessions that were flagged. Enforced unconditionally so
-    # no status/assignee filter can widen the view; other filters (flag category,
-    # language, duration …) still narrow within this subset.
+    # sessions that carry an active NSFW_EXPLICIT flag and are in L2 review or
+    # finalised (SUBMITTED_FOR_REVIEW or LOCKED). Enforced unconditionally so no
+    # status/assignee filter can widen the view; other filters (language,
+    # duration …) still narrow within this subset. The NSFW_EXPLICIT EXISTS
+    # mirrors the flag_category filter below: active flags only (DISMISSED rows
+    # and amended originals excluded).
     if reviewer_name == "Astrotalk Review":
-        where.append("s.review_status = 'LOCKED'")
-        where.append(f"{AUDIO_OVERALL_VERDICT_SQL} = 'FLAGGED'")
+        where.append("s.review_status IN ('SUBMITTED_FOR_REVIEW', 'LOCKED')")
+        where.append(
+            """EXISTS (SELECT 1 FROM audio_flags af
+                       WHERE af.s_id = s.s_id
+                         AND UPPER(REPLACE(REPLACE(af.intent,'-','_'),' ','_')) = 'NSFW_EXPLICIT'
+                         AND (af.status IS NULL OR af.status != 'DISMISSED')
+                         AND af.flag_id NOT IN (
+                             SELECT parent_flag_id FROM audio_flags
+                             WHERE parent_flag_id IS NOT NULL))"""
+        )
     elif status:
         where.append("s.review_status = ?"); params.append(status)
     elif not flag_category:
