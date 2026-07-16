@@ -40,14 +40,8 @@ def extract(out_path: Path) -> int:
     count = len(session_ids)
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {
-        "source_db": AUDIO_DB_PATH,
-        "generated_at": datetime.now().isoformat(timespec="seconds"),
-        "count": count,
-        "session_ids": session_ids,
-    }
     with out_path.open("w", encoding="utf-8") as fh:
-        json.dump(payload, fh, indent=2)
+        json.dump(session_ids, fh, indent=2)
 
     print(f"  Distinct audio session_ids : {count}")
     print(f"  JSON written               : {out_path}")
