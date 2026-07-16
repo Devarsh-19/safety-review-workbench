@@ -514,7 +514,9 @@ export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelect
                     {stats.reviewer_stats.map((r, i) => {
                       const isLast = i === stats.reviewer_stats.length - 1;
                       const border = isLast ? 'none' : `1px solid ${C.borderLight}`;
-                      const pct = r.total > 0 ? Math.round(((r.submitted + r.locked) / r.total) * 100) : 0;
+                      const pct = r.pending > 0
+                        ? Math.round((r.submitted / r.pending) * 100)
+                        : (r.submitted > 0 ? 100 : 0);
                       const cellSt = { padding: '6px 12px', fontSize: 12, fontFamily: MONO, borderBottom: border };
                       return (
                         <tr key={r.reviewer} style={{ background: C.bgSurface }}>
@@ -526,8 +528,8 @@ export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelect
                               <div style={{ flex: 1, height: 6, background: '#E2DED8', borderRadius: 3 }}>
                                 <div style={{
                                   height: '100%', borderRadius: 3,
-                                  background: pct === 100 ? C.accent : '#185FA5',
-                                  width: `${pct}%`, transition: 'width 300ms',
+                                  background: pct >= 100 ? C.accent : '#185FA5',
+                                  width: `${Math.min(pct, 100)}%`, transition: 'width 300ms',
                                 }} />
                               </div>
                               <span style={{ fontSize: 11, color: C.textSecondary, minWidth: 30, textAlign: 'right' }}>
