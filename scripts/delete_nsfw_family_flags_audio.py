@@ -23,13 +23,17 @@ Active-flag semantics reuse store/audio_db.py (_active_audio_flag_rows /
 recompute_audio_session_verdict) so counts match the queue, the analytics and
 the export scripts.
 
+SCOPE: only PENDING sessions are cleaned by default. Sessions that are
+SUBMITTED_FOR_REVIEW, LOCKED or REVIEWED are never touched (their flags are
+part of in-flight or finalised review work). Pass --status ALL to override.
+
 DRY-RUN BY DEFAULT — running with no flags only previews what would change.
 Pass --commit to actually delete.
 
 Usage:
-  python scripts/delete_nsfw_family_flags_audio.py            # preview (dry-run)
-  python scripts/delete_nsfw_family_flags_audio.py --commit   # apply the deletes
-  python scripts/delete_nsfw_family_flags_audio.py --status PENDING   # limit scope
+  python scripts/delete_nsfw_family_flags_audio.py            # preview PENDING (dry-run)
+  python scripts/delete_nsfw_family_flags_audio.py --commit   # apply to PENDING
+  python scripts/delete_nsfw_family_flags_audio.py --status ALL --commit   # every status
 """
 
 import argparse
@@ -160,21 +164,26 @@ def main() -> None:
     )
     parser.add_argument("--commit", action="store_true",
                         help="Actually delete (default is dry-run preview only).")
-    parser.add_argument("--status", default=None,
-                        help="Limit to sessions with this review_status "
-                             "(e.g. PENDING, SUBMITTED_FOR_REVIEW). Default: all.")
+    parser.add_argument("--status", default="PENDING",
+                        help="Limit to sessions with this review_status. "
+                             "Default: PENDING (only PENDING sessions are cleaned; "
+                             "SUBMITTED_FOR_REVIEW / LOCKED / REVIEWED are never touched). "
+                             "Pass 'ALL' to consider every status.")
     args = parser.parse_args()
+
+    # 'ALL' disables the status filter; any other value restricts to that status.
+    status_filter = None if str(args.status).strip().upper() == "ALL" else args.status
 
     print("=" * 64)
     print("  Delete NSFW-family-only flags (1-5 live) from audio sessions")
     print("=" * 64)
     print(f"  Database : {AUDIO_DB_PATH}")
     print(f"  Intents  : {', '.join(sorted(ALLOWED_INTENTS))}")
-    print(f"  Scope    : {args.status or 'ALL statuses'}")
+    print(f"  Scope    : {status_filter or 'ALL statuses'}")
     print(f"  Mode     : {'COMMIT' if args.commit else 'DRY-RUN'}")
     print()
 
-    run(commit=args.commit, status_filter=args.status)
+    run(commit=args.commit, status_filter=status_filter)
 
 
 if __name__ == "__main__":
