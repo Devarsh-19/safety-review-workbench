@@ -219,6 +219,13 @@ export default function AudioSessionViewer({ sId, sessionList, reviewerName, rev
   );
   const unactionedCount = activeFlags.filter((f) => f.status !== 'CONFIRMED' && f.status !== 'DISMISSED').length;
 
+  // Flags actually shown to the reviewer: dismissed flags are hidden from the
+  // lanes and the flag count. (The UI's own dismiss hard-deletes, so DISMISSED
+  // rows come from the batch dismiss scripts; they stay in the DB for audit but
+  // must not surface in the review view.) Gating (risk / submit / unactioned)
+  // still uses activeFlags, so it is unaffected.
+  const visibleFlags = activeFlags.filter((f) => f.status !== 'DISMISSED');
+
   // Mirrors the backend submit gate: speaker roles must be assigned before a
   // session WITH flags can be submitted. Pre-checking here disables the button
   // with a hint instead of surfacing a raw HTTP 400 after the click.
@@ -244,13 +251,13 @@ export default function AudioSessionViewer({ sId, sessionList, reviewerName, rev
   };
 
   const flagsForSpeaker = (label) =>
-    activeFlags.filter((f) => segById[f.seg_id]?.speaker === label).sort(byStartTime);
+    visibleFlags.filter((f) => segById[f.seg_id]?.speaker === label).sort(byStartTime);
 
   // Flags whose seg_id is NULL or points at a segment that no longer exists
   // (possible after re-ingest replaces segments while preserving reviewer
   // flags). They MUST stay visible and actionable — they count toward the
   // submit gate, so hiding them would block submission with no way out.
-  const orphanFlags = activeFlags
+  const orphanFlags = visibleFlags
     .filter((f) => !segById[f.seg_id]?.speaker)
     .sort(byStartTime);
 
@@ -725,7 +732,7 @@ export default function AudioSessionViewer({ sId, sessionList, reviewerName, rev
                 </span>
               )}
               <span style={{ fontSize: 12, color: C.textSecondary }}>
-                {session.lang || 'unknown language'} · {segments.length} segments · {activeFlags.length} flags
+                {session.lang || 'unknown language'} · {segments.length} segments · {visibleFlags.length} flags
                 {unactionedCount > 0 ? ` (${unactionedCount} unactioned)` : ''}
                 {pauses.length > 0 ? ` · ${pauses.length} pauses` : ''}
               </span>
