@@ -71,6 +71,22 @@ def _require_l2(reviewer_id: str, action: str) -> None:
         raise HTTPException(status_code=403, detail=f"Only L2 reviewer can {action}")
 
 
+# Read-only client personas: may browse the audio queue/viewer but cannot make
+# any review edits. Enforced server-side on every audio mutation endpoint so the
+# restriction holds regardless of the UI. "Astrotalk Review" is the audio-only
+# client persona (see LoginScreen roster / fetch_audio_sessions_page scoping).
+READONLY_AUDIO_REVIEWERS = {
+    name.strip()
+    for name in os.getenv("READONLY_AUDIO_REVIEWERS", "Astrotalk Review").split(",")
+    if name.strip()
+}
+
+
+def _reject_if_readonly_audio(reviewer_id: str) -> None:
+    if reviewer_id in READONLY_AUDIO_REVIEWERS:
+        raise HTTPException(status_code=403, detail="This is a read-only account — no edits allowed")
+
+
 # ---------------------------------------------------------------------------
 # Helper — derive a flag's severity from its category's verdict class.
 # SEVERE category -> HIGH, FLAGGED category -> MEDIUM, CLEAN -> LOW.
@@ -1117,8 +1133,9 @@ def audio_stats(
     reviewer_role: Optional[str] = None,
 ):
     # L1 (incl. "Multilingual", now a plain assignee): scope all counts to the
-    # sessions assigned to this reviewer (chat parity).
-    if reviewer_role == "L1" and reviewer_name:
+    # sessions assigned to this reviewer (chat parity). "Astrotalk Review" is a
+    # read-only L1 client persona, not an assignee, so it is not scoped here.
+    if reviewer_role == "L1" and reviewer_name and reviewer_name != "Astrotalk Review":
         scope  = " WHERE assigned_to = ?"
         params = (reviewer_name,)
     else:
@@ -1273,6 +1290,7 @@ def audio_session_detail(s_id: int):
 
 @app.post("/audio/sessions/{s_id}/speaker-roles")
 def audio_speaker_roles(s_id: int, body: SpeakerRolesRequest):
+    _reject_if_readonly_audio(body.reviewer_id)
     detail = fetch_audio_session_detail(s_id)
     if detail["session"] is None:
         raise HTTPException(status_code=404, detail=f"Audio session {s_id} not found")
@@ -1305,6 +1323,7 @@ def audio_confirm_flag(flag_id: int, body: LockRequest):
     """Confirm an audio flag — sets status = CONFIRMED on the active row
     (the amendment if one exists, otherwise the original). Mirrors
     /flags/{flag_id}/confirm."""
+    _reject_if_readonly_audio(body.reviewer_id)
     conn = get_audio_connection()
     try:
         with conn:
@@ -1351,6 +1370,7 @@ def audio_amend_flag(flag_id: int, body: AmendAudioFlagRequest):
     """Edit an audio flag. Replaces any existing amendment with a new one;
     the original row is kept as silent audit history. The amendment resets
     to ACTIVE so the reviewer must re-confirm. Mirrors /flags/{flag_id}/amend."""
+    _reject_if_readonly_audio(body.reviewer_id)
     conn = get_audio_connection()
     try:
         with conn:
@@ -1413,6 +1433,7 @@ def audio_amend_flag(flag_id: int, body: AmendAudioFlagRequest):
 def audio_dismiss_flag(flag_id: int, body: DismissFlagRequest):
     """Dismiss (false positive): hard-delete the flag and its amendment, log
     the dismissal, recompute the verdict. Mirrors /flags/{flag_id}/dismiss."""
+    _reject_if_readonly_audio(body.reviewer_id)
     conn = get_audio_connection()
     try:
         with conn:
@@ -1453,6 +1474,7 @@ def audio_dismiss_flag(flag_id: int, body: DismissFlagRequest):
 def audio_session_risk(s_id: int, body: SessionRiskRequest):
     """Set the L1 reviewer's whole-session risk rating (HIGH/MEDIUM/LOW).
     Required before confirm-all and before submitting for L2 review."""
+    _reject_if_readonly_audio(body.reviewer_id)
     _reject_if_audio_locked(_audio_session_or_404(s_id))
     try:
         set_audio_session_risk(s_id, (body.risk or "").upper())
@@ -1480,6 +1502,7 @@ def audio_confirm_all_flags(s_id: int, body: LockRequest):
     rating is still enforced at submit time, so it is intentionally NOT gated
     here — that avoids a dead-end for L2 (who has no risk selector) and lets
     reviewers confirm flags before rating the session."""
+    _reject_if_readonly_audio(body.reviewer_id)
     detail = _audio_session_or_404(s_id)
     _reject_if_audio_locked(detail)
     conn = get_audio_connection()
@@ -1525,6 +1548,7 @@ def audio_dismiss_all_flags(s_id: int, body: LockRequest):
     Mirrors /sessions/{session_id}/dismiss-all-flags: hard-deletes each
     unconfirmed active flag (amendment row plus its original), leaves
     already-confirmed flags untouched, recomputes the verdict ONCE."""
+    _reject_if_readonly_audio(body.reviewer_id)
     detail = _audio_session_or_404(s_id)
     _reject_if_audio_locked(detail)
     conn = get_audio_connection()
@@ -1568,6 +1592,7 @@ def audio_save_session_note(s_id: int, body: SessionNoteRequest):
     """Persist a reviewer's overall observation note on an audio session.
     Especially useful for mono-channel recordings where flags can't be
     attributed to a speaker lane. Mirrors /sessions/{id}/session-note."""
+    _reject_if_readonly_audio(body.reviewer_id)
     detail = _audio_session_or_404(s_id)
     _reject_if_audio_locked(detail)
     # Belt-and-suspenders migration in case the column is absent in a legacy DB.
@@ -1589,6 +1614,7 @@ def audio_save_session_note(s_id: int, body: SessionNoteRequest):
 
 @app.post("/audio/sessions/{s_id}/submit")
 def audio_submit(s_id: int, body: SubmitRequest):
+    _reject_if_readonly_audio(body.reviewer_id)
     detail = _audio_session_or_404(s_id)
     if detail["session"]["review_status"] == "LOCKED":
         raise HTTPException(status_code=400, detail="Session is locked")

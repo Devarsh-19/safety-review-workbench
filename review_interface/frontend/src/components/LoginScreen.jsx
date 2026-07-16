@@ -13,10 +13,10 @@ const REVIEWERS = [
   { name: 'Devarsh',  role: 'L1' },
   { name: 'Amogh',    role: 'L2' },
   { name: 'Locked',   role: 'L2' },   // read-only view of LOCKED sessions only
-  // Audio-only, read-only client persona: sees ONLY NSFW_EXPLICIT sessions that
-  // are submitted for review or locked. `workspaces` restricts which login
-  // workspaces list it.
-  { name: 'Astrotalk Review', role: 'L2', workspaces: ['audio'] },
+  // Audio-only, read-only L1 client persona: sees ONLY LOCKED sessions that
+  // carry an NSFW_EXPLICIT flag. As L1 it has no L2 authority (no lock/unlock or
+  // final-review actions). `workspaces` restricts which login workspaces list it.
+  { name: 'Astrotalk Review', role: 'L1', workspaces: ['audio'] },
   // Audio-only L1 bucket for non-Hindi/English/Hinglish (regional-language)
   // sessions, populated by scripts/assign_multilingual_audio.py.
   { name: 'Multilingual', role: 'L1', workspaces: ['audio'] },

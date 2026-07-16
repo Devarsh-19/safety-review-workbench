@@ -185,20 +185,23 @@ def fetch_audio_sessions_page(
     - L1 with a name: only sessions assigned to them. "Multilingual" is a plain
       assignee like any other L1 reviewer — regional (non-Hindi/English/Hinglish)
       sessions are routed to it at assignment time (assign_audio_sessions.py).
-    - "Astrotalk Review": only NSFW_EXPLICIT sessions that are
-      SUBMITTED_FOR_REVIEW or LOCKED (read-only client view)
+    - "Astrotalk Review": read-only L1 client persona — only LOCKED sessions
+      that were manually submitted for review (submitted_by not LLM/AUTO_LOCK)
+      and carry an active NSFW_EXPLICIT flag
     """
     where, params = ["1=1"], []
 
-    # "Astrotalk Review" is a read-only client persona hard-restricted to
-    # sessions that carry an active NSFW_EXPLICIT flag and are in L2 review or
-    # finalised (SUBMITTED_FOR_REVIEW or LOCKED). Enforced unconditionally so no
+    # "Astrotalk Review" is a read-only L1 client persona hard-restricted to
+    # finalised (LOCKED) sessions that were MANUALLY submitted for review (by a
+    # human L1 — not auto-submitted by the LLM ingest or the auto-lock scripts)
+    # and carry an active NSFW_EXPLICIT flag. Enforced unconditionally so no
     # status/assignee filter can widen the view; other filters (language,
     # duration …) still narrow within this subset. The NSFW_EXPLICIT EXISTS
     # mirrors the flag_category filter below: active flags only (DISMISSED rows
     # and amended originals excluded).
     if reviewer_name == "Astrotalk Review":
-        where.append("s.review_status IN ('SUBMITTED_FOR_REVIEW', 'LOCKED')")
+        where.append("s.review_status = 'LOCKED'")
+        where.append("s.submitted_by IS NOT NULL AND s.submitted_by NOT IN ('LLM', 'AUTO_LOCK')")
         where.append(
             """EXISTS (SELECT 1 FROM audio_flags af
                        WHERE af.s_id = s.s_id
@@ -224,7 +227,9 @@ def fetch_audio_sessions_page(
     # L1 reviewers (including "Multilingual", now a plain assignee) are scoped to
     # the sessions assigned to them. Regional-language sessions are routed to
     # "Multilingual" at assignment time, so no language-based filtering is needed.
-    if reviewer_role == "L1" and reviewer_name and reviewer_name != "Locked":
+    # "Locked" and "Astrotalk Review" are read-only personas with their own
+    # visibility rules above — they are not assignees, so skip the assignee scope.
+    if reviewer_role == "L1" and reviewer_name and reviewer_name not in ("Locked", "Astrotalk Review"):
         where.append("s.assigned_to = ?"); params.append(reviewer_name)
     elif assigned_to:
         where.append("s.assigned_to LIKE ?"); params.append(f"%{assigned_to}%")
