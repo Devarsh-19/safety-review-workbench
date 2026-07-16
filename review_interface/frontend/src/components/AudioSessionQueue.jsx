@@ -499,7 +499,7 @@ export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelect
                 <table style={{ width: '100%', borderCollapse: 'collapse', background: C.bgSurface }}>
                   <thead>
                     <tr style={{ background: C.bgStatsrow }}>
-                      {['Reviewer', 'Assigned', 'Pending', 'Submitted', 'Locked', 'Progress'].map((h) => (
+                      {['Reviewer', 'Pending', 'Submitted', 'Progress'].map((h) => (
                         <th key={h} style={{
                           padding: '6px 12px', textAlign: 'left', fontSize: 10, fontFamily: MONO,
                           fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em',
@@ -519,10 +519,8 @@ export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelect
                       return (
                         <tr key={r.reviewer} style={{ background: C.bgSurface }}>
                           <td style={{ ...cellSt, color: C.textPrimary, fontWeight: 500 }}>{r.reviewer || '—'}</td>
-                          <td style={{ ...cellSt, color: C.textPrimary }}>{r.total}</td>
                           <td style={{ ...cellSt, color: r.pending > 0 ? C.accent : C.textSecondary }}>{r.pending}</td>
                           <td style={{ ...cellSt, color: '#185FA5' }}>{r.submitted}</td>
-                          <td style={{ ...cellSt, color: '#444441' }}>{r.locked}</td>
                           <td style={{ ...cellSt, minWidth: 140 }}>
                             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                               <div style={{ flex: 1, height: 6, background: '#E2DED8', borderRadius: 3 }}>
