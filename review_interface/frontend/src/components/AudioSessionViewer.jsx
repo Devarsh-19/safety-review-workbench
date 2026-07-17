@@ -92,10 +92,17 @@ export default function AudioSessionViewer({ sId, sessionList, reviewerName, rev
     return row.review_status === 'PENDING';
   };
   const currentIndex = sessionList?.findIndex((r) => r.s_id === sId) ?? -1;
+  // Normally we skip over non-actionable sessions so the reviewer lands only on
+  // actionable work. But when the CURRENT session is itself non-actionable, that
+  // skip leaves Prev/Next permanently disabled: the read-only personas
+  // ("Astrotalk Review", "Locked") only ever see LOCKED sessions, and any
+  // flag-category filter surfaces LOCKED/SUBMITTED rows for everyone. In that
+  // case fall back to plain adjacent navigation so the buttons still work.
+  const currentActionable = isActionable(sessionList?.[currentIndex]);
   const findAdjacent = (dir) => {
     if (currentIndex < 0 || !sessionList) return -1;
     for (let i = currentIndex + dir; i >= 0 && i < sessionList.length; i += dir) {
-      if (isActionable(sessionList[i])) return i;
+      if (!currentActionable || isActionable(sessionList[i])) return i;
     }
     return -1;
   };
