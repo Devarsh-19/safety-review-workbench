@@ -115,7 +115,8 @@ _DROP_ONLY_CATEGORIES = (
     "off_platform_solicitation",
 )
 _NORM_CAT    = "LOWER(REPLACE(REPLACE(f.category_code,'-','_'),' ','_'))"
-_ACTIVE_FLAG = ("f.flag_id NOT IN "
+_ACTIVE_FLAG = ("(f.status IS NULL OR f.status != 'DISMISSED') "
+                "AND f.flag_id NOT IN "
                 "(SELECT parent_flag_id FROM flags WHERE parent_flag_id IS NOT NULL)")
 _EXCL_LIST   = ",".join(f"'{c}'" for c in _EXCLUDED_CATEGORIES)
 _DROP_LIST   = ",".join(f"'{c}'" for c in _DROP_ONLY_CATEGORIES)
@@ -261,99 +262,71 @@ def stats(
 
     try:
         with get_connection() as conn:
-            total       = conn.execute(
-                f"SELECT COUNT(*) FROM sessions WHERE 1=1{scope}", params
-            ).fetchone()[0]
-            pending     = conn.execute(
-                f"SELECT COUNT(*) FROM sessions WHERE review_status = 'PENDING'{scope}", params
-            ).fetchone()[0]
-            reviewed    = conn.execute(
-                f"SELECT COUNT(*) FROM sessions WHERE review_status != 'PENDING'{scope}", params
-            ).fetchone()[0]
-            severe      = conn.execute(
-                f"SELECT COUNT(*) FROM sessions WHERE overall_verdict = 'SEVERE'{scope}", params
-            ).fetchone()[0]
-            flagged     = conn.execute(
-                f"SELECT COUNT(*) FROM sessions WHERE overall_verdict = 'FLAGGED'{scope}", params
-            ).fetchone()[0]
-            clean       = conn.execute(
-                f"SELECT COUNT(*) FROM sessions WHERE overall_verdict = 'CLEAN'{scope}", params
-            ).fetchone()[0]
-            unprocessed = conn.execute(
-                f"SELECT COUNT(*) FROM sessions WHERE overall_verdict = 'UNPROCESSED'{scope}", params
-            ).fetchone()[0]
-            locked      = conn.execute(
-                f"SELECT COUNT(*) FROM sessions WHERE review_status = 'LOCKED'{scope}", params
-            ).fetchone()[0]
-            submitted   = conn.execute(
-                f"SELECT COUNT(*) FROM sessions WHERE review_status = 'SUBMITTED_FOR_REVIEW'{scope}", params
-            ).fetchone()[0]
-            needs_final = conn.execute(
-                f"SELECT COUNT(*) FROM sessions WHERE review_status = 'NEEDS_FINAL_REVIEW'{scope}", params
-            ).fetchone()[0]
-
-            # AstroTalk's own flag vs. our (LLM/REGEX/MANUAL) flags.
-            astro_flagged = conn.execute(
-                f"SELECT COUNT(*) FROM sessions WHERE astrotalk_flagged = 1{scope}", params
-            ).fetchone()[0]
-            astro_clean   = conn.execute(
-                f"SELECT COUNT(*) FROM sessions WHERE (astrotalk_flagged IS NULL OR astrotalk_flagged != 1){scope}",
+            stat_row = conn.execute(
+                f"""
+                SELECT
+                    COUNT(*) AS total,
+                    SUM(CASE WHEN review_status = 'PENDING' THEN 1 ELSE 0 END) AS pending,
+                    SUM(CASE WHEN review_status != 'PENDING' THEN 1 ELSE 0 END) AS reviewed,
+                    SUM(CASE WHEN overall_verdict = 'SEVERE' THEN 1 ELSE 0 END) AS severe,
+                    SUM(CASE WHEN overall_verdict = 'FLAGGED' THEN 1 ELSE 0 END) AS flagged,
+                    SUM(CASE WHEN overall_verdict = 'CLEAN' THEN 1 ELSE 0 END) AS clean,
+                    SUM(CASE WHEN overall_verdict = 'UNPROCESSED' THEN 1 ELSE 0 END) AS unprocessed,
+                    SUM(CASE WHEN review_status = 'LOCKED' THEN 1 ELSE 0 END) AS locked,
+                    SUM(CASE WHEN review_status = 'SUBMITTED_FOR_REVIEW' THEN 1 ELSE 0 END) AS submitted,
+                    SUM(CASE WHEN review_status = 'NEEDS_FINAL_REVIEW' THEN 1 ELSE 0 END) AS needs_final,
+                    SUM(CASE WHEN astrotalk_flagged = 1 THEN 1 ELSE 0 END) AS astro_flagged,
+                    SUM(CASE WHEN astrotalk_flagged IS NULL OR astrotalk_flagged != 1 THEN 1 ELSE 0 END) AS astro_clean,
+                    SUM(CASE WHEN {_FLAGGED_BY_US_SQL} THEN 1 ELSE 0 END) AS flagged_by_us,
+                    SUM(CASE WHEN EXISTS (
+                        SELECT 1 FROM flags f
+                        WHERE f.session_id = sessions.session_id
+                          AND f.source = 'LLM' AND {_ACTIVE_FLAG}
+                    ) THEN 1 ELSE 0 END) AS llm_flagged,
+                    SUM(CASE WHEN EXISTS (
+                        SELECT 1 FROM flags f
+                        WHERE f.session_id = sessions.session_id
+                          AND f.source = 'MANUAL' AND {_ACTIVE_FLAG}
+                    ) THEN 1 ELSE 0 END) AS manual_flagged,
+                    SUM(CASE WHEN (
+                        reviewer_id = 'LLM' OR submitted_by = 'LLM'
+                        OR EXISTS (
+                            SELECT 1 FROM flags f
+                            WHERE f.session_id = sessions.session_id
+                              AND f.source = 'LLM'
+                        )
+                    ) THEN 1 ELSE 0 END) AS llm_ingested,
+                    SUM(CASE WHEN astrotalk_flagged = 1 AND {_FLAGGED_BY_US_SQL} THEN 1 ELSE 0 END) AS flagged_by_both,
+                    SUM(CASE WHEN astrotalk_flagged = 1
+                              AND (overall_verdict = 'CLEAN' OR review_status = 'REVIEWED')
+                             THEN 1 ELSE 0 END) AS false_pos,
+                    SUM(CASE WHEN (astrotalk_flagged IS NULL OR astrotalk_flagged != 1)
+                              AND {_FLAGGED_BY_US_SQL}
+                             THEN 1 ELSE 0 END) AS false_neg
+                FROM sessions
+                WHERE 1=1{scope}
+                """,
                 params,
-            ).fetchone()[0]
-            flagged_by_us = conn.execute(
-                f"SELECT COUNT(*) FROM sessions WHERE {_FLAGGED_BY_US_SQL}{scope}",
-                params,
-            ).fetchone()[0]
-            # Distinct sessions (out of all) that carry at least one active
-            # LLM flag / at least one active MANUAL flag.
-            llm_flagged = conn.execute(
-                f"""SELECT COUNT(*) FROM sessions
-                    WHERE EXISTS (SELECT 1 FROM flags f
-                                  WHERE f.session_id = sessions.session_id
-                                    AND f.source = 'LLM' AND {_ACTIVE_FLAG}){scope}""",
-                params,
-            ).fetchone()[0]
-            manual_flagged = conn.execute(
-                f"""SELECT COUNT(*) FROM sessions
-                    WHERE EXISTS (SELECT 1 FROM flags f
-                                  WHERE f.session_id = sessions.session_id
-                                    AND f.source = 'MANUAL' AND {_ACTIVE_FLAG}){scope}""",
-                params,
-            ).fetchone()[0]
-
-            # Ingestion provenance — sessions from ingest_llm_sessions.py carry
-            # LLM-source flags or were auto-submitted by reviewer 'LLM';
-            # everything else is treated as manually ingested.
-            llm_ingested = conn.execute(
-                f"""SELECT COUNT(*) FROM sessions
-                    WHERE (reviewer_id = 'LLM' OR submitted_by = 'LLM'
-                           OR EXISTS (SELECT 1 FROM flags f
-                                      WHERE f.session_id = sessions.session_id
-                                        AND f.source = 'LLM')){scope}""",
-                params,
-            ).fetchone()[0]
-
-            # Flagged by both AstroTalk AND us (intersection).
-            flagged_by_both = conn.execute(
-                f"""SELECT COUNT(*) FROM sessions
-                    WHERE astrotalk_flagged = 1 AND {_FLAGGED_BY_US_SQL}{scope}""",
-                params,
-            ).fetchone()[0]
-            # False positive: AstroTalk flagged it, but we marked it clean —
-            # LLM verdict CLEAN or a human reviewer cleared it (REVIEWED).
-            false_pos = conn.execute(
-                f"""SELECT COUNT(*) FROM sessions
-                    WHERE astrotalk_flagged = 1
-                      AND (overall_verdict = 'CLEAN' OR review_status = 'REVIEWED'){scope}""",
-                params,
-            ).fetchone()[0]
-            # False negative: AstroTalk missed it, but we flagged it.
-            false_neg = conn.execute(
-                f"""SELECT COUNT(*) FROM sessions
-                    WHERE (astrotalk_flagged IS NULL OR astrotalk_flagged != 1)
-                      AND {_FLAGGED_BY_US_SQL}{scope}""",
-                params,
-            ).fetchone()[0]
+            ).fetchone()
+            total = stat_row["total"] or 0
+            pending = stat_row["pending"] or 0
+            reviewed = stat_row["reviewed"] or 0
+            severe = stat_row["severe"] or 0
+            flagged = stat_row["flagged"] or 0
+            clean = stat_row["clean"] or 0
+            unprocessed = stat_row["unprocessed"] or 0
+            locked = stat_row["locked"] or 0
+            submitted = stat_row["submitted"] or 0
+            needs_final = stat_row["needs_final"] or 0
+            astro_flagged = stat_row["astro_flagged"] or 0
+            astro_clean = stat_row["astro_clean"] or 0
+            flagged_by_us = stat_row["flagged_by_us"] or 0
+            llm_flagged = stat_row["llm_flagged"] or 0
+            manual_flagged = stat_row["manual_flagged"] or 0
+            llm_ingested = stat_row["llm_ingested"] or 0
+            flagged_by_both = stat_row["flagged_by_both"] or 0
+            false_pos = stat_row["false_pos"] or 0
+            false_neg = stat_row["false_neg"] or 0
 
             # L2-only: per-reviewer assignment breakdown
             reviewer_stats = None
@@ -472,6 +445,7 @@ def violation_stats():
                 FROM flags f
                 JOIN sessions s ON s.session_id = f.session_id
                 WHERE s.overall_verdict != 'CLEAN'
+                  AND (f.status IS NULL OR f.status != 'DISMISSED')
                 GROUP BY cat
             """).fetchall()
         counts = {r["cat"]: r["count"] for r in rows}
@@ -570,6 +544,7 @@ def get_session_flags(session_id: str):
                 LEFT JOIN turns t
                     ON t.session_id = f.session_id AND t.turn_id = f.turn_id
                 WHERE f.session_id = ?
+                  AND (f.status IS NULL OR f.status != 'DISMISSED')
                 ORDER BY f.flag_id
             """, (session_id,)).fetchall()
         return [dict(row) for row in rows]
@@ -606,6 +581,7 @@ def session_detail(session_id: str):
                 LEFT JOIN turns t
                     ON t.session_id = f.session_id AND t.turn_id = f.turn_id
                 WHERE f.session_id = ?
+                  AND (f.status IS NULL OR f.status != 'DISMISSED')
                 ORDER BY f.flag_id
             """, (session_id,)).fetchall()
     except HTTPException:
@@ -1072,7 +1048,9 @@ def export_csv(
                 FROM sessions s
                 LEFT JOIN (
                     SELECT session_id, COUNT(*) AS flag_count
-                    FROM flags GROUP BY session_id
+                    FROM flags
+                    WHERE status IS NULL OR status != 'DISMISSED'
+                    GROUP BY session_id
                 ) fc ON fc.session_id = s.session_id
                 WHERE s.review_status != 'PENDING'{scope}
                 ORDER BY s.reviewed_at DESC

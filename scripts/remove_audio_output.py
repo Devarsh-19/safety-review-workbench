@@ -52,6 +52,8 @@ REVIEWER_ID = "AUTO_CLEAN_ABUSIVE"
 # The exact texts to clean up. Compared case-insensitively, as whole transcripts.
 TARGET_TEXTS = [
     "teri g na tod du",
+    "tere sath marwani hai",
+    "tere g mai toad sakta hu",
     "bc",
     "mc",
     "lanja",

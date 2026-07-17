@@ -47,6 +47,7 @@ from store.audio_db import get_audio_connection, AUDIO_DB_PATH  # noqa: E402
 # Some codes (e.g. PERSONAL_DATA_COLLECTION, COMPETITOR_PROMOTION) may have no
 # flags in this DB yet; that is harmless.
 ALLOWED_CATEGORIES = {
+    "ABUSIVE_LANGUAGE",
     "HATE_SPEECH",
     "FAKE_REMEDIES",
     "FINANCIAL_SOLICITATION",

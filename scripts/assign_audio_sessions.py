@@ -25,8 +25,8 @@ from store.audio_db import (  # noqa: E402
 )
 
 # Modify this list to change who gets sessions and in what rotation order.
-# REVIEWERS = ["Nikhil", "Vineet", "Divyansh"]
-REVIEWERS = ["Devarsh"]
+REVIEWERS = ["Nikhil", "Vineet", "Divyansh","Gaurav","Yusuf"]
+# REVIEWERS = ["Devarsh"]
 
 # Regional-language (non-Hindi/English/Hinglish) sessions are assigned to this
 # reviewer only, never to the REVIEWERS rotation.

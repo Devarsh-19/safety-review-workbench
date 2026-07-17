@@ -62,8 +62,14 @@ def initialise_db() -> None:
         "UPDATE flags SET status = 'ACTIVE' WHERE status IS NULL",
         # Indexes on migration-added columns — created AFTER the column exists
         "CREATE INDEX IF NOT EXISTS idx_sessions_assigned_to ON sessions(assigned_to)",
+        "CREATE INDEX IF NOT EXISTS idx_sessions_assigned_status ON sessions(assigned_to, review_status)",
+        "CREATE INDEX IF NOT EXISTS idx_sessions_assigned_verdict ON sessions(assigned_to, overall_verdict)",
+        "CREATE INDEX IF NOT EXISTS idx_sessions_review_assigned ON sessions(review_status, assigned_to)",
+        "CREATE INDEX IF NOT EXISTS idx_sessions_astro_assigned ON sessions(astrotalk_flagged, assigned_to)",
         "CREATE INDEX IF NOT EXISTS idx_flags_parent_flag_id ON flags(parent_flag_id)",
         "CREATE INDEX IF NOT EXISTS idx_flags_status ON flags(status)",
+        "CREATE INDEX IF NOT EXISTS idx_flags_session_source_status ON flags(session_id, source, status)",
+        "CREATE INDEX IF NOT EXISTS idx_flags_session_category ON flags(session_id, category_code)",
     ]
 
     with get_connection() as conn:
@@ -102,6 +108,8 @@ def recompute_session_verdict(session_id: str, conn) -> str:
     }
     active_codes = []
     for r in rows:
+        if (r["status"] or "") == "DISMISSED":
+            continue
         if r["parent_flag_id"] is not None:
             # This is an amendment row — it is the active version; include it
             active_codes.append(r["category_code"])
@@ -153,33 +161,33 @@ def fetch_sessions(
 _SORT_COLUMNS = {
     "session_id":        "s.session_id",
     "duration_minutes":  "COALESCE(s.duration_minutes, 0)",
-    "turn_count":        "COALESCE(tc.turn_count, 0)",
-    "flag_count":        "COALESCE(fc.flag_count, 0)",
-    "llm_flag_count":    "COALESCE(fc.llm_flag_count, 0)",
-    "manual_flag_count": "COALESCE(fc.manual_flag_count, 0)",
+    "turn_count":        "turn_count",
+    "flag_count":        "flag_count",
+    "llm_flag_count":    "llm_flag_count",
+    "manual_flag_count": "manual_flag_count",
 }
 
 # Default language visibility (matches the previous client-side allowlist).
 _ALLOWED_LANGUAGES = ("english", "hindi", "hinglish")
 
-# Flag / turn count enrichment — one aggregated row per session. Counts mirror
-# the previous behaviour (all flags; LLM = LLM+REGEX source, MANUAL separately).
-_COUNTS_FROM = """
-    FROM sessions s
-    LEFT JOIN (
-        SELECT session_id,
-               COUNT(*) AS flag_count,
-               SUM(CASE WHEN source IN ('LLM','REGEX') THEN 1 ELSE 0 END) AS llm_flag_count,
-               SUM(CASE WHEN source = 'MANUAL'         THEN 1 ELSE 0 END) AS manual_flag_count
-        FROM flags
-        GROUP BY session_id
-    ) fc ON fc.session_id = s.session_id
-    LEFT JOIN (
-        SELECT session_id, COUNT(*) AS turn_count
-        FROM turns
-        GROUP BY session_id
-    ) tc ON tc.session_id = s.session_id
-"""
+_SESSION_FROM = "FROM sessions s"
+
+_VISIBLE_FLAG_SQL = "(f.status IS NULL OR f.status != 'DISMISSED')"
+_FLAG_COUNT_SQL = (
+    "SELECT COUNT(*) FROM flags f "
+    f"WHERE f.session_id = s.session_id AND {_VISIBLE_FLAG_SQL}"
+)
+_LLM_FLAG_COUNT_SQL = (
+    "SELECT COUNT(*) FROM flags f "
+    f"WHERE f.session_id = s.session_id AND {_VISIBLE_FLAG_SQL} "
+    "AND f.source IN ('LLM','REGEX')"
+)
+_MANUAL_FLAG_COUNT_SQL = (
+    "SELECT COUNT(*) FROM flags f "
+    f"WHERE f.session_id = s.session_id AND {_VISIBLE_FLAG_SQL} "
+    "AND f.source = 'MANUAL'"
+)
+_TURN_COUNT_SQL = "SELECT COUNT(*) FROM turns t WHERE t.session_id = s.session_id"
 
 
 def fetch_sessions_page(
@@ -256,6 +264,7 @@ def fetch_sessions_page(
         where.append(
             """EXISTS (SELECT 1 FROM flags f
                        WHERE f.session_id = s.session_id
+                         AND (f.status IS NULL OR f.status != 'DISMISSED')
                          AND LOWER(REPLACE(REPLACE(f.category_code,'-','_'),' ','_')) = ?)"""
         )
         params.append(flag_category.strip().lower().replace("-", "_").replace(" ", "_"))
@@ -269,9 +278,9 @@ def fetch_sessions_page(
         where.append("COALESCE(s.duration_minutes, 0) <= ?"); params.append(max_duration)
 
     if min_turns not in (None, ""):
-        where.append("COALESCE(tc.turn_count, 0) >= ?"); params.append(min_turns)
+        where.append(f"COALESCE(({_TURN_COUNT_SQL}), 0) >= ?"); params.append(min_turns)
     if max_turns not in (None, ""):
-        where.append("COALESCE(tc.turn_count, 0) <= ?"); params.append(max_turns)
+        where.append(f"COALESCE(({_TURN_COUNT_SQL}), 0) <= ?"); params.append(max_turns)
 
     where_sql = " AND ".join(where)
 
@@ -281,16 +290,16 @@ def fetch_sessions_page(
 
     data_sql = f"""
         SELECT s.*,
-               COALESCE(fc.flag_count, 0)        AS flag_count,
-               COALESCE(fc.llm_flag_count, 0)    AS llm_flag_count,
-               COALESCE(fc.manual_flag_count, 0) AS manual_flag_count,
-               COALESCE(tc.turn_count, 0)        AS turn_count
-        {_COUNTS_FROM}
+               COALESCE(({_FLAG_COUNT_SQL}), 0)        AS flag_count,
+               COALESCE(({_LLM_FLAG_COUNT_SQL}), 0)    AS llm_flag_count,
+               COALESCE(({_MANUAL_FLAG_COUNT_SQL}), 0) AS manual_flag_count,
+               COALESCE(({_TURN_COUNT_SQL}), 0)        AS turn_count
+        {_SESSION_FROM}
         WHERE {where_sql}
         ORDER BY {order_sql}
         LIMIT ? OFFSET ?
     """
-    count_sql = f"SELECT COUNT(*) {_COUNTS_FROM} WHERE {where_sql}"
+    count_sql = f"SELECT COUNT(*) {_SESSION_FROM} WHERE {where_sql}"
 
     with get_connection() as conn:
         total = conn.execute(count_sql, params).fetchone()[0]
@@ -307,7 +316,10 @@ def fetch_session_detail(session_id: str) -> dict:
             "SELECT * FROM turns WHERE session_id = ? ORDER BY turn_id", (session_id,)
         ).fetchall()
         flags = conn.execute(
-            "SELECT * FROM flags WHERE session_id = ?", (session_id,)
+            """SELECT * FROM flags
+               WHERE session_id = ?
+                 AND (status IS NULL OR status != 'DISMISSED')""",
+            (session_id,),
         ).fetchall()
 
     return {
@@ -428,8 +440,11 @@ def get_session_flag_summary(session_id: str) -> dict:
     amended_parent_ids = {r["parent_flag_id"] for r in rows if r["parent_flag_id"] is not None}
     active_rows = [
         r for r in rows
-        if r["parent_flag_id"] is not None  # amendment = active
-        or r["flag_id"] not in amended_parent_ids  # original with no amendment = active
+        if (r["status"] or "") != "DISMISSED"
+        and (
+            r["parent_flag_id"] is not None  # amendment = active
+            or r["flag_id"] not in amended_parent_ids  # original with no amendment = active
+        )
     ]
 
     total_flags    = len(active_rows)
