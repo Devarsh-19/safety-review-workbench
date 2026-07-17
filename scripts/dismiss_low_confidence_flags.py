@@ -8,8 +8,10 @@ Dismiss low-confidence flags from both review stores:
 
 A flag qualifies when it is the active version of a flag (amendment row if
 present, otherwise the original), is not already confirmed/dismissed, has a
-non-NULL confidence value, and that value is below the configured threshold
-(default: 0.8).
+non-NULL confidence value, that value is below the configured threshold
+(default: 0.8), AND its source is in the allowed set (default: LLM only, so
+human-added MANUAL flags and REGEX flags are never auto-dismissed). Widen with
+--source (e.g. --source LLM,MANUAL or --source ALL).
 
 Dismissal is soft for both stores: the active row is set to
 status='DISMISSED', a review-log row is written, then the session verdict is
@@ -20,10 +22,12 @@ Pass --commit to actually dismiss. The default scope is PENDING,
 SUBMITTED_FOR_REVIEW, and LOCKED sessions.
 
 Usage:
-  python scripts/dismiss_low_confidence_flags.py
+  python scripts/dismiss_low_confidence_flags.py                       # LLM flags only (default)
   python scripts/dismiss_low_confidence_flags.py --chat-only
   python scripts/dismiss_low_confidence_flags.py --audio-only
   python scripts/dismiss_low_confidence_flags.py --threshold 0.75
+  python scripts/dismiss_low_confidence_flags.py --source LLM,MANUAL   # also human flags
+  python scripts/dismiss_low_confidence_flags.py --source ALL          # every source
   python scripts/dismiss_low_confidence_flags.py --status ALL --commit
 """
 
@@ -50,8 +54,9 @@ from engine.verdict_rules import (  # noqa: E402
 
 DEFAULT_STATUSES = ("PENDING", "SUBMITTED_FOR_REVIEW", "LOCKED")
 DEFAULT_THRESHOLD = 0.8
+DEFAULT_SOURCES = ("LLM",)
 REVIEWER_ID = "AUTO_DISMISS"
-NOTE = "Auto-dismiss: confidence score below threshold"
+NOTE = "Auto-dismiss: LLM flag, confidence score below threshold"
 SAMPLE_LIMIT = 25
 
 
@@ -61,13 +66,26 @@ def parse_statuses(raw: str):
     return tuple(s.strip().upper() for s in raw.split(",") if s.strip())
 
 
-def find_chat_targets(conn, statuses, threshold: float):
+def parse_sources(raw: str):
+    if str(raw).strip().upper() == "ALL":
+        return None
+    return tuple(s.strip().upper() for s in raw.split(",") if s.strip())
+
+
+def find_chat_targets(conn, statuses, threshold: float, sources):
     params = [threshold]
     if statuses:
         status_clause = "AND s.review_status IN (%s)" % ",".join("?" for _ in statuses)
         params.extend(statuses)
     else:
         status_clause = ""
+    # Source scope: default LLM only. A NULL source is not LLM, so it is excluded
+    # unless --source ALL is passed.
+    if sources:
+        source_clause = "AND UPPER(f.source) IN (%s)" % ",".join("?" for _ in sources)
+        params.extend(sources)
+    else:
+        source_clause = ""
 
     return conn.execute(
         f"""
@@ -78,6 +96,7 @@ def find_chat_targets(conn, statuses, threshold: float):
         WHERE f.confidence_score IS NOT NULL
           AND f.confidence_score < ?
           {status_clause}
+          {source_clause}
           AND (f.status IS NULL OR f.status NOT IN ('CONFIRMED', 'DISMISSED'))
           AND (
               f.parent_flag_id IS NOT NULL
@@ -140,13 +159,18 @@ def recompute_chat_session_verdict(session_id: str, conn) -> str:
     return verdict
 
 
-def find_audio_targets(conn, statuses, threshold: float):
+def find_audio_targets(conn, statuses, threshold: float, sources):
     params = [threshold]
     if statuses:
         status_clause = "AND s.review_status IN (%s)" % ",".join("?" for _ in statuses)
         params.extend(statuses)
     else:
         status_clause = ""
+    if sources:
+        source_clause = "AND UPPER(f.source) IN (%s)" % ",".join("?" for _ in sources)
+        params.extend(sources)
+    else:
+        source_clause = ""
 
     return conn.execute(
         f"""
@@ -157,6 +181,7 @@ def find_audio_targets(conn, statuses, threshold: float):
         WHERE f.conf IS NOT NULL
           AND f.conf < ?
           {status_clause}
+          {source_clause}
           AND (f.status IS NULL OR f.status NOT IN ('CONFIRMED', 'DISMISSED'))
           AND (
               f.parent_flag_id IS NOT NULL
@@ -220,10 +245,10 @@ def print_targets(label: str, targets, id_col: str, type_col: str) -> None:
     print()
 
 
-def run_chat(commit: bool, statuses, threshold: float) -> tuple[int, int, int]:
+def run_chat(commit: bool, statuses, threshold: float, sources) -> tuple[int, int, int]:
     conn = get_connection()
     try:
-        targets = find_chat_targets(conn, statuses, threshold)
+        targets = find_chat_targets(conn, statuses, threshold, sources)
         print_targets("Chat DB", targets, "session_id", "category_code")
         touched_sessions = sorted({t["session_id"] for t in targets})
         clean_sessions = count_chat_sessions_becoming_clean(
@@ -252,10 +277,10 @@ def run_chat(commit: bool, statuses, threshold: float) -> tuple[int, int, int]:
         conn.close()
 
 
-def run_audio(commit: bool, statuses, threshold: float) -> tuple[int, int, int]:
+def run_audio(commit: bool, statuses, threshold: float, sources) -> tuple[int, int, int]:
     conn = get_audio_connection()
     try:
-        targets = find_audio_targets(conn, statuses, threshold)
+        targets = find_audio_targets(conn, statuses, threshold, sources)
         print_targets("Audio DB", targets, "s_id", "intent")
         touched_sessions = sorted({t["s_id"] for t in targets})
         clean_sessions = count_audio_sessions_becoming_clean(
@@ -300,9 +325,14 @@ def main() -> None:
                         help="Comma-separated review_status values to clean. "
                              "Default: PENDING,SUBMITTED_FOR_REVIEW,LOCKED. "
                              "Pass 'ALL' to consider every status.")
+    parser.add_argument("--source", default=",".join(DEFAULT_SOURCES),
+                        help="Comma-separated flag sources to dismiss. Default: LLM "
+                             "(human MANUAL and REGEX flags are left alone). "
+                             "Pass 'ALL' for every source.")
     args = parser.parse_args()
 
     statuses = parse_statuses(args.status)
+    sources = parse_sources(args.source)
     process_chat = not args.audio_only
     process_audio = not args.chat_only
 
@@ -312,15 +342,16 @@ def main() -> None:
     print(f"  Chat DB    : {DB_PATH}")
     print(f"  Audio DB   : {AUDIO_DB_PATH}")
     print(f"  Threshold  : confidence < {args.threshold}")
+    print(f"  Sources    : {', '.join(sources) if sources else 'ALL sources'}")
     print(f"  Scope      : {', '.join(statuses) if statuses else 'ALL statuses'}")
     print(f"  Mode       : {'COMMIT' if args.commit else 'DRY-RUN'}")
     print()
 
     chat_count, chat_sessions, chat_clean = (
-        run_chat(args.commit, statuses, args.threshold) if process_chat else (0, 0, 0)
+        run_chat(args.commit, statuses, args.threshold, sources) if process_chat else (0, 0, 0)
     )
     audio_count, audio_sessions, audio_clean = (
-        run_audio(args.commit, statuses, args.threshold) if process_audio else (0, 0, 0)
+        run_audio(args.commit, statuses, args.threshold, sources) if process_audio else (0, 0, 0)
     )
 
     total = chat_count + audio_count
