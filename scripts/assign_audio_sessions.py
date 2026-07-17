@@ -20,33 +20,48 @@ from dotenv import load_dotenv
 load_dotenv()
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from store.audio_db import get_audio_connection, initialise_audio_db, AUDIO_DB_PATH  # noqa: E402
+from store.audio_db import (  # noqa: E402
+    get_audio_connection, initialise_audio_db, AUDIO_DB_PATH, is_multilingual_language,
+)
 
 # Modify this list to change who gets sessions and in what rotation order.
-# REVIEWERS = ["Nikhil", "Vineet", "Divyansh"]
-REVIEWERS = ["Gaurav"]
+REVIEWERS = ["Nikhil", "Vineet", "Divyansh","Gaurav","Yusuf"]
+# REVIEWERS = ["Devarsh"]
+
+# Regional-language (non-Hindi/English/Hinglish) sessions are assigned to this
+# reviewer only, never to the REVIEWERS rotation.
+MULTILINGUAL_REVIEWER = "Multilingual"
 
 
 def assign_sessions(dry_run: bool = False) -> dict:
-    """Round-robins all unassigned audio sessions across REVIEWERS."""
+    """Assign unassigned audio sessions: regional (non-Hindi/English/Hinglish)
+    sessions go to the Multilingual reviewer; the rest round-robin across
+    REVIEWERS."""
     conn = get_audio_connection()
-    s_ids = [r[0] for r in conn.execute(
-        "SELECT s_id FROM audio_sessions WHERE assigned_to IS NULL ORDER BY s_id ASC"
-    ).fetchall()]
+    rows = conn.execute(
+        "SELECT s_id, lang FROM audio_sessions WHERE assigned_to IS NULL ORDER BY s_id ASC"
+    ).fetchall()
 
-    total = len(s_ids)
+    total = len(rows)
     if total == 0:
         print("No unassigned audio sessions found.")
         conn.close()
         return {}
 
-    print(f"Found {total:,} unassigned audio sessions.")
-    print(f"Distributing across: {', '.join(REVIEWERS)}")
+    # Split by language: regional -> Multilingual, everything else -> rotation.
+    regional = [r["s_id"] for r in rows if is_multilingual_language(r["lang"])]
+    general  = [r["s_id"] for r in rows if not is_multilingual_language(r["lang"])]
+
+    print(f"Found {total:,} unassigned audio sessions "
+          f"({len(general):,} Hindi/English/Hinglish, {len(regional):,} regional).")
+    print(f"Distributing across: {', '.join(REVIEWERS)} "
+          f"(+ {MULTILINGUAL_REVIEWER} for regional)")
     print()
 
     counts = {r: 0 for r in REVIEWERS}
-    assignments = []
-    for i, s_id in enumerate(s_ids):
+    counts[MULTILINGUAL_REVIEWER] = len(regional)
+    assignments = [(MULTILINGUAL_REVIEWER, s_id) for s_id in regional]
+    for i, s_id in enumerate(general):
         reviewer = REVIEWERS[i % len(REVIEWERS)]
         assignments.append((reviewer, s_id))
         counts[reviewer] += 1
@@ -84,7 +99,6 @@ def reset_assignments() -> None:
     conn.commit()
     conn.close()
     print(f"Cleared assignments for {cur.rowcount:,} audio sessions.")
-
 
 def print_assignment_summary() -> None:
     conn = get_audio_connection()

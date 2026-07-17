@@ -1,10 +1,10 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { C, MONO } from '../tokens';
 import VerdictBadge from './VerdictBadge';
 import {
   getSessionDetail, getSessionFlags, submitReview,
   manualFlag, saveSessionNote,
-  confirmFlag, confirmAllFlags, submitSession, markNeedsFinalReview,
+  confirmFlag, confirmAllFlags, dismissAllFlags, submitSession, markNeedsFinalReview,
 } from '../api';
 
 // ---------------------------------------------------------------------------
@@ -233,7 +233,8 @@ export default function SessionViewer({ sessionId, sessionList, reviewerName, re
   const [showUpdateForm, setShowUpdateForm] = useState(false);
 
   // Feature 1 — manual flagging
-  const [hoveredTurnIdx,    setHoveredTurnIdx]    = useState(null);
+  // NOTE: turn hover is handled purely in CSS (.turn-row:hover .turn-flag-btn)
+  // so moving the mouse across a long transcript no longer re-renders every turn.
   const [openFlagPopover,   setOpenFlagPopover]   = useState(null);
   const [popoverCategory,   setPopoverCategory]   = useState(INTENT_CATEGORIES[0]);
   const [popoverNote,       setPopoverNote]       = useState('');
@@ -256,6 +257,7 @@ export default function SessionViewer({ sessionId, sessionList, reviewerName, re
   const [dismissSaving,      setDismissSaving]      = useState(false);
   const [confirmingFlagId,   setConfirmingFlagId]   = useState(null);
   const [confirmingAll,      setConfirmingAll]      = useState(false);
+  const [dismissingAll,      setDismissingAll]      = useState(false);
   const [flagCardHoverId,    setFlagCardHoverId]    = useState(null);
 
   // Workflow state
@@ -487,6 +489,23 @@ export default function SessionViewer({ sessionId, sessionList, reviewerName, re
     }
   };
 
+  // ── Dismiss-all handler: dismiss every unconfirmed active flag at once ──────
+  const handleDismissAll = async (count) => {
+    if (dismissingAll) return;
+    // eslint-disable-next-line no-alert
+    if (!window.confirm(`Dismiss all ${count} flag${count === 1 ? '' : 's'} for this session? This permanently deletes them.`)) return;
+    setDismissingAll(true);
+    try {
+      const res = await dismissAllFlags(sessionId, reviewerName);
+      await refreshSessionAndFlags();
+      setToast(`Dismissed ${res?.dismissed_count ?? count} flags`);
+      setTimeout(() => setToast(null), 2000);
+    } catch (_) {
+    } finally {
+      setDismissingAll(false);
+    }
+  };
+
   // ── Session workflow handlers ──────────────────────────────────────────────
   const handleSessionSubmit = async () => {
     if (submitting) return;
@@ -538,6 +557,22 @@ export default function SessionViewer({ sessionId, sessionList, reviewerName, re
       setSubmitting(false);
     }
   };
+  // ── Memoized derived data ─────────────────────────────────────────────────
+  // These were previously recomputed on EVERY render — including on each mouse
+  // hover over a turn and on every keystroke in the note fields. buildFlagsByTurnIdx
+  // is an O(turns × flags) fuzzy match, so on long sessions that made the
+  // transcript feel sluggish. Keying them to the data they depend on means they
+  // only recompute when the transcript or flag list actually changes.
+  const displayedFlags  = useMemo(() => getActiveFlags(flags), [flags]);
+  const flagsByTurnIdx  = useMemo(
+    () => (data ? buildFlagsByTurnIdx(data.turns || [], flags) : {}),
+    [data, flags],
+  );
+  const firstFlaggedIdx = useMemo(
+    () => (data?.turns || []).findIndex((_, i) => flagsByTurnIdx[i]?.length > 0),
+    [data, flagsByTurnIdx],
+  );
+
   // ── Error state ───────────────────────────────────────────────────────────
   if (error) {
     return (
@@ -554,8 +589,6 @@ export default function SessionViewer({ sessionId, sessionList, reviewerName, re
   }
 
   const { session = {}, turns = [] } = data || {};
-  const flagsByTurnIdx  = data ? buildFlagsByTurnIdx(turns, flags) : {};
-  const firstFlaggedIdx = turns.findIndex((_, i) => flagsByTurnIdx[i]?.length > 0);
   const status             = session?.review_status;
   const isLocked           = status === 'LOCKED';
   const isSubmitted        = status === 'SUBMITTED_FOR_REVIEW';
@@ -573,7 +606,7 @@ export default function SessionViewer({ sessionId, sessionList, reviewerName, re
   // Flag summary derived client-side — drives L1 submit eligibility.
   // Uses the new model: active flags = amendment-or-original (via getActiveFlags),
   // actioned = status === 'CONFIRMED'.
-  const activeFlagsForSummary = getActiveFlags(flags);
+  const activeFlagsForSummary = displayedFlags;
   const totalFlagCount      = activeFlagsForSummary.length;
   const actionedFlagCount   = activeFlagsForSummary.filter((f) => f.status === 'CONFIRMED').length;
   const unactionedFlagCount = totalFlagCount - actionedFlagCount;
@@ -582,7 +615,7 @@ export default function SessionViewer({ sessionId, sessionList, reviewerName, re
   // ── Active flag resolution ───────────────────────────────────────────────
   // Show only the active version of each flag: amendment if it exists, else original.
   // No AMENDED/DISMISSED labels — every flag card looks fresh.
-  const displayedFlags  = getActiveFlags(flags);
+  // (displayedFlags is memoized above.)
   const activeFlagCount = displayedFlags.length;
 
   // ── Per-speaker flag attribution (who was flagged, how many times) ────────
@@ -760,7 +793,6 @@ export default function SessionViewer({ sessionId, sessionList, reviewerName, re
               const isAstrologer   = turn.speaker === 'ASTROLOGER';
               const turnFlags      = flagsByTurnIdx[idx] || [];
               const isFirstFlagged = idx === firstFlaggedIdx;
-              const isHovered      = hoveredTurnIdx === idx;
               const isPopoverOpen  = openFlagPopover === idx;
 
               const maxSev = turnFlags.length
@@ -774,12 +806,11 @@ export default function SessionViewer({ sessionId, sessionList, reviewerName, re
               return (
                 <div
                   key={turn.turn_id ?? idx}
+                  className="turn-row"
                   ref={(el) => { turnRefs.current[idx] = el; if (isFirstFlagged) firstFlaggedRef.current = el; }}
                   style={{ display: 'flex', flexDirection: 'column',
                     alignItems: isAstrologer ? 'flex-start' : 'flex-end',
                     marginBottom: isPopoverOpen ? 0 : 16, position: 'relative' }}
-                  onMouseEnter={() => setHoveredTurnIdx(idx)}
-                  onMouseLeave={() => { if (!isPopoverOpen) setHoveredTurnIdx(null); }}
                 >
                   {/* Category badges above bubble */}
                   {turnFlags.length > 0 && (
@@ -831,9 +862,13 @@ export default function SessionViewer({ sessionId, sessionList, reviewerName, re
                       )}
                     </div>
 
-                    {/* + Flag button — shows on hover, hidden when locked */}
-                    {!isLocked && (isHovered || isPopoverOpen) && (
+                    {/* + Flag button — hidden when locked. Revealed on row hover via
+                        CSS (.turn-row:hover .turn-flag-btn); forced visible while its
+                        popover is open. Kept out of React hover state so moving the
+                        mouse over the transcript doesn't re-render every turn. */}
+                    {!isLocked && (
                       <button
+                        className="turn-flag-btn"
                         onMouseDown={(e) => e.stopPropagation()}
                         onClick={(e) => {
                           e.stopPropagation();
@@ -854,6 +889,7 @@ export default function SessionViewer({ sessionId, sessionList, reviewerName, re
                           color: isPopoverOpen ? C.accent : C.textSecondary,
                           cursor: 'pointer', marginTop: 4,
                           whiteSpace: 'nowrap',
+                          ...(isPopoverOpen ? { opacity: 1, pointerEvents: 'auto' } : null),
                         }}
                       >
                         + Flag
@@ -1020,21 +1056,36 @@ export default function SessionViewer({ sessionId, sessionList, reviewerName, re
               </div>
             )}
 
-            {/* Confirm-all: one click confirms every unconfirmed active flag */}
+            {/* Confirm-all / Dismiss-all: bulk-action every unconfirmed active flag */}
             {!loading && unactionedFlagCount >= 2 && (
-              <div style={{ marginBottom: 14 }}>
+              <div style={{ marginBottom: 14, display: 'flex', gap: 8 }}>
                 <button
                   onClick={() => handleConfirmAll(unactionedFlagCount)}
-                  disabled={confirmingAll}
+                  disabled={confirmingAll || dismissingAll}
                   style={{
                     fontSize: 12, fontFamily: MONO, fontWeight: 600,
                     padding: '6px 14px', borderRadius: 4,
-                    cursor: confirmingAll ? 'default' : 'pointer',
+                    cursor: confirmingAll || dismissingAll ? 'default' : 'pointer',
                     background: C.accent, color: '#FFFFFF',
-                    border: `1px solid ${C.accent}`, opacity: confirmingAll ? 0.6 : 1,
+                    border: `1px solid ${C.accent}`,
+                    opacity: confirmingAll || dismissingAll ? 0.6 : 1,
                   }}
                 >
                   {confirmingAll ? 'Confirming…' : `Confirm All (${unactionedFlagCount})`}
+                </button>
+                <button
+                  onClick={() => handleDismissAll(unactionedFlagCount)}
+                  disabled={confirmingAll || dismissingAll}
+                  style={{
+                    fontSize: 12, fontFamily: MONO, fontWeight: 600,
+                    padding: '6px 14px', borderRadius: 4,
+                    cursor: confirmingAll || dismissingAll ? 'default' : 'pointer',
+                    background: '#A32D2D', color: '#FFFFFF',
+                    border: '1px solid #A32D2D',
+                    opacity: confirmingAll || dismissingAll ? 0.6 : 1,
+                  }}
+                >
+                  {dismissingAll ? 'Dismissing…' : `Dismiss All (${unactionedFlagCount})`}
                 </button>
               </div>
             )}

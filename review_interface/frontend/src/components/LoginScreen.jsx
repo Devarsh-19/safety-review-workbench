@@ -12,6 +12,14 @@ const REVIEWERS = [
   { name: 'Vineet',   role: 'L1' },
   { name: 'Devarsh',  role: 'L1' },
   { name: 'Amogh',    role: 'L2' },
+  { name: 'Locked',   role: 'L2' },   // read-only view of LOCKED sessions only
+  // Audio-only, read-only L1 client persona: sees ONLY LOCKED sessions that
+  // carry an NSFW_EXPLICIT flag. As L1 it has no L2 authority (no lock/unlock or
+  // final-review actions). `workspaces` restricts which login workspaces list it.
+  { name: 'Astrotalk Review', role: 'L1', workspaces: ['audio'] },
+  // Audio-only L1 bucket for non-Hindi/English/Hinglish (regional-language)
+  // sessions, populated by scripts/assign_multilingual_audio.py.
+  { name: 'Multilingual', role: 'L1', workspaces: ['audio'] },
 ];
 
 const WORKSPACES = [
@@ -29,10 +37,33 @@ export default function LoginScreen({ onLogin }) {
   // Stats strip follows the selected workspace: chat stats or audio stats.
   // Both endpoints return total_pending / total_reviewed / total_sessions.
   useEffect(() => {
+    let cancelled = false;
     setStats(null);
     const fetchStats = mode === 'audio' ? getAudioStats : getStats;
-    fetchStats().then(setStats).catch(() => {});
+    fetchStats()
+      .then((data) => { if (!cancelled) setStats(data); })
+      .catch(() => {});
+    // Guard against out-of-order responses: if `mode` changes before this
+    // request resolves, its result is stale and must not overwrite the panel
+    // (otherwise e.g. a late chat response shows chat counts under Audio).
+    return () => { cancelled = true; };
   }, [mode]);
+
+  // Reviewers available in the currently-selected workspace. An entry with no
+  // `workspaces` field is available everywhere; otherwise it is listed only in
+  // the workspaces it names (e.g. "Astrotalk Review" is audio-only).
+  const availableReviewers = REVIEWERS.filter(
+    (r) => !r.workspaces || r.workspaces.includes(mode)
+  );
+
+  const selectWorkspace = (id) => {
+    setMode(id);
+    // Clear the chosen name if it isn't valid in the new workspace.
+    const stillValid = REVIEWERS.some(
+      (r) => r.name === name && (!r.workspaces || r.workspaces.includes(id))
+    );
+    if (!stillValid) setName('');
+  };
 
   const disabled = !name;
 
@@ -143,7 +174,7 @@ export default function LoginScreen({ onLogin }) {
                   <button
                     key={w.id}
                     type="button"
-                    onClick={() => setMode(w.id)}
+                    onClick={() => selectWorkspace(w.id)}
                     style={{
                       flex: 1,
                       padding: '10px 12px',
@@ -202,7 +233,7 @@ export default function LoginScreen({ onLogin }) {
               }}
             >
               <option value="" disabled>Select your name…</option>
-              {REVIEWERS.map((r) => (
+              {availableReviewers.map((r) => (
                 <option key={r.name} value={r.name}>{r.name}</option>
               ))}
             </select>

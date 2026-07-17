@@ -38,15 +38,16 @@ export function getSessions(filters = {}) {
   const add = (k, v) => {
     if (v !== undefined && v !== null && v !== '') params.append(k, v);
   };
-  add('verdict', filters.verdict);
-  add('status', filters.status);
-  add('language', filters.language);
-  add('reviewer_name', filters.reviewer_name);
-  add('reviewer_role', filters.reviewer_role);
-  add('assigned_to', filters.assigned_to);
-  add('search', filters.search);
-  add('session_type', filters.session_type);
-  add('astrotalk', filters.astrotalk);
+  add('verdict',        filters.verdict);
+  add('status',         filters.status);
+  add('language',       filters.language);
+  add('reviewer_name',  filters.reviewer_name);
+  add('reviewer_role',  filters.reviewer_role);
+  add('assigned_to',    filters.assigned_to);
+  add('flag_category',  filters.flag_category);
+  add('search',         filters.search);
+  add('session_type',   filters.session_type);
+  add('astrotalk',      filters.astrotalk);
   if (filters.min_confidence) add('min_confidence', filters.min_confidence);
   add('min_duration', filters.min_duration);
   add('max_duration', filters.max_duration);
@@ -121,6 +122,14 @@ export function confirmAllFlags(sessionId, reviewerId) {
   });
 }
 
+export function dismissAllFlags(sessionId, reviewerId) {
+  return request(`/sessions/${encodeURIComponent(sessionId)}/dismiss-all-flags`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ reviewer_id: reviewerId }),
+  });
+}
+
 // ── Workflow actions ───────────────────────────────────────────────────────
 
 export function submitSession(sessionId, reviewerId, note) {
@@ -133,6 +142,15 @@ export function submitSession(sessionId, reviewerId, note) {
 
 export function markNeedsFinalReview(sessionId, reviewerId) {
   return request(`/sessions/${encodeURIComponent(sessionId)}/needs-final-review`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ reviewer_id: reviewerId }),
+  });
+}
+
+// L2 bulk action: lock every chat session currently SUBMITTED_FOR_REVIEW.
+export function lockAllSubmittedSessions(reviewerId) {
+  return request('/sessions/lock-all-submitted', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ reviewer_id: reviewerId }),
@@ -238,6 +256,22 @@ export function confirmAllAudioFlags(sId, reviewerId) {
   });
 }
 
+export function dismissAllAudioFlags(sId, reviewerId) {
+  return request(`/audio/sessions/${sId}/dismiss-all-flags`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ reviewer_id: reviewerId }),
+  });
+}
+
+export function saveAudioSessionNote(sId, note, reviewerId) {
+  return request(`/audio/sessions/${sId}/session-note`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ note, reviewer_id: reviewerId }),
+  });
+}
+
 export function submitAudioSession(sId, reviewerId, note) {
   return request(`/audio/sessions/${sId}/submit`, {
     method: 'POST',
@@ -256,6 +290,15 @@ export function lockAudioSession(sId, reviewerId) {
 
 export function unlockAudioSession(sId, reviewerId) {
   return request(`/audio/sessions/${sId}/unlock`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ reviewer_id: reviewerId }),
+  });
+}
+
+// L2 bulk action: lock every audio session currently SUBMITTED_FOR_REVIEW.
+export function lockAllSubmittedAudioSessions(reviewerId) {
+  return request('/audio/sessions/lock-all-submitted', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ reviewer_id: reviewerId }),

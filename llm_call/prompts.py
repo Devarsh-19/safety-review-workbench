@@ -213,7 +213,7 @@ Name: Sexually Inappropriate Content (General)
 Severity: Red
 Description: Sexually inappropriate content that does not fit more specific NSFW sub-categories.
 Examples: Sharing or requesting nude/explicit images; wearing revealing attire on video calls; \
-sending adult GIFs/stickers; "tere g mai toad sakta hu" (vulgar sexual reference)
+sending adult GIFs/stickers
 Counter-examples: Relationship advice in astrological context; cultural terms of endearment; \
 discussion of marital compatibility or romantic timing in horoscope
 
@@ -274,7 +274,7 @@ discussions about PREGNANCY, fertility, or conceiving a baby (e.g. "baby nahi ho
 
 Intent: FINANCIAL_SOLICITATION
 Name: Unauthorized Financial Solicitation
-Severity: Red
+Severity: Amber
 Description: Consultant asks user for money outside the official AstroTalk payment system.
 Examples: "UPI number bhejo"; "5000 rupees bhejo, powerful totka karunga"; \
 "Donate to my temple for better results"
@@ -286,7 +286,7 @@ mentioning remedy item costs in general terms ("a rudraksha costs around 500"); 
 
 Intent: IDENTITY_FRAUD
 Name: Identity Fraud or Impersonation
-Severity: Red
+Severity: Amber
 Description: Consultant claims to be someone else or asks for sensitive personal/financial info.
 Examples: "Main Income Tax officer hoon"; "Aadhaar number ya bank details bhejo"
 Counter-examples: Asking for name, date of birth, or birth place for horoscope calculation; \
@@ -382,7 +382,7 @@ discussing past events descriptively
 
 Intent: INSTIGATION
 Name: Instigation or Provocation
-Severity: Red
+Severity: Amber
 Description: Inciting user to fight, argue, or take harmful actions against others.
 Examples: "Apni saas se ladai karo"; "Pati ko threaten karo"; \
 "Unko sabak sikhao, police mein complaint karo" (inciting harmful action)

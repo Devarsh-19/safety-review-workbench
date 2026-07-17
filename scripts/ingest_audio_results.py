@@ -243,7 +243,7 @@ def parse_astrotalk_verdict(value) -> str | None:
     return "FLAGGED" if flagged else "CLEAN"
 
 
-def ingest_session(conn, obj: dict, auto_submit: bool = True) -> tuple[str, int, int]:
+def ingest_session(conn, obj: dict, auto_submit: bool = True, auto_lock: bool = False) -> tuple[str, int, int]:
     """Insert or refresh one session object. Returns (outcome, n_segments, n_flags).
 
     outcome: 'inserted' | 'refreshed' | 'skipped' (session exists and is no
@@ -378,8 +378,8 @@ def ingest_session(conn, obj: dict, auto_submit: bool = True) -> tuple[str, int,
         )
         n_flags += 1
 
-    # Verdict from the flags now in the DB (respects amendments/dismissals) —
-    # same rules as the chat DB, including flagged-combination escalations.
+    # Verdict from the flags now in the DB (respects amendments/dismissals).
+    # Audio session verdicts are binary: any remaining active flag => FLAGGED.
     verdict = recompute_audio_session_verdict(s_id, conn)
 
     # Chat parity: a session with no flags at all is CLEAN and goes straight
@@ -389,17 +389,32 @@ def ingest_session(conn, obj: dict, auto_submit: bool = True) -> tuple[str, int,
             "SELECT COUNT(*) FROM audio_flags WHERE s_id = ?", (s_id,)
         ).fetchone()[0]
         if remaining == 0:
-            conn.execute(
-                """UPDATE audio_sessions
-                   SET review_status = 'SUBMITTED_FOR_REVIEW',
-                       submitted_by  = 'LLM',
-                       submitted_at  = datetime('now'),
-                       reviewer_id   = 'LLM',
-                       reviewer_note = 'Auto-submitted by LLM ingest: no flags',
-                       reviewed_at   = datetime('now')
-                   WHERE s_id = ? AND review_status = 'PENDING'""",
-                (s_id,),
-            )
+            if auto_lock and astrotalk_verdict == "CLEAN":
+                conn.execute(
+                    """UPDATE audio_sessions
+                       SET review_status = 'LOCKED',
+                           locked_by     = 'AUTO_LOCK',
+                           locked_at     = datetime('now'),
+                           submitted_by  = 'LLM',
+                           submitted_at  = datetime('now'),
+                           reviewer_id   = 'LLM',
+                           reviewer_note = 'Auto-locked by LLM ingest: clean by both LLM and Astrotalk',
+                           reviewed_at   = datetime('now')
+                       WHERE s_id = ? AND review_status = 'PENDING'""",
+                    (s_id,),
+                )
+            else:
+                conn.execute(
+                    """UPDATE audio_sessions
+                       SET review_status = 'SUBMITTED_FOR_REVIEW',
+                           submitted_by  = 'LLM',
+                           submitted_at  = datetime('now'),
+                           reviewer_id   = 'LLM',
+                           reviewer_note = 'Auto-submitted by LLM ingest: no flags',
+                           reviewed_at   = datetime('now')
+                       WHERE s_id = ? AND review_status = 'PENDING'""",
+                    (s_id,),
+                )
 
     return ("refreshed" if existing else "inserted"), len(segments), n_flags
 
@@ -413,6 +428,8 @@ def main():
                         help="Clear the checkpoint before ingesting.")
     parser.add_argument("--no-auto-submit", action="store_true",
                         help="Do not auto-submit CLEAN zero-flag sessions for L2 review.")
+    parser.add_argument("--auto-lock-clean", action="store_true",
+                        help="Auto-lock sessions that are clean by both LLM and Astrotalk.")
     args = parser.parse_args()
 
     src = Path(args.path)
@@ -456,7 +473,7 @@ def main():
                     # alone and the rest of the run is preserved.
                     with conn:
                         outcome, n_seg, n_flag = ingest_session(
-                            conn, obj, auto_submit=not args.no_auto_submit
+                            conn, obj, auto_submit=not args.no_auto_submit, auto_lock=args.auto_lock_clean
                         )
                 except Exception as exc:
                     print(f"[ERROR] s_id {s_id}: {type(exc).__name__}: {exc}  ({fp.name})")

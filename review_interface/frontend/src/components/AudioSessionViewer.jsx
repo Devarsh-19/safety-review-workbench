@@ -12,12 +12,13 @@ import {
   saveSpeakerRoles,
   submitAudioSession,
   lockAudioSession,
-  unlockAudioSession,
   confirmAudioFlag,
   amendAudioFlag,
   dismissAudioFlag,
   confirmAllAudioFlags,
+  dismissAllAudioFlags,
   saveAudioSessionRisk,
+  saveAudioSessionNote,
 } from '../api';
 
 function formatTime(seconds) {
@@ -38,7 +39,11 @@ const RISK_COLORS = {
   LOW:    { bg: 'cleanBg',   border: 'cleanBorder',   text: 'cleanText' },
 };
 const opposite = (role) => (role === 'ASTROLOGER' ? 'USER' : 'ASTROLOGER');
-const SEVERITIES = ['RED', 'AMBER'];
+// Stored as RED/AMBER but surfaced on the High/Medium scale, never the raw colour word.
+const SEVERITIES = [
+  { value: 'RED', label: 'High' },
+  { value: 'AMBER', label: 'Medium' },
+];
 const INTENT_TAXONOMY = [
   "NSFW",
   "NSFW_EXPLICIT",
@@ -66,6 +71,9 @@ export default function AudioSessionViewer({ sId, sessionList, reviewerName, rev
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState('');
+  const [sessionNote, setSessionNote] = useState('');
+  const [noteSaved, setNoteSaved] = useState(false);
+  const [sessionNoteFocused, setSessionNoteFocused] = useState(false);
   const [playerError, setPlayerError] = useState('');
   const [editingFlag, setEditingFlag] = useState(null);   // flag_id being edited
   const [dismissingFlagId, setDismissingFlagId] = useState(null);
@@ -74,14 +82,32 @@ export default function AudioSessionViewer({ sId, sessionList, reviewerName, rev
   const [editSeverity, setEditSeverity] = useState('RED');
   const [editReasoning, setEditReasoning] = useState('');
 
-  // Adjacent-session navigation, same as the chat viewer: no status/verdict
-  // filtering — Previous/Next walk the queue list as displayed.
+  // Adjacent-session navigation. Previous/Next skip sessions the current
+  // reviewer can no longer act on, so they land only on actionable work:
+  //  - L1 can act only on PENDING sessions (submitted/locked are frozen to them)
+  //  - L2 can act on anything not yet LOCKED
+  const isActionable = (row) => {
+    if (!row) return false;
+    if (reviewerRole === 'L2') return row.review_status !== 'LOCKED';
+    return row.review_status === 'PENDING';
+  };
   const currentIndex = sessionList?.findIndex((r) => r.s_id === sId) ?? -1;
-  const prevIndex = currentIndex > 0 ? currentIndex - 1 : -1;
-  const nextIndex =
-    currentIndex >= 0 && sessionList && currentIndex < sessionList.length - 1
-      ? currentIndex + 1
-      : -1;
+  // Normally we skip over non-actionable sessions so the reviewer lands only on
+  // actionable work. But when the CURRENT session is itself non-actionable, that
+  // skip leaves Prev/Next permanently disabled: the read-only personas
+  // ("Astrotalk Review", "Locked") only ever see LOCKED sessions, and any
+  // flag-category filter surfaces LOCKED/SUBMITTED rows for everyone. In that
+  // case fall back to plain adjacent navigation so the buttons still work.
+  const currentActionable = isActionable(sessionList?.[currentIndex]);
+  const findAdjacent = (dir) => {
+    if (currentIndex < 0 || !sessionList) return -1;
+    for (let i = currentIndex + dir; i >= 0 && i < sessionList.length; i += dir) {
+      if (!currentActionable || isActionable(sessionList[i])) return i;
+    }
+    return -1;
+  };
+  const prevIndex = findAdjacent(-1);
+  const nextIndex = findAdjacent(1);
 
   const hasPrev = prevIndex !== -1;
   const hasNext = nextIndex !== -1;
@@ -115,6 +141,23 @@ export default function AudioSessionViewer({ sId, sessionList, reviewerName, rev
   const flagsEditable = !locked && (reviewerRole === 'L2' ? true : session?.review_status === 'PENDING');
   const readOnly = !flagsEditable;
   const audioUrl = session?.audio_url;
+
+  // Seed the session-note field from the session once per session load. Keyed on
+  // s_id so switching sessions resets it, but a background refresh after an
+  // action won't clobber whatever the reviewer is currently typing.
+  useEffect(() => {
+    setSessionNote(session?.session_note || '');
+  }, [session?.s_id]);
+
+  // Persist the reviewer's overall session note (chat parity). Available on any
+  // session that isn't locked — the primary way to capture comments on
+  // mono-channel recordings where flags can't be attributed to a speaker lane.
+  const saveSessionNote = (value) => {
+    if (locked) return;
+    saveAudioSessionNote(sId, value, reviewerName)
+      .then(() => { setNoteSaved(true); setTimeout(() => setNoteSaved(false), 1500); })
+      .catch((e) => setError(String(e.message || e)));
+  };
 
   // Attach the HLS (.m3u8) stream to the <audio> element. Safari plays HLS
   // natively; everywhere else hls.js does the demuxing via MediaSource.
@@ -154,13 +197,21 @@ export default function AudioSessionViewer({ sId, sessionList, reviewerName, rev
     audio.play().catch(() => { });
   };
 
-  // Distinct raw speaker labels, in order of appearance. Every speaker gets a
-  // lane; the first two are role-assignable (the data model supports exactly
-  // two roles), extra speakers render read-only-role lanes.
+  // Distinct raw speaker labels. Ordered deterministically by the numeric part
+  // of the diarization label (SPEAKER_00 before SPEAKER_01, "1" before "2") so
+  // Speaker 1 is always the left lane and Speaker 2 the right — not by whoever
+  // happened to talk first. Every speaker gets a lane; the first two are
+  // role-assignable (the data model supports exactly two roles), extra speakers
+  // render read-only-role lanes.
   const speakerLabels = [];
   segments.forEach((seg) => {
     if (seg.speaker && !speakerLabels.includes(seg.speaker)) speakerLabels.push(seg.speaker);
   });
+  const speakerNum = (label) => {
+    const m = String(label).match(/\d+/);
+    return m ? parseInt(m[0], 10) : Number.MAX_SAFE_INTEGER;
+  };
+  speakerLabels.sort((a, b) => speakerNum(a) - speakerNum(b) || String(a).localeCompare(String(b)));
 
   const segById = {};
   segments.forEach((seg) => { segById[seg.seg_id] = seg; });
@@ -174,6 +225,13 @@ export default function AudioSessionViewer({ sId, sessionList, reviewerName, rev
     (f) => f.parent_flag_id != null || !amendedParents.has(f.flag_id)
   );
   const unactionedCount = activeFlags.filter((f) => f.status !== 'CONFIRMED' && f.status !== 'DISMISSED').length;
+
+  // Flags actually shown to the reviewer: dismissed flags are hidden from the
+  // lanes and the flag count. (The UI's own dismiss hard-deletes, so DISMISSED
+  // rows come from the batch dismiss scripts; they stay in the DB for audit but
+  // must not surface in the review view.) Gating (risk / submit / unactioned)
+  // still uses activeFlags, so it is unaffected.
+  const visibleFlags = activeFlags.filter((f) => f.status !== 'DISMISSED');
 
   // Mirrors the backend submit gate: speaker roles must be assigned before a
   // session WITH flags can be submitted. Pre-checking here disables the button
@@ -200,13 +258,13 @@ export default function AudioSessionViewer({ sId, sessionList, reviewerName, rev
   };
 
   const flagsForSpeaker = (label) =>
-    activeFlags.filter((f) => segById[f.seg_id]?.speaker === label).sort(byStartTime);
+    visibleFlags.filter((f) => segById[f.seg_id]?.speaker === label).sort(byStartTime);
 
   // Flags whose seg_id is NULL or points at a segment that no longer exists
   // (possible after re-ingest replaces segments while preserving reviewer
   // flags). They MUST stay visible and actionable — they count toward the
   // submit gate, so hiding them would block submission with no way out.
-  const orphanFlags = activeFlags
+  const orphanFlags = visibleFlags
     .filter((f) => !segById[f.seg_id]?.speaker)
     .sort(byStartTime);
 
@@ -381,6 +439,19 @@ export default function AudioSessionViewer({ sId, sessionList, reviewerName, rev
                   }}>
                     {f.intent}
                   </span>
+                  {/* Flag source — LLM (auto-detected) vs MANUAL (reviewer-added/edited), chat parity */}
+                  <span
+                    title={f.source === 'MANUAL' ? 'Manually added or edited by a reviewer' : 'Auto-detected by the model'}
+                    style={{
+                      fontSize: 10, fontFamily: MONO, fontWeight: 500,
+                      padding: '1px 6px', borderRadius: 3,
+                      background: f.source === 'MANUAL' ? C.manualBg : C.llmBg,
+                      color:      f.source === 'MANUAL' ? C.manualText : C.llmText,
+                      border: `1px solid ${f.source === 'MANUAL' ? C.manualBorder : C.llmBorder}`,
+                    }}
+                  >
+                    {f.source || 'LLM'}
+                  </span>
                   <span style={{ fontSize: 11, fontFamily: MONO, color: C.textSecondary }}>
                     conf {f.conf != null ? Number(f.conf).toFixed(2) : '—'}
                   </span>
@@ -534,7 +605,7 @@ export default function AudioSessionViewer({ sId, sessionList, reviewerName, rev
                           borderRadius: 4, border: `1px solid ${C.border}`, cursor: 'pointer',
                         }}
                       >
-                        {SEVERITIES.map((s) => <option key={s} value={s}>{s}</option>)}
+                        {SEVERITIES.map((s) => <option key={s.value} value={s.value}>{s.label}</option>)}
                       </select>
                     </div>
                     <input
@@ -582,7 +653,7 @@ export default function AudioSessionViewer({ sId, sessionList, reviewerName, rev
 
   return (
     <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
-      <TopBar reviewerName={`${reviewerName} · Audio Review`} />
+      <TopBar reviewerName={`${reviewerName} · Audio Review`} reviewerRole={reviewerRole} />
 
       <div style={{ flex: 1, overflow: 'auto', padding: 24, background: C.bgPage }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
@@ -628,6 +699,19 @@ export default function AudioSessionViewer({ sId, sessionList, reviewerName, rev
           <div style={{ color: C.textSecondary }}>Session not found.</div>
         ) : (
           <>
+            {/* Locked banner — chat parity: a finalised session is read-only */}
+            {locked && (
+              <div style={{
+                background: '#F1EFE8', border: '1px solid #D3D1C7',
+                borderRadius: 6, padding: '12px 16px', marginBottom: 16,
+                fontSize: 13, color: '#444441',
+              }}>
+                🔒 Locked by {session.locked_by || '—'}
+                {session.locked_at ? ` on ${String(session.locked_at).slice(0, 10)}` : ''}
+                {' '}— this session is finalised and read-only
+              </div>
+            )}
+
             {/* Session header */}
             <div style={{
               background: C.bgSurface, border: `1px solid ${C.border}`,
@@ -655,7 +739,7 @@ export default function AudioSessionViewer({ sId, sessionList, reviewerName, rev
                 </span>
               )}
               <span style={{ fontSize: 12, color: C.textSecondary }}>
-                {session.lang || 'unknown language'} · {segments.length} segments · {activeFlags.length} flags
+                {session.lang || 'unknown language'} · {segments.length} segments · {visibleFlags.length} flags
                 {unactionedCount > 0 ? ` (${unactionedCount} unactioned)` : ''}
                 {pauses.length > 0 ? ` · ${pauses.length} pauses` : ''}
               </span>
@@ -739,6 +823,80 @@ export default function AudioSessionViewer({ sId, sessionList, reviewerName, rev
               border: `1px solid ${C.border}`, borderRadius: 6,
               padding: '14px 18px', display: 'flex', flexDirection: 'column', gap: 12,
             }}>
+              {/* Session note — reviewer's overall observation on the session.
+                  Always available (unless locked); the primary way to capture
+                  comments on mono-channel recordings where flags can't be
+                  attributed to a speaker lane. Saved on blur. */}
+              <div>
+                <div style={{
+                  display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6,
+                }}>
+                  <span style={{
+                    fontSize: 12, fontFamily: MONO, textTransform: 'uppercase',
+                    letterSpacing: '0.04em', color: C.textPrimary, fontWeight: 600,
+                  }}>
+                    Session note
+                  </span>
+                  {noteSaved && (
+                    <span style={{ fontSize: 11, color: C.accentDark }}>✓ Saved</span>
+                  )}
+                </div>
+                <textarea
+                  value={sessionNote}
+                  disabled={locked}
+                  onChange={(e) => setSessionNote(e.target.value)}
+                  onFocus={() => setSessionNoteFocused(true)}
+                  onBlur={(e) => { setSessionNoteFocused(false); saveSessionNote(e.target.value); }}
+                  placeholder="Overall note on this session — e.g. context for a mono-channel recording where speakers can't be separated…"
+                  rows={2}
+                  style={{
+                    width: '100%', boxSizing: 'border-box', padding: '8px 12px',
+                    fontSize: 13, borderRadius: 5, resize: 'vertical',
+                    border: `1px solid ${sessionNoteFocused ? C.accent : C.border}`,
+                    background: locked ? C.bgStatsrow : sessionNoteFocused ? C.bgSurface : C.bgMuted,
+                    color: locked ? C.textSecondary : C.textPrimary,
+                    cursor: locked ? 'not-allowed' : undefined,
+                  }}
+                />
+              </div>
+
+              {/* Bulk flag actions — Confirm All / Dismiss All. Available to
+                  both L1 and L2 whenever there are unactioned flags. */}
+              {!readOnly && unactionedCount > 0 && (
+                <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                  <button
+                    disabled={busy}
+                    onClick={() => doAction(() => confirmAllAudioFlags(sId, reviewerName))}
+                    title="Confirm every unactioned flag at once"
+                    style={{
+                      padding: '7px 14px', fontSize: 12, fontFamily: MONO, fontWeight: 600,
+                      borderRadius: 4, border: `1px solid ${C.accent}`,
+                      background: C.accent, color: '#FFFFFF',
+                      cursor: busy ? 'not-allowed' : 'pointer', whiteSpace: 'nowrap',
+                    }}
+                  >
+                    ✓ Confirm All ({unactionedCount})
+                  </button>
+                  <button
+                    disabled={busy}
+                    onClick={() => {
+                      // eslint-disable-next-line no-alert
+                      if (!window.confirm(`Dismiss all ${unactionedCount} unactioned flag(s)? This cannot be undone.`)) return;
+                      doAction(() => dismissAllAudioFlags(sId, reviewerName));
+                    }}
+                    title="Dismiss every unactioned flag at once"
+                    style={{
+                      padding: '7px 14px', fontSize: 12, fontFamily: MONO, fontWeight: 600,
+                      borderRadius: 4, border: '1px solid #A32D2D',
+                      background: '#A32D2D', color: '#FFFFFF',
+                      cursor: busy ? 'not-allowed' : 'pointer', whiteSpace: 'nowrap',
+                    }}
+                  >
+                    Dismiss All ({unactionedCount})
+                  </button>
+                </div>
+              )}
+
               {/* Session risk rating — mandatory before Confirm All / Submit */}
               {!readOnly && reviewerRole !== 'L2' && (
                 <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
@@ -791,24 +949,6 @@ export default function AudioSessionViewer({ sId, sessionList, reviewerName, rev
                       color: C.textPrimary,
                     }}
                   />
-                  {unactionedCount > 0 && (
-                    <button
-                      disabled={busy || riskMissing}
-                      onClick={() => doAction(() => confirmAllAudioFlags(sId, reviewerName))}
-                      title={riskMissing
-                        ? 'Set the session risk rating (high/medium/low) first'
-                        : 'Confirm every unactioned flag at once'}
-                      style={{
-                        padding: '9px 16px', fontSize: 13, fontWeight: 500,
-                        borderRadius: 5, border: `1px solid ${riskMissing ? C.border : C.accent}`,
-                        background: riskMissing ? C.bgMuted : C.accentLight,
-                        color: riskMissing ? C.textMuted : C.accentDark,
-                        cursor: (busy || riskMissing) ? 'not-allowed' : 'pointer', whiteSpace: 'nowrap',
-                      }}
-                    >
-                      ✓ Confirm All ({unactionedCount})
-                    </button>
-                  )}
                   <button
                     disabled={busy || unactionedCount > 0 || rolesMissing || riskMissing}
                     title={unactionedCount > 0
@@ -842,7 +982,7 @@ export default function AudioSessionViewer({ sId, sessionList, reviewerName, rev
                   disabled={busy}
                   onClick={() => {
                     // eslint-disable-next-line no-alert
-                    if (!window.confirm(`Lock session ${sId}? This freezes all flags and the review decision. An L2 reviewer can unlock it later if needed.`)) return;
+                    if (!window.confirm(`Lock session ${sId}? This is final and cannot be undone.`)) return;
                     doAction(() => lockAudioSession(sId, reviewerName));
                   }}
                   style={{
@@ -852,21 +992,7 @@ export default function AudioSessionViewer({ sId, sessionList, reviewerName, rev
                     cursor: busy ? 'not-allowed' : 'pointer',
                   }}
                 >
-                  Lock Session
-                </button>
-              )}
-              {reviewerRole === 'L2' && locked && (
-                <button
-                  disabled={busy}
-                  onClick={() => doAction(() => unlockAudioSession(sId, reviewerName))}
-                  style={{
-                    padding: '9px 16px', fontSize: 13, fontWeight: 500,
-                    borderRadius: 5, border: `1px solid ${C.border}`,
-                    background: C.bgSurface, color: C.textPrimary,
-                    cursor: busy ? 'not-allowed' : 'pointer',
-                  }}
-                >
-                  Unlock Session
+                  Lock Session 🔒
                 </button>
               )}
               {readOnly && reviewerRole !== 'L2' && (

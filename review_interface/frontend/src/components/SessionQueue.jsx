@@ -5,7 +5,7 @@ import Footer from './Footer';
 import VerdictBadge from './VerdictBadge';
 import StatusBadge from './StatusBadge';
 import LoadingSpinner from './LoadingSpinner';
-import { getSessions, getStats, submitReview, getReviewerStats, exportCsv, getViolationStats } from '../api';
+import { getSessions, getStats, submitReview, exportCsv, getViolationStats, lockAllSubmittedSessions } from '../api';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -40,8 +40,14 @@ function formatDuration(minutes) {
   return `${(minutes / 1440).toFixed(1)} days`;
 }
 
-// Feature 7 — Reviewer progress table columns
-const PROGRESS_COLS = ['Reviewer', 'Reviewed', 'Confirmed', 'False Pos.', 'Escalated', 'Cleared'];
+// Flag categories offered in the flag filter dropdown (violation order first)
+const FLAG_CATEGORIES = [
+  'NSFW', 'NSFW_EXPLICIT', 'NSFW_GROOMING', 'NSFW_APPEARANCE', 'CSAM_RISK',
+  'ABUSIVE_LANGUAGE', 'HATE_SPEECH', 'SELF_HARM', 'VIOLENCE', 'FAKE_REMEDIES',
+  'UNAUTHORIZED_MEDICAL_ADVICE', 'FINANCIAL_SOLICITATION', 'IDENTITY_FRAUD', 'INSTIGATION',
+  'OFF_PLATFORM_SOLICITATION', 'FEAR_MANIPULATION', 'PERSONAL_DATA_COLLECTION',
+  'RE_ENGAGEMENT_SOLICITATION', 'COMPETITOR_PROMOTION', 'EXTERNAL_MEDIA_CONTENT', 'OTHER',
+];
 
 // Column keys used for client-side sorting
 const SORT_KEYS = {
@@ -86,10 +92,6 @@ export default function SessionQueue({ reviewerName, reviewerRole, onSelectSessi
   const [clearingSession, setClearingSession] = useState(null); // Feature 4
   const [exporting,       setExporting]       = useState(false);// Feature 5
 
-  // ── Team progress state ────────────────────────────────────────────────
-  const [showProgress,    setShowProgress]    = useState(false);// Feature 7
-  const [reviewerStats,   setReviewerStats]   = useState([]);
-  const [loadingProgress, setLoadingProgress] = useState(false);
   // L2 Reviewer Progress (assignment breakdown) — collapsible, expanded by default
   const [showReviewerProgress, setShowReviewerProgress] = useState(true);
 
@@ -115,6 +117,9 @@ export default function SessionQueue({ reviewerName, reviewerRole, onSelectSessi
 
   // ── Assignee filter (L2 only) ──────────────────────────────────────────
   const [assigneeFilter,  setAssigneeFilter]  = useState('');
+
+  // ── Flag category filter ───────────────────────────────────────────────
+  const [flagCatFilter,   setFlagCatFilter]   = useState('');
 
   // ── Pagination — SERVER-side, 50 rows per page ─────────────────────────
   const PAGE_SIZE = 50;
@@ -147,6 +152,7 @@ export default function SessionQueue({ reviewerName, reviewerRole, onSelectSessi
         reviewer_name:  reviewerName    || undefined,
         reviewer_role:  reviewerRole    || undefined,
         assigned_to:    assigneeFilter  || undefined,
+        flag_category:  flagCatFilter   || undefined,
         // Top search box and the Session-ID column filter both match session_id.
         search:         (dSearch.trim() || dColId.trim()) || undefined,
         language:       dColLang.trim() || undefined,
@@ -168,12 +174,16 @@ export default function SessionQueue({ reviewerName, reviewerRole, onSelectSessi
       setTotalCount(sess.total || 0);
       setStats(st);
     }).catch(() => {});
-  }, [verdictFilter, statusFilter, reviewerName, reviewerRole, assigneeFilter,
+  }, [verdictFilter, statusFilter, reviewerName, reviewerRole, assigneeFilter, flagCatFilter,
       dSearch, dColId, dColLang, colFilterType, colFilterAstro, dMinConf,
       dMinDur, dMaxDur, dMinTurns, dMaxTurns, sortCol, sortDir, page]);
 
   useEffect(() => {
-    setLoading(true);
+    // Do NOT flip `loading` back to true on refetches. `loading` starts true for
+    // the first mount and is cleared once the first fetch resolves; after that we
+    // keep the current rows on screen while a new fetch runs in the background.
+    // Otherwise every debounced search keystroke blanked the whole table to a
+    // "Loading sessions…" spinner, which made typing a session ID jarring.
     fetchAll().finally(() => setLoading(false));
   }, [fetchAll]);
 
@@ -185,7 +195,7 @@ export default function SessionQueue({ reviewerName, reviewerRole, onSelectSessi
   // Reset to the first page whenever an (applied) filter / sort input changes.
   // Uses debounced mirrors so the page doesn't jump around mid-typing.
   useEffect(() => { setPage(0); }, [
-    verdictFilter, statusFilter, assigneeFilter, dSearch, dColId, dMinConf,
+    verdictFilter, statusFilter, assigneeFilter, flagCatFilter, dSearch, dColId, dMinConf,
     colFilterAstro, dColLang, colFilterType,
     dMinDur, dMaxDur, dMinTurns, dMaxTurns,
     sortCol, sortDir,
@@ -200,30 +210,36 @@ export default function SessionQueue({ reviewerName, reviewerRole, onSelectSessi
 
   // ── Derived values ─────────────────────────────────────────────────────
 
-  const clearFilters = () => { setVerdictFilter(''); setStatusFilter(''); setAssigneeFilter(''); };
-  const hasFilters   = verdictFilter || statusFilter || assigneeFilter;
+  const clearFilters = () => { setVerdictFilter(''); setStatusFilter(''); setAssigneeFilter(''); setFlagCatFilter(''); };
+  const hasFilters   = verdictFilter || statusFilter || assigneeFilter || flagCatFilter;
 
-  const severe           = stats?.count_severe              ?? 0;
-  const flagged          = stats?.count_flagged             ?? 0;
-  const clean            = stats?.count_clean               ?? 0;
-  const unprocessed      = stats?.count_unprocessed         ?? 0;
   const locked           = stats?.count_locked              ?? 0;
   const submitted        = stats?.count_submitted           ?? 0;
-  const needsFinalReview = stats?.count_needs_final_review  ?? 0;
+  const astroFlagged     = stats?.count_astrotalk_flagged   ?? 0;
+  const astroClean       = stats?.count_astrotalk_clean     ?? 0;
+  const falsePos         = stats?.count_false_positive      ?? 0;
+  const falsePosPct      = stats?.pct_false_positive        ?? 0;
+  const falseNeg         = stats?.count_false_negative      ?? 0;
+  const falseNegPct      = stats?.pct_false_negative        ?? 0;
   const total            = stats?.total_sessions            ?? 0;
   const pending          = stats?.total_pending             ?? 0;
-  const reviewed         = total - pending;
 
   const statCells = [
-    { label: 'Severe',         value: severe,           color: C.severeText  },
-    { label: 'Flagged',        value: flagged,           color: C.flaggedText },
-    { label: 'Clean',          value: clean,             color: C.cleanText   },
-    { label: 'Unprocessed',    value: unprocessed,       color: '#444441'     },
-    { label: 'Locked',         value: locked,            color: '#444441'     },
-    { label: 'Submitted',      value: submitted,         color: '#185FA5'     },
-    { label: 'Needs Review',   value: needsFinalReview,  color: '#854F0B'     },
-    { label: 'Total sessions', value: total,             color: C.textPrimary },
-    { label: 'Pending review', value: pending,           color: C.accent      },
+    { label: 'Total sessions',    value: total,                               color: C.textPrimary },
+    { label: 'False Positive',
+      value: <>{falsePos} <span style={{ fontSize: 9 }}>({falsePosPct}%)</span></>,
+      color: '#854F0B' },
+    { label: 'False Negative',
+      value: <>{falseNeg} <span style={{ fontSize: 9 }}>({falseNegPct}%)</span></>,
+      color: '#A32D2D' },
+    { label: 'Pending L1 Review', value: pending,                             color: C.accent      },
+    { label: 'Pending L2 Review', value: submitted,                           color: '#185FA5'     },
+    { label: 'Locked',            value: locked,                              color: '#444441'     },
+    { label: 'Flagged / Unflagged (AstroTalk)',
+      value: <><span style={{ color: C.severeText }}>{astroFlagged}</span>
+        <span style={{ color: C.textMuted }}> / </span>
+        <span style={{ color: C.cleanText }}>{astroClean}</span></>,
+      color: C.textPrimary },
   ];
 
   const handleSortClick = (colLabel) => {
@@ -277,6 +293,21 @@ export default function SessionQueue({ reviewerName, reviewerRole, onSelectSessi
     } catch (_) {}
   };
 
+  // L2 bulk action: lock every session currently submitted for review.
+  const [lockingAll, setLockingAll] = useState(false);
+  const handleLockAllSubmitted = async () => {
+    if (submitted === 0 || lockingAll) return;
+    if (!window.confirm(
+      `Lock all ${submitted} session(s) submitted for review? This freezes their flags and review decisions.`
+    )) return;
+    setLockingAll(true);
+    try {
+      await lockAllSubmittedSessions(reviewerName);
+      await fetchAll();
+    } catch (_) {}
+    finally { setLockingAll(false); }
+  };
+
   // ── Feature 5 — Export CSV ─────────────────────────────────────────────
 
   const handleExport = () => {
@@ -322,19 +353,6 @@ export default function SessionQueue({ reviewerName, reviewerRole, onSelectSessi
     }
   };
 
-  // ── Feature 7 — Team Progress toggle ──────────────────────────────────
-
-  const handleToggleProgress = () => {
-    const next = !showProgress;
-    setShowProgress(next);
-    if (next && reviewerStats.length === 0) {
-      setLoadingProgress(true);
-      getReviewerStats()
-        .then((data) => { setReviewerStats(data); setLoadingProgress(false); })
-        .catch(() => setLoadingProgress(false));
-    }
-  };
-
   // ── Shared styles ──────────────────────────────────────────────────────
 
   const selectSt = {
@@ -367,7 +385,7 @@ export default function SessionQueue({ reviewerName, reviewerRole, onSelectSessi
 
   return (
     <div style={{ height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-      <TopBar reviewerName={reviewerName} />
+      <TopBar reviewerName={reviewerName} reviewerRole={reviewerRole} />
 
       {/* Sub-bar: filters + right controls */}
       <div style={{
@@ -409,7 +427,7 @@ export default function SessionQueue({ reviewerName, reviewerRole, onSelectSessi
           <select style={selectSt} value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
             <option value="">All Statuses</option>
             <option value="PENDING">PENDING</option>
-            <option value="SUBMITTED_FOR_REVIEW">SUBMITTED FOR REVIEW</option>
+            <option value="SUBMITTED_FOR_REVIEW">SUBMITTED FOR L2 REVIEW</option>
             <option value="NEEDS_FINAL_REVIEW">NEEDS FINAL REVIEW</option>
             <option value="REVIEWED">REVIEWED</option>
             <option value="CONFIRMED">CONFIRMED</option>
@@ -429,6 +447,14 @@ export default function SessionQueue({ reviewerName, reviewerRole, onSelectSessi
               <option value="Devarsh">Devarsh</option>
             </select>
           )}
+
+          {/* Flag category filter — only sessions carrying this flag */}
+          <select style={selectSt} value={flagCatFilter} onChange={(e) => setFlagCatFilter(e.target.value)}>
+            <option value="">Flag Filter</option>
+            {FLAG_CATEGORIES.map((c) => (
+              <option key={c} value={c}>{c}</option>
+            ))}
+          </select>
 
           {/* Feature 8 — Confidence slider */}
           <span style={{ fontSize: 11, fontFamily: MONO, color: C.textSecondary, whiteSpace: 'nowrap' }}>
@@ -452,19 +478,25 @@ export default function SessionQueue({ reviewerName, reviewerRole, onSelectSessi
           )}
         </div>
 
-        {/* Right group: Team Progress toggle + Export + progress pill */}
+        {/* Right group: L2 bulk-lock + Export */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0 }}>
-          <button
-            onClick={handleToggleProgress}
-            style={{
-              fontSize: 12, padding: '5px 12px', background: C.bgSurface,
-              border: `1px solid ${C.border}`, borderRadius: 4,
-              color: showProgress ? C.accent : C.textPrimary, cursor: 'pointer',
-            }}
-          >
-            Team Progress {showProgress ? '▴' : '▾'}
-          </button>
-
+          {reviewerRole === 'L2' && (
+            <button
+              onClick={handleLockAllSubmitted}
+              disabled={lockingAll || submitted === 0}
+              title={submitted === 0 ? 'No sessions are submitted for review' : ''}
+              style={{
+                fontSize: 12, padding: '5px 14px', borderRadius: 4,
+                border: `1px solid ${submitted > 0 ? C.accent : C.border}`,
+                background: submitted > 0 ? C.accent : C.bgSurface,
+                color: submitted > 0 ? '#FFFFFF' : C.textSecondary,
+                cursor: (lockingAll || submitted === 0) ? 'not-allowed' : 'pointer',
+                opacity: lockingAll ? 0.7 : 1,
+              }}
+            >
+              {lockingAll ? 'Locking…' : `🔒 Lock all submitted (${submitted})`}
+            </button>
+          )}
           <button
             onClick={handleExport}
             style={{
@@ -476,24 +508,14 @@ export default function SessionQueue({ reviewerName, reviewerRole, onSelectSessi
             {exporting ? 'Exporting…' : '↓ Export CSV'}
           </button>
 
-          <div style={{
-            fontSize: 11, fontFamily: MONO, background: C.bgStatsrow,
-            border: `1px solid ${C.border}`, borderRadius: 4, padding: '4px 12px',
-            color: C.textSecondary, whiteSpace: 'nowrap',
-          }}>
-            <span style={{ color: C.accent, fontWeight: 500 }}>{reviewed}</span>
-            {' of '}
-            <span style={{ color: C.textPrimary }}>{total}</span>
-            {' reviewed'}
-          </div>
         </div>
       </div>
 
       {/* Stats strip */}
       <div style={{ flexShrink: 0, display: 'flex', alignItems: 'stretch', background: C.bgStatsrow, borderBottom: `1px solid ${C.border}` }}>
         {statCells.map((cell) => (
-          <div key={cell.label} style={{ flex: 1, padding: '10px 20px',
-            borderRight: `1px solid ${C.border}` }}>
+          <div key={cell.label} style={{ flex: 1, padding: '10px 16px',
+            borderRight: `1px solid ${C.border}`, whiteSpace: 'nowrap' }}>
             <div style={{ fontSize: 18, fontFamily: MONO, fontWeight: 500, color: cell.color }}>
               {cell.value}
             </div>
@@ -636,61 +658,6 @@ export default function SessionQueue({ reviewerName, reviewerRole, onSelectSessi
                   </span>
                 </div>
               ))}
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* Feature 7 — Team Progress collapsible section */}
-      {showProgress && (
-        <div style={{ flexShrink: 0, padding: '12px 20px', background: C.bgSurface,
-          borderBottom: `1px solid ${C.border}` }}>
-          {loadingProgress ? (
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 0',
-              color: C.textSecondary, fontSize: 13 }}>
-              <LoadingSpinner size={16} /> Loading reviewer stats…
-            </div>
-          ) : reviewerStats.length === 0 ? (
-            <div style={{ fontSize: 13, color: C.textSecondary, padding: '6px 0' }}>
-              No review activity yet.
-            </div>
-          ) : (
-            <div style={{ border: `1px solid ${C.border}`, borderRadius: 6, overflow: 'hidden' }}>
-              <table style={{ width: '100%', borderCollapse: 'collapse', background: C.bgSurface }}>
-                <thead>
-                  <tr style={{ background: C.bgStatsrow, borderBottom: `1px solid ${C.border}` }}>
-                    {PROGRESS_COLS.map((h) => (
-                      <th key={h} style={{
-                        padding: '7px 14px', textAlign: 'left', fontSize: 10,
-                        fontFamily: MONO, fontWeight: 600, textTransform: 'uppercase',
-                        letterSpacing: '0.06em', color: C.textSecondary, whiteSpace: 'nowrap',
-                      }}>
-                        {h}
-                      </th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {reviewerStats.map((r, i) => {
-                    const isLast = i === reviewerStats.length - 1;
-                    const border = isLast ? 'none' : `1px solid ${C.borderLight}`;
-                    const cellSt = { padding: '7px 14px', fontSize: 12, fontFamily: MONO,
-                      color: C.textPrimary, borderBottom: border };
-                    return (
-                      <tr key={r.reviewer_id} style={{ background: C.bgSurface }}>
-                        <td style={{ ...cellSt, color: C.textPrimary }}>{r.reviewer_id}</td>
-                        <td style={{ ...cellSt, color: C.accent, fontWeight: 500 }}>{r.sessions_reviewed}</td>
-                        <td style={cellSt}>{r.confirmed}</td>
-                        <td style={cellSt}>{r.false_positives}</td>
-                        <td style={{ ...cellSt, color: r.escalated > 0 ? C.severeText : C.textPrimary }}>
-                          {r.escalated}
-                        </td>
-                        <td style={cellSt}>{r.cleared}</td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
             </div>
           )}
         </div>
@@ -976,6 +943,7 @@ export default function SessionQueue({ reviewerName, reviewerRole, onSelectSessi
                           setVerdictFilter('');
                           setStatusFilter('');
                           setAssigneeFilter('');
+                          setFlagCatFilter('');
                           setColFilterId('');
                           setColFilterAstro('');
                           setColFilterLang('');

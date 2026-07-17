@@ -34,6 +34,7 @@ from store.db import (
     mark_needs_final_review,
     get_session_flag_summary,
     lock_session,
+    lock_all_submitted_sessions,
     unlock_session,
     initialise_db,
     recompute_session_verdict,
@@ -47,6 +48,7 @@ from store.audio_db import (
     submit_audio_session,
     set_audio_session_risk,
     lock_audio_session,
+    lock_all_submitted_audio_sessions,
     unlock_audio_session,
     recompute_audio_session_verdict,
     get_audio_flag_summary,
@@ -69,6 +71,22 @@ def _require_l2(reviewer_id: str, action: str) -> None:
         raise HTTPException(status_code=403, detail=f"Only L2 reviewer can {action}")
 
 
+# Read-only client personas: may browse the audio queue/viewer but cannot make
+# any review edits. Enforced server-side on every audio mutation endpoint so the
+# restriction holds regardless of the UI. "Astrotalk Review" is the audio-only
+# client persona (see LoginScreen roster / fetch_audio_sessions_page scoping).
+READONLY_AUDIO_REVIEWERS = {
+    name.strip()
+    for name in os.getenv("READONLY_AUDIO_REVIEWERS", "Astrotalk Review").split(",")
+    if name.strip()
+}
+
+
+def _reject_if_readonly_audio(reviewer_id: str) -> None:
+    if reviewer_id in READONLY_AUDIO_REVIEWERS:
+        raise HTTPException(status_code=403, detail="This is a read-only account — no edits allowed")
+
+
 # ---------------------------------------------------------------------------
 # Helper — derive a flag's severity from its category's verdict class.
 # SEVERE category -> HIGH, FLAGGED category -> MEDIUM, CLEAN -> LOW.
@@ -78,6 +96,42 @@ def _require_l2(reviewer_id: str, action: str) -> None:
 def _severity_for_category(category_code: str) -> str:
     verdict = get_db_verdict_for_flags([category_code])
     return {"SEVERE": "HIGH", "FLAGGED": "MEDIUM", "CLEAN": "LOW"}.get(verdict, "MEDIUM")
+
+
+# ---------------------------------------------------------------------------
+# "Flagged by us" definition for /stats — based on scripts/diag_export_funnel.py:
+# only active (non-amended-parent) MANUAL/LLM flags count, excluded categories
+# never count at all, and a session whose remaining flags are ALL low-signal
+# categories is not counted.
+# ---------------------------------------------------------------------------
+_EXCLUDED_CATEGORIES = (
+    "re_engagement_solicitation",
+    "personal_data_collection",
+)
+_DROP_ONLY_CATEGORIES = (
+    "instigation",
+    "fear_manipulation",
+    "financial_solicitation",
+    "off_platform_solicitation",
+)
+_NORM_CAT    = "LOWER(REPLACE(REPLACE(f.category_code,'-','_'),' ','_'))"
+_ACTIVE_FLAG = ("(f.status IS NULL OR f.status != 'DISMISSED') "
+                "AND f.flag_id NOT IN "
+                "(SELECT parent_flag_id FROM flags WHERE parent_flag_id IS NOT NULL)")
+_EXCL_LIST   = ",".join(f"'{c}'" for c in _EXCLUDED_CATEGORIES)
+_DROP_LIST   = ",".join(f"'{c}'" for c in _DROP_ONLY_CATEGORIES)
+_FLAGGED_BY_US_SQL = f"""(
+    EXISTS (SELECT 1 FROM flags f
+            WHERE f.session_id = sessions.session_id
+              AND f.source IN ('MANUAL','LLM')
+              AND {_NORM_CAT} NOT IN ({_EXCL_LIST})
+              AND {_ACTIVE_FLAG})
+    AND EXISTS (SELECT 1 FROM flags f
+            WHERE f.session_id = sessions.session_id
+              AND {_NORM_CAT} NOT IN ({_EXCL_LIST})
+              AND {_NORM_CAT} NOT IN ({_DROP_LIST})
+              AND {_ACTIVE_FLAG})
+)"""
 
 
 # ---------------------------------------------------------------------------
@@ -208,36 +262,71 @@ def stats(
 
     try:
         with get_connection() as conn:
-            total       = conn.execute(
-                f"SELECT COUNT(*) FROM sessions WHERE 1=1{scope}", params
-            ).fetchone()[0]
-            pending     = conn.execute(
-                f"SELECT COUNT(*) FROM sessions WHERE review_status = 'PENDING'{scope}", params
-            ).fetchone()[0]
-            reviewed    = conn.execute(
-                f"SELECT COUNT(*) FROM sessions WHERE review_status != 'PENDING'{scope}", params
-            ).fetchone()[0]
-            severe      = conn.execute(
-                f"SELECT COUNT(*) FROM sessions WHERE overall_verdict = 'SEVERE'{scope}", params
-            ).fetchone()[0]
-            flagged     = conn.execute(
-                f"SELECT COUNT(*) FROM sessions WHERE overall_verdict = 'FLAGGED'{scope}", params
-            ).fetchone()[0]
-            clean       = conn.execute(
-                f"SELECT COUNT(*) FROM sessions WHERE overall_verdict = 'CLEAN'{scope}", params
-            ).fetchone()[0]
-            unprocessed = conn.execute(
-                f"SELECT COUNT(*) FROM sessions WHERE overall_verdict = 'UNPROCESSED'{scope}", params
-            ).fetchone()[0]
-            locked      = conn.execute(
-                f"SELECT COUNT(*) FROM sessions WHERE review_status = 'LOCKED'{scope}", params
-            ).fetchone()[0]
-            submitted   = conn.execute(
-                f"SELECT COUNT(*) FROM sessions WHERE review_status = 'SUBMITTED_FOR_REVIEW'{scope}", params
-            ).fetchone()[0]
-            needs_final = conn.execute(
-                f"SELECT COUNT(*) FROM sessions WHERE review_status = 'NEEDS_FINAL_REVIEW'{scope}", params
-            ).fetchone()[0]
+            stat_row = conn.execute(
+                f"""
+                SELECT
+                    COUNT(*) AS total,
+                    SUM(CASE WHEN review_status = 'PENDING' THEN 1 ELSE 0 END) AS pending,
+                    SUM(CASE WHEN review_status != 'PENDING' THEN 1 ELSE 0 END) AS reviewed,
+                    SUM(CASE WHEN overall_verdict = 'SEVERE' THEN 1 ELSE 0 END) AS severe,
+                    SUM(CASE WHEN overall_verdict = 'FLAGGED' THEN 1 ELSE 0 END) AS flagged,
+                    SUM(CASE WHEN overall_verdict = 'CLEAN' THEN 1 ELSE 0 END) AS clean,
+                    SUM(CASE WHEN overall_verdict = 'UNPROCESSED' THEN 1 ELSE 0 END) AS unprocessed,
+                    SUM(CASE WHEN review_status = 'LOCKED' THEN 1 ELSE 0 END) AS locked,
+                    SUM(CASE WHEN review_status = 'SUBMITTED_FOR_REVIEW' THEN 1 ELSE 0 END) AS submitted,
+                    SUM(CASE WHEN review_status = 'NEEDS_FINAL_REVIEW' THEN 1 ELSE 0 END) AS needs_final,
+                    SUM(CASE WHEN astrotalk_flagged = 1 THEN 1 ELSE 0 END) AS astro_flagged,
+                    SUM(CASE WHEN astrotalk_flagged IS NULL OR astrotalk_flagged != 1 THEN 1 ELSE 0 END) AS astro_clean,
+                    SUM(CASE WHEN {_FLAGGED_BY_US_SQL} THEN 1 ELSE 0 END) AS flagged_by_us,
+                    SUM(CASE WHEN EXISTS (
+                        SELECT 1 FROM flags f
+                        WHERE f.session_id = sessions.session_id
+                          AND f.source = 'LLM' AND {_ACTIVE_FLAG}
+                    ) THEN 1 ELSE 0 END) AS llm_flagged,
+                    SUM(CASE WHEN EXISTS (
+                        SELECT 1 FROM flags f
+                        WHERE f.session_id = sessions.session_id
+                          AND f.source = 'MANUAL' AND {_ACTIVE_FLAG}
+                    ) THEN 1 ELSE 0 END) AS manual_flagged,
+                    SUM(CASE WHEN (
+                        reviewer_id = 'LLM' OR submitted_by = 'LLM'
+                        OR EXISTS (
+                            SELECT 1 FROM flags f
+                            WHERE f.session_id = sessions.session_id
+                              AND f.source = 'LLM'
+                        )
+                    ) THEN 1 ELSE 0 END) AS llm_ingested,
+                    SUM(CASE WHEN astrotalk_flagged = 1 AND {_FLAGGED_BY_US_SQL} THEN 1 ELSE 0 END) AS flagged_by_both,
+                    SUM(CASE WHEN astrotalk_flagged = 1
+                              AND (overall_verdict = 'CLEAN' OR review_status = 'REVIEWED')
+                             THEN 1 ELSE 0 END) AS false_pos,
+                    SUM(CASE WHEN (astrotalk_flagged IS NULL OR astrotalk_flagged != 1)
+                              AND {_FLAGGED_BY_US_SQL}
+                             THEN 1 ELSE 0 END) AS false_neg
+                FROM sessions
+                WHERE 1=1{scope}
+                """,
+                params,
+            ).fetchone()
+            total = stat_row["total"] or 0
+            pending = stat_row["pending"] or 0
+            reviewed = stat_row["reviewed"] or 0
+            severe = stat_row["severe"] or 0
+            flagged = stat_row["flagged"] or 0
+            clean = stat_row["clean"] or 0
+            unprocessed = stat_row["unprocessed"] or 0
+            locked = stat_row["locked"] or 0
+            submitted = stat_row["submitted"] or 0
+            needs_final = stat_row["needs_final"] or 0
+            astro_flagged = stat_row["astro_flagged"] or 0
+            astro_clean = stat_row["astro_clean"] or 0
+            flagged_by_us = stat_row["flagged_by_us"] or 0
+            llm_flagged = stat_row["llm_flagged"] or 0
+            manual_flagged = stat_row["manual_flagged"] or 0
+            llm_ingested = stat_row["llm_ingested"] or 0
+            flagged_by_both = stat_row["flagged_by_both"] or 0
+            false_pos = stat_row["false_pos"] or 0
+            false_neg = stat_row["false_neg"] or 0
 
             # L2-only: per-reviewer assignment breakdown
             reviewer_stats = None
@@ -262,6 +351,13 @@ def stats(
             "count_severe": 0, "count_flagged": 0, "count_clean": 0,
             "count_unprocessed": 0, "count_locked": 0,
             "count_submitted": 0, "count_needs_final_review": 0,
+            "count_astrotalk_flagged": 0, "count_astrotalk_clean": 0,
+            "count_flagged_by_us": 0,
+            "count_flagged_by_both": 0,
+            "count_llm_flagged": 0, "count_manual_flagged": 0,
+            "count_llm_ingested": 0, "count_manual_ingested": 0,
+            "count_false_positive": 0, "pct_false_positive": 0,
+            "count_false_negative": 0, "pct_false_negative": 0,
         }
         if reviewer_role == 'L2':
             result["reviewer_stats"] = []
@@ -278,6 +374,18 @@ def stats(
         "count_locked":             locked,
         "count_submitted":          submitted,
         "count_needs_final_review": needs_final,
+        "count_astrotalk_flagged":  astro_flagged,
+        "count_astrotalk_clean":    astro_clean,
+        "count_flagged_by_us":      flagged_by_us,
+        "count_flagged_by_both":    flagged_by_both,
+        "count_llm_flagged":    llm_flagged,
+        "count_manual_flagged": manual_flagged,
+        "count_llm_ingested":    llm_ingested,
+        "count_manual_ingested": total - llm_ingested,
+        "count_false_positive":     false_pos,
+        "pct_false_positive":       round(100 * false_pos / astro_flagged, 1) if astro_flagged else 0,
+        "count_false_negative":     false_neg,
+        "pct_false_negative":       round(100 * false_neg / astro_clean, 1) if astro_clean else 0,
     }
     if reviewer_stats is not None:
         result["reviewer_stats"] = reviewer_stats
@@ -308,19 +416,43 @@ def reviewer_stats():
         return []
 
 
+# Fixed display order for the violation breakdown — only these categories are
+# shown, in exactly this order.
+_VIOLATION_DISPLAY_ORDER = [
+    "nsfw",
+    "nsfw_explicit",
+    "nsfw_grooming",
+    "nsfw_appearance",
+    "csam_risk",
+    "abusive_language",
+    "hate_speech",
+    "self_harm",
+    "violence",
+    "fake_remedies",
+    "unauthorized_medical_advice",
+    "financial_solicitation",
+    "identity_fraud",
+    "instigation",
+]
+
+
 @app.get("/stats/violations")
 def violation_stats():
     try:
         with get_connection() as conn:
-            rows = conn.execute("""
-                SELECT f.category_code, COUNT(DISTINCT f.session_id) AS count
+            rows = conn.execute(f"""
+                SELECT {_NORM_CAT} AS cat, COUNT(DISTINCT f.session_id) AS count
                 FROM flags f
                 JOIN sessions s ON s.session_id = f.session_id
                 WHERE s.overall_verdict != 'CLEAN'
-                GROUP BY f.category_code
-                ORDER BY count DESC, f.category_code ASC
+                  AND (f.status IS NULL OR f.status != 'DISMISSED')
+                GROUP BY cat
             """).fetchall()
-        return [dict(row) for row in rows]
+        counts = {r["cat"]: r["count"] for r in rows}
+        return [
+            {"category_code": c.upper(), "count": counts.get(c, 0)}
+            for c in _VIOLATION_DISPLAY_ORDER
+        ]
     except Exception:
         return []
 
@@ -346,6 +478,7 @@ def sessions(
     search:         Optional[str] = None,
     session_type:   Optional[str] = None,
     astrotalk:      Optional[str] = None,          # 'flagged' | 'clean'
+    flag_category:  Optional[str] = None,
     min_confidence: float         = 0,
     min_duration:   Optional[float] = None,
     max_duration:   Optional[float] = None,
@@ -371,6 +504,7 @@ def sessions(
         language=language,
         session_type=session_type,
         astrotalk=astrotalk,
+        flag_category=flag_category,
         min_confidence=min_confidence,
         min_duration=min_duration,
         max_duration=max_duration,
@@ -410,6 +544,7 @@ def get_session_flags(session_id: str):
                 LEFT JOIN turns t
                     ON t.session_id = f.session_id AND t.turn_id = f.turn_id
                 WHERE f.session_id = ?
+                  AND (f.status IS NULL OR f.status != 'DISMISSED')
                 ORDER BY f.flag_id
             """, (session_id,)).fetchall()
         return [dict(row) for row in rows]
@@ -446,6 +581,7 @@ def session_detail(session_id: str):
                 LEFT JOIN turns t
                     ON t.session_id = f.session_id AND t.turn_id = f.turn_id
                 WHERE f.session_id = ?
+                  AND (f.status IS NULL OR f.status != 'DISMISSED')
                 ORDER BY f.flag_id
             """, (session_id,)).fetchall()
     except HTTPException:
@@ -514,6 +650,21 @@ def manual_flag(session_id: str, body: ManualFlagRequest):
         raise HTTPException(status_code=500, detail=str(exc))
     finally:
         conn.close()
+
+
+@app.post("/sessions/lock-all-submitted")
+def lock_all_submitted_endpoint(body: LockRequest):
+    """L2 bulk action: lock every chat session currently SUBMITTED_FOR_REVIEW.
+
+    Declared before /sessions/{session_id}/lock so the literal path wins the
+    route match. Returns the number of sessions locked.
+    """
+    _require_l2(body.reviewer_id, "lock sessions")
+    try:
+        locked = lock_all_submitted_sessions(body.reviewer_id)
+        return {"success": True, "locked": locked, "locked_by": body.reviewer_id}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 @app.post("/sessions/{session_id}/lock")
@@ -780,6 +931,51 @@ def confirm_all_flags_endpoint(session_id: str, body: LockRequest):
         conn.close()
 
 
+@app.post("/sessions/{session_id}/dismiss-all-flags")
+def dismiss_all_flags_endpoint(session_id: str, body: LockRequest):
+    """
+    Dismiss ALL active, not-yet-confirmed flags for a session in one request.
+
+    Batched equivalent of /flags/{flag_id}/dismiss: hard-deletes each
+    unconfirmed active flag (the amendment row plus its original, if any),
+    leaves already-confirmed flags untouched, and recomputes the session
+    verdict ONCE.
+    """
+    conn = get_connection()
+    try:
+        with conn:
+            rows = conn.execute(
+                "SELECT flag_id, parent_flag_id, status FROM flags WHERE session_id = ?",
+                (session_id,),
+            ).fetchall()
+
+            # Active = amendment rows + original rows that have no amendment.
+            amended_parents = {
+                r["parent_flag_id"] for r in rows if r["parent_flag_id"] is not None
+            }
+            active = [
+                r for r in rows
+                if (r["parent_flag_id"] is not None)
+                or (r["flag_id"] not in amended_parents)
+            ]
+            to_dismiss = [r for r in active if r["status"] != "CONFIRMED"]
+
+            for r in to_dismiss:
+                original_id = r["parent_flag_id"] if r["parent_flag_id"] else r["flag_id"]
+                conn.execute("DELETE FROM flags WHERE parent_flag_id = ?", (original_id,))
+                conn.execute("DELETE FROM flags WHERE flag_id = ?", (original_id,))
+
+            recompute_session_verdict(session_id, conn)
+
+        return {"success": True, "dismissed_count": len(to_dismiss)}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        conn.close()
+
+
 # ---------------------------------------------------------------------------
 # Endpoints — session submission workflow
 # ---------------------------------------------------------------------------
@@ -852,7 +1048,9 @@ def export_csv(
                 FROM sessions s
                 LEFT JOIN (
                     SELECT session_id, COUNT(*) AS flag_count
-                    FROM flags GROUP BY session_id
+                    FROM flags
+                    WHERE status IS NULL OR status != 'DISMISSED'
+                    GROUP BY session_id
                 ) fc ON fc.session_id = s.session_id
                 WHERE s.review_status != 'PENDING'{scope}
                 ORDER BY s.reviewed_at DESC
@@ -912,8 +1110,10 @@ def audio_stats(
     reviewer_name: Optional[str] = None,
     reviewer_role: Optional[str] = None,
 ):
-    # L1: scope all counts to sessions assigned to this reviewer (chat parity)
-    if reviewer_role == "L1" and reviewer_name:
+    # L1 (incl. "Multilingual", now a plain assignee): scope all counts to the
+    # sessions assigned to this reviewer (chat parity). "Astrotalk Review" is a
+    # read-only L1 client persona, not an assignee, so it is not scoped here.
+    if reviewer_role == "L1" and reviewer_name and reviewer_name != "Astrotalk Review":
         scope  = " WHERE assigned_to = ?"
         params = (reviewer_name,)
     else:
@@ -928,13 +1128,15 @@ def audio_stats(
                     SUM(CASE WHEN review_status = 'PENDING'              THEN 1 ELSE 0 END) AS total_pending,
                     SUM(CASE WHEN review_status = 'SUBMITTED_FOR_REVIEW' THEN 1 ELSE 0 END) AS count_submitted,
                     SUM(CASE WHEN review_status = 'LOCKED'               THEN 1 ELSE 0 END) AS count_locked,
-                    SUM(CASE WHEN overall_verdict = 'SEVERE'             THEN 1 ELSE 0 END) AS count_severe,
-                    SUM(CASE WHEN overall_verdict = 'FLAGGED'            THEN 1 ELSE 0 END) AS count_flagged,
+                    SUM(CASE WHEN review_status = 'LOCKED' AND overall_verdict = 'CLEAN'                THEN 1 ELSE 0 END) AS count_locked_clean,
+                    SUM(CASE WHEN review_status = 'LOCKED' AND overall_verdict IN ('FLAGGED', 'SEVERE') THEN 1 ELSE 0 END) AS count_locked_flagged,
+                    0                                                    AS count_severe,
+                    SUM(CASE WHEN overall_verdict IN ('FLAGGED', 'SEVERE') THEN 1 ELSE 0 END) AS count_flagged,
                     SUM(CASE WHEN overall_verdict = 'CLEAN'              THEN 1 ELSE 0 END) AS count_clean,
-                    SUM(CASE WHEN review_status != 'PENDING' AND astrotalk_verdict IN ('FLAGGED', 'SEVERE') AND overall_verdict IN ('FLAGGED', 'SEVERE') THEN 1 ELSE 0 END) AS count_tp,
-                    SUM(CASE WHEN review_status != 'PENDING' AND astrotalk_verdict IN ('FLAGGED', 'SEVERE') AND overall_verdict = 'CLEAN' THEN 1 ELSE 0 END) AS count_fp,
-                    SUM(CASE WHEN review_status != 'PENDING' AND astrotalk_verdict = 'CLEAN' AND overall_verdict IN ('FLAGGED', 'SEVERE') THEN 1 ELSE 0 END) AS count_fn,
-                    SUM(CASE WHEN review_status != 'PENDING' AND astrotalk_verdict = 'CLEAN' AND overall_verdict = 'CLEAN' THEN 1 ELSE 0 END) AS count_tn
+                    SUM(CASE WHEN astrotalk_verdict IN ('FLAGGED', 'SEVERE') AND overall_verdict IN ('FLAGGED', 'SEVERE') THEN 1 ELSE 0 END) AS count_tp,
+                    SUM(CASE WHEN astrotalk_verdict IN ('FLAGGED', 'SEVERE') AND overall_verdict = 'CLEAN' THEN 1 ELSE 0 END) AS count_fp,
+                    SUM(CASE WHEN astrotalk_verdict = 'CLEAN' AND overall_verdict IN ('FLAGGED', 'SEVERE') THEN 1 ELSE 0 END) AS count_fn,
+                    SUM(CASE WHEN astrotalk_verdict = 'CLEAN' AND overall_verdict = 'CLEAN' THEN 1 ELSE 0 END) AS count_tn
                 FROM audio_sessions{scope}
             """, params).fetchone()
             result = {k: (row[k] or 0) for k in row.keys()}
@@ -959,7 +1161,8 @@ def audio_stats(
     except Exception:
         result = {
             "total_sessions": 0, "total_pending": 0, "count_submitted": 0,
-            "count_locked": 0, "count_severe": 0, "count_flagged": 0,
+            "count_locked": 0, "count_locked_clean": 0, "count_locked_flagged": 0,
+            "count_severe": 0, "count_flagged": 0,
             "count_clean": 0, "total_reviewed": 0,
             "count_tp": 0, "count_fp": 0, "count_fn": 0, "count_tn": 0,
         }
@@ -1065,6 +1268,7 @@ def audio_session_detail(s_id: int):
 
 @app.post("/audio/sessions/{s_id}/speaker-roles")
 def audio_speaker_roles(s_id: int, body: SpeakerRolesRequest):
+    _reject_if_readonly_audio(body.reviewer_id)
     detail = fetch_audio_session_detail(s_id)
     if detail["session"] is None:
         raise HTTPException(status_code=404, detail=f"Audio session {s_id} not found")
@@ -1097,6 +1301,7 @@ def audio_confirm_flag(flag_id: int, body: LockRequest):
     """Confirm an audio flag — sets status = CONFIRMED on the active row
     (the amendment if one exists, otherwise the original). Mirrors
     /flags/{flag_id}/confirm."""
+    _reject_if_readonly_audio(body.reviewer_id)
     conn = get_audio_connection()
     try:
         with conn:
@@ -1143,6 +1348,7 @@ def audio_amend_flag(flag_id: int, body: AmendAudioFlagRequest):
     """Edit an audio flag. Replaces any existing amendment with a new one;
     the original row is kept as silent audit history. The amendment resets
     to ACTIVE so the reviewer must re-confirm. Mirrors /flags/{flag_id}/amend."""
+    _reject_if_readonly_audio(body.reviewer_id)
     conn = get_audio_connection()
     try:
         with conn:
@@ -1205,6 +1411,7 @@ def audio_amend_flag(flag_id: int, body: AmendAudioFlagRequest):
 def audio_dismiss_flag(flag_id: int, body: DismissFlagRequest):
     """Dismiss (false positive): hard-delete the flag and its amendment, log
     the dismissal, recompute the verdict. Mirrors /flags/{flag_id}/dismiss."""
+    _reject_if_readonly_audio(body.reviewer_id)
     conn = get_audio_connection()
     try:
         with conn:
@@ -1245,6 +1452,7 @@ def audio_dismiss_flag(flag_id: int, body: DismissFlagRequest):
 def audio_session_risk(s_id: int, body: SessionRiskRequest):
     """Set the L1 reviewer's whole-session risk rating (HIGH/MEDIUM/LOW).
     Required before confirm-all and before submitting for L2 review."""
+    _reject_if_readonly_audio(body.reviewer_id)
     _reject_if_audio_locked(_audio_session_or_404(s_id))
     try:
         set_audio_session_risk(s_id, (body.risk or "").upper())
@@ -1268,16 +1476,13 @@ def audio_session_risk(s_id: int, body: SessionRiskRequest):
 @app.post("/audio/sessions/{s_id}/confirm-all-flags")
 def audio_confirm_all_flags(s_id: int, body: LockRequest):
     """Confirm every active, not-yet-confirmed flag on the session at once.
-    Mirrors /sessions/{session_id}/confirm-all-flags. Requires the session
-    risk rating to be set first — bulk-confirming without assessing the
-    session as a whole is exactly the shortcut this gate exists to prevent."""
+    Mirrors /sessions/{session_id}/confirm-all-flags. The whole-session risk
+    rating is still enforced at submit time, so it is intentionally NOT gated
+    here — that avoids a dead-end for L2 (who has no risk selector) and lets
+    reviewers confirm flags before rating the session."""
+    _reject_if_readonly_audio(body.reviewer_id)
     detail = _audio_session_or_404(s_id)
     _reject_if_audio_locked(detail)
-    if not detail["session"].get("manual_risk_level"):
-        raise HTTPException(
-            status_code=400,
-            detail="Set the session risk rating (high/medium/low) before confirming all flags",
-        )
     conn = get_audio_connection()
     try:
         with conn:
@@ -1315,8 +1520,79 @@ def audio_confirm_all_flags(s_id: int, body: LockRequest):
         conn.close()
 
 
+@app.post("/audio/sessions/{s_id}/dismiss-all-flags")
+def audio_dismiss_all_flags(s_id: int, body: LockRequest):
+    """Dismiss every active, not-yet-confirmed flag on the session at once.
+    Mirrors /sessions/{session_id}/dismiss-all-flags: hard-deletes each
+    unconfirmed active flag (amendment row plus its original), leaves
+    already-confirmed flags untouched, recomputes the verdict ONCE."""
+    _reject_if_readonly_audio(body.reviewer_id)
+    detail = _audio_session_or_404(s_id)
+    _reject_if_audio_locked(detail)
+    conn = get_audio_connection()
+    try:
+        with conn:
+            rows = conn.execute(
+                "SELECT flag_id, parent_flag_id, status FROM audio_flags WHERE s_id = ?",
+                (s_id,),
+            ).fetchall()
+            amended_parents = {
+                r["parent_flag_id"] for r in rows if r["parent_flag_id"] is not None
+            }
+            active = [
+                r for r in rows
+                if (r["parent_flag_id"] is not None or r["flag_id"] not in amended_parents)
+            ]
+            to_dismiss = [r for r in active if r["status"] != "CONFIRMED"]
+            for r in to_dismiss:
+                original_id = r["parent_flag_id"] if r["parent_flag_id"] else r["flag_id"]
+                conn.execute(
+                    "DELETE FROM audio_flags WHERE flag_id = ? OR parent_flag_id = ?",
+                    (original_id, original_id),
+                )
+                conn.execute(
+                    """INSERT INTO audio_review_log (s_id, flag_id, action, reviewer_id, note)
+                       VALUES (?, ?, 'DISMISSED', ?, '')""",
+                    (s_id, original_id, body.reviewer_id),
+                )
+            recompute_audio_session_verdict(s_id, conn)
+        return {"success": True, "dismissed_count": len(to_dismiss)}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        conn.close()
+
+
+@app.post("/audio/sessions/{s_id}/session-note")
+def audio_save_session_note(s_id: int, body: SessionNoteRequest):
+    """Persist a reviewer's overall observation note on an audio session.
+    Especially useful for mono-channel recordings where flags can't be
+    attributed to a speaker lane. Mirrors /sessions/{id}/session-note."""
+    _reject_if_readonly_audio(body.reviewer_id)
+    detail = _audio_session_or_404(s_id)
+    _reject_if_audio_locked(detail)
+    # Belt-and-suspenders migration in case the column is absent in a legacy DB.
+    try:
+        with get_audio_connection() as conn:
+            conn.execute("ALTER TABLE audio_sessions ADD COLUMN session_note TEXT")
+    except Exception:
+        pass
+    try:
+        with get_audio_connection() as conn:
+            conn.execute(
+                "UPDATE audio_sessions SET session_note = ? WHERE s_id = ?",
+                (body.note, s_id),
+            )
+        return {"success": True}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
 @app.post("/audio/sessions/{s_id}/submit")
 def audio_submit(s_id: int, body: SubmitRequest):
+    _reject_if_readonly_audio(body.reviewer_id)
     detail = _audio_session_or_404(s_id)
     if detail["session"]["review_status"] == "LOCKED":
         raise HTTPException(status_code=400, detail="Session is locked")
@@ -1342,6 +1618,21 @@ def audio_submit(s_id: int, body: SubmitRequest):
     try:
         submit_audio_session(s_id, body.reviewer_id, body.note or None)
         return {"success": True, "s_id": s_id}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/audio/sessions/lock-all-submitted")
+def audio_lock_all_submitted(body: LockRequest):
+    """L2 bulk action: lock every audio session currently SUBMITTED_FOR_REVIEW.
+
+    Declared before /audio/sessions/{s_id}/lock so the literal path wins the
+    route match. Returns the number of sessions locked.
+    """
+    _require_l2(body.reviewer_id, "lock sessions")
+    try:
+        locked = lock_all_submitted_audio_sessions(body.reviewer_id)
+        return {"success": True, "locked": locked, "locked_by": body.reviewer_id}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 

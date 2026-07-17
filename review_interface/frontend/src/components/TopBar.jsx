@@ -1,7 +1,7 @@
 import React from 'react';
 import { C, MONO } from '../tokens';
 
-export default function TopBar({ reviewerName }) {
+export default function TopBar({ reviewerName, reviewerRole }) {
   return (
     <div style={{
       height: 44,
@@ -24,8 +24,8 @@ export default function TopBar({ reviewerName }) {
 
       {reviewerName && (
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-          <span style={{ fontSize: 11, fontFamily: MONO, color: C.textMuted }}>
-            {reviewerName}
+          <span style={{ fontSize: 12, fontWeight: 600, fontFamily: MONO, color: C.topbarText }}>
+            {reviewerName}{reviewerRole ? ` · ${reviewerRole}` : ''}
           </span>
           <span style={{
             fontSize: 10,

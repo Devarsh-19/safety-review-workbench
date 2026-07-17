@@ -5,6 +5,7 @@ Separate universe from the chat DB (store/db.py): its own file, own env var
 """
 
 import os
+import re
 import sqlite3
 from pathlib import Path
 
@@ -17,6 +18,62 @@ _SCHEMA_PATH = Path(__file__).parent / "audio_schema.sql"
 
 SPEAKER_ROLES = ("ASTROLOGER", "USER")
 SESSION_RISKS = ("HIGH", "MEDIUM", "LOW")
+
+
+def _normalize_audio_verdict(verdict: str | None) -> str | None:
+    """Audio session verdicts are binary: FLAGGED or CLEAN.
+    Legacy SEVERE values are treated as FLAGGED."""
+    if verdict is None:
+        return None
+    normalized = str(verdict).strip().upper()
+    if not normalized:
+        return None
+    if normalized == "SEVERE":
+        return "FLAGGED"
+    return normalized
+
+
+def _audio_verdict_sql(column: str) -> str:
+    return f"CASE WHEN {column} = 'SEVERE' THEN 'FLAGGED' ELSE {column} END"
+
+
+AUDIO_OVERALL_VERDICT_SQL = _audio_verdict_sql("s.overall_verdict")
+AUDIO_ASTROTALK_VERDICT_SQL = _audio_verdict_sql("s.astrotalk_verdict")
+
+
+# --- Language classification -------------------------------------------------
+# The audio `lang` column is free-text and may hold a single language ("hindi",
+# "tamil") or a combination ("hindi, english", "hindi-english"). These helpers
+# are the single source of truth for what counts as an allowed language, shared
+# by the DB (Multilingual reviewer filter) and scripts/assign_multilingual_audio.py.
+KEEP_LANGUAGES = {"hindi", "english", "hinglish"}
+
+# Connector words that can appear between languages in a compound value; ignored
+# when tokenising ("hindi and english" -> {hindi, english}).
+_LANG_CONNECTORS = {"and", "mix", "mixed", "with"}
+
+
+def language_tokens(lang: str) -> list[str]:
+    """Split a free-text lang value into recognised language tokens (lower-cased,
+    split on any run of non-letters, connector words dropped). [] when nothing
+    meaningful remains (NULL / empty / punctuation only)."""
+    norm = (lang or "").strip().lower()
+    return [t for t in re.split(r"[^a-z]+", norm) if t and t not in _LANG_CONNECTORS]
+
+
+def is_all_allowed_language(lang) -> bool:
+    """True when lang has >=1 token and EVERY token is an allowed language."""
+    tokens = language_tokens(lang)
+    return bool(tokens) and all(t in KEEP_LANGUAGES for t in tokens)
+
+
+def is_multilingual_language(lang) -> int:
+    """1 when lang has >=1 recognised token AND at least one token is NOT an
+    allowed (Hindi/English/Hinglish) language; else 0. Used at assignment time
+    (scripts/assign_audio_sessions.py) to route regional sessions to the
+    "Multilingual" reviewer. Sessions with no recognisable language return 0."""
+    tokens = language_tokens(lang)
+    return int(bool(tokens) and any(t not in KEEP_LANGUAGES for t in tokens))
 
 
 def get_audio_connection() -> sqlite3.Connection:
@@ -34,6 +91,8 @@ def get_audio_connection() -> sqlite3.Connection:
 
 
 def initialise_audio_db() -> None:
+    from engine.verdict_rules import get_db_confidence_for_verdict
+
     schema = _SCHEMA_PATH.read_text(encoding="utf-8")
     with get_audio_connection() as conn:
         conn.executescript(schema)
@@ -54,6 +113,7 @@ def initialise_audio_db() -> None:
         "ALTER TABLE audio_flags ADD COLUMN created_by TEXT",           # reviewer who made an amendment
         "ALTER TABLE audio_sessions ADD COLUMN duration_seconds REAL",  # real audio duration from the pipeline (ffprobe)
         "ALTER TABLE audio_sessions ADD COLUMN manual_risk_level TEXT", # L1's whole-session risk rating: HIGH / MEDIUM / LOW
+        "ALTER TABLE audio_sessions ADD COLUMN session_note TEXT",      # reviewer's overall observation note (chat parity)
     ]
     with get_audio_connection() as conn:
         for migration in migrations:
@@ -63,6 +123,22 @@ def initialise_audio_db() -> None:
             except Exception:
                 pass  # Column already exists — safe to ignore
 
+        # Audio session verdicts are binary: any legacy SEVERE rows collapse to
+        # FLAGGED so the DB, API, and frontend stay aligned.
+        conn.execute(
+            """UPDATE audio_sessions
+               SET overall_verdict = 'FLAGGED',
+                   confidence_score = ?
+               WHERE overall_verdict = 'SEVERE'""",
+            (get_db_confidence_for_verdict("FLAGGED"),),
+        )
+        conn.execute(
+            """UPDATE audio_sessions
+               SET astrotalk_verdict = 'FLAGGED'
+               WHERE astrotalk_verdict = 'SEVERE'"""
+        )
+        conn.commit()
+
     print(f"Audio database initialised at {AUDIO_DB_PATH}")
 
 
@@ -70,6 +146,10 @@ def _normalize_audio_session_row(row: dict) -> dict:
     normalized = dict(row)
     if "has_video" in normalized and normalized["has_video"] is not None:
         normalized["has_video"] = bool(normalized["has_video"])
+    if "overall_verdict" in normalized:
+        normalized["overall_verdict"] = _normalize_audio_verdict(normalized["overall_verdict"])
+    if "astrotalk_verdict" in normalized:
+        normalized["astrotalk_verdict"] = _normalize_audio_verdict(normalized["astrotalk_verdict"])
     return normalized
 
 
@@ -101,22 +181,55 @@ def fetch_audio_sessions_page(
     whole table, not just the visible page.
     Role-based default visibility mirrors the chat DB (fetch_sessions_page):
     - L1 (no explicit status filter): submitted/locked sessions hidden
-    - L2 (no explicit status filter): locked sessions hidden
-    - L1 with a name: only sessions assigned to them
+    - L2 (no explicit status filter): only SUBMITTED_FOR_REVIEW sessions shown
+    - L1 with a name: only sessions assigned to them. "Multilingual" is a plain
+      assignee like any other L1 reviewer — regional (non-Hindi/English/Hinglish)
+      sessions are routed to it at assignment time (assign_audio_sessions.py).
+    - "Astrotalk Review": read-only L1 client persona — only LOCKED sessions
+      that were manually submitted for review (submitted_by not LLM/AUTO_LOCK)
+      and carry an active NSFW_EXPLICIT flag
     """
     where, params = ["1=1"], []
-    if status:
+
+    # "Astrotalk Review" is a read-only L1 client persona hard-restricted to
+    # finalised (LOCKED) sessions that were MANUALLY submitted for review (by a
+    # human L1 — not auto-submitted by the LLM ingest or the auto-lock scripts)
+    # and carry an active NSFW_EXPLICIT flag. Enforced unconditionally so no
+    # status/assignee filter can widen the view; other filters (language,
+    # duration …) still narrow within this subset. The NSFW_EXPLICIT EXISTS
+    # mirrors the flag_category filter below: active flags only (DISMISSED rows
+    # and amended originals excluded).
+    if reviewer_name == "Astrotalk Review":
+        where.append("s.review_status = 'LOCKED'")
+        where.append("s.submitted_by IS NOT NULL AND s.submitted_by NOT IN ('LLM', 'AUTO_LOCK')")
+        where.append(
+            """EXISTS (SELECT 1 FROM audio_flags af
+                       WHERE af.s_id = s.s_id
+                         AND UPPER(REPLACE(REPLACE(af.intent,'-','_'),' ','_')) = 'NSFW_EXPLICIT'
+                         AND (af.status IS NULL OR af.status != 'DISMISSED')
+                         AND af.flag_id NOT IN (
+                             SELECT parent_flag_id FROM audio_flags
+                             WHERE parent_flag_id IS NOT NULL))"""
+        )
+    elif status:
         where.append("s.review_status = ?"); params.append(status)
     elif not flag_category:
         # Role-based default visibility applies only when neither an explicit
         # status nor a flag-category filter is set: filtering by flag should
         # surface every matching session regardless of review status (chat parity).
-        if reviewer_role == "L1":
+        if reviewer_name == "Locked":
+            where.append("s.review_status = 'LOCKED'")
+        elif reviewer_role == "L1":
             where.append("s.review_status NOT IN ('SUBMITTED_FOR_REVIEW','LOCKED')")
         elif reviewer_role == "L2":
-            where.append("s.review_status != 'LOCKED'")
+            where.append("s.review_status = 'SUBMITTED_FOR_REVIEW'")
 
-    if reviewer_role == "L1" and reviewer_name:
+    # L1 reviewers (including "Multilingual", now a plain assignee) are scoped to
+    # the sessions assigned to them. Regional-language sessions are routed to
+    # "Multilingual" at assignment time, so no language-based filtering is needed.
+    # "Locked" and "Astrotalk Review" are read-only personas with their own
+    # visibility rules above — they are not assignees, so skip the assignee scope.
+    if reviewer_role == "L1" and reviewer_name and reviewer_name not in ("Locked", "Astrotalk Review"):
         where.append("s.assigned_to = ?"); params.append(reviewer_name)
     elif assigned_to:
         where.append("s.assigned_to LIKE ?"); params.append(f"%{assigned_to}%")
@@ -144,10 +257,12 @@ def fetch_audio_sessions_page(
     if reviewer:
         where.append("(s.submitted_by LIKE ? OR s.reviewer_id LIKE ?)")
         params.extend([f"%{reviewer}%", f"%{reviewer}%"])
-    if verdict:
-        where.append("s.overall_verdict = ?"); params.append(verdict)
-    if astrotalk_verdict:
-        where.append("s.astrotalk_verdict = ?"); params.append(astrotalk_verdict)
+    normalized_verdict = _normalize_audio_verdict(verdict)
+    normalized_astrotalk_verdict = _normalize_audio_verdict(astrotalk_verdict)
+    if normalized_verdict:
+        where.append(f"{AUDIO_OVERALL_VERDICT_SQL} = ?"); params.append(normalized_verdict)
+    if normalized_astrotalk_verdict:
+        where.append(f"{AUDIO_ASTROTALK_VERDICT_SQL} = ?"); params.append(normalized_astrotalk_verdict)
     if flag_category:
         # Only sessions carrying an ACTIVE flag of this intent: DISMISSED rows
         # and amended originals are excluded, matching the flag_count column and
@@ -191,7 +306,7 @@ def fetch_audio_sessions_page(
         'duration': 'COALESCE(s.duration_seconds, sc.max_ts_end, 0)',
         'segments': 'segment_count',
         'flags': 'flag_count',
-        'verdict': 's.overall_verdict',
+        'verdict': AUDIO_OVERALL_VERDICT_SQL,
         'status': 's.review_status',
     }
     
@@ -248,16 +363,19 @@ def _active_audio_flag_rows(rows) -> list:
 
 def recompute_audio_session_verdict(s_id: int, conn) -> str:
     """Recompute and persist overall_verdict + confidence_score from the
-    session's active flags, using the SAME rules as the chat DB
-    (engine/verdict_rules.py): SEVERE / FLAGGED / CLEAN, including the
-    flagged-combination escalations."""
-    from engine.verdict_rules import get_db_verdict_for_flags, get_db_confidence_for_verdict
+    session's active flags.
+    Audio LLM session verdicts are binary: any active non-dismissed flag makes
+    the session FLAGGED; otherwise it is CLEAN."""
+    from engine.verdict_rules import get_db_confidence_for_verdict
 
     rows = conn.execute(
         "SELECT flag_id, intent, status, parent_flag_id FROM audio_flags WHERE s_id = ?", (s_id,)
     ).fetchall()
-    codes = [r["intent"] for r in _active_audio_flag_rows(rows) if r["intent"] and r["status"] != "DISMISSED"]
-    verdict    = get_db_verdict_for_flags(codes)
+    has_active_flags = any(
+        r["status"] != "DISMISSED"
+        for r in _active_audio_flag_rows(rows)
+    )
+    verdict    = "FLAGGED" if has_active_flags else "CLEAN"
     confidence = get_db_confidence_for_verdict(verdict)
     conn.execute(
         "UPDATE audio_sessions SET overall_verdict = ?, confidence_score = ? WHERE s_id = ?",
@@ -357,6 +475,37 @@ def lock_audio_session(s_id: int, reviewer_id: str) -> None:
                VALUES (?, 'LOCK', ?, '')""",
             (s_id, reviewer_id),
         )
+
+
+def lock_all_submitted_audio_sessions(reviewer_id: str) -> int:
+    """Bulk-lock every audio session currently SUBMITTED_FOR_REVIEW.
+
+    Mirrors lock_audio_session (including one 'LOCK' audio_review_log row per
+    session); returns how many were locked so the L2 'Lock all submitted'
+    action can report the count.
+    """
+    with get_audio_connection() as conn:
+        s_ids = [
+            r["s_id"] for r in conn.execute(
+                "SELECT s_id FROM audio_sessions WHERE review_status = 'SUBMITTED_FOR_REVIEW'"
+            ).fetchall()
+        ]
+        if not s_ids:
+            return 0
+        conn.execute(
+            """UPDATE audio_sessions
+               SET review_status = 'LOCKED',
+                   locked_by     = ?,
+                   locked_at     = datetime('now')
+               WHERE review_status = 'SUBMITTED_FOR_REVIEW'""",
+            (reviewer_id,),
+        )
+        conn.executemany(
+            """INSERT INTO audio_review_log (s_id, action, reviewer_id, note)
+               VALUES (?, 'LOCK', ?, '')""",
+            [(s_id, reviewer_id) for s_id in s_ids],
+        )
+        return len(s_ids)
 
 
 def unlock_audio_session(s_id: int, reviewer_id: str = None) -> None:

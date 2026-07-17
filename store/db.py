@@ -62,8 +62,14 @@ def initialise_db() -> None:
         "UPDATE flags SET status = 'ACTIVE' WHERE status IS NULL",
         # Indexes on migration-added columns — created AFTER the column exists
         "CREATE INDEX IF NOT EXISTS idx_sessions_assigned_to ON sessions(assigned_to)",
+        "CREATE INDEX IF NOT EXISTS idx_sessions_assigned_status ON sessions(assigned_to, review_status)",
+        "CREATE INDEX IF NOT EXISTS idx_sessions_assigned_verdict ON sessions(assigned_to, overall_verdict)",
+        "CREATE INDEX IF NOT EXISTS idx_sessions_review_assigned ON sessions(review_status, assigned_to)",
+        "CREATE INDEX IF NOT EXISTS idx_sessions_astro_assigned ON sessions(astrotalk_flagged, assigned_to)",
         "CREATE INDEX IF NOT EXISTS idx_flags_parent_flag_id ON flags(parent_flag_id)",
         "CREATE INDEX IF NOT EXISTS idx_flags_status ON flags(status)",
+        "CREATE INDEX IF NOT EXISTS idx_flags_session_source_status ON flags(session_id, source, status)",
+        "CREATE INDEX IF NOT EXISTS idx_flags_session_category ON flags(session_id, category_code)",
     ]
 
     with get_connection() as conn:
@@ -102,6 +108,8 @@ def recompute_session_verdict(session_id: str, conn) -> str:
     }
     active_codes = []
     for r in rows:
+        if (r["status"] or "") == "DISMISSED":
+            continue
         if r["parent_flag_id"] is not None:
             # This is an amendment row — it is the active version; include it
             active_codes.append(r["category_code"])
@@ -153,33 +161,33 @@ def fetch_sessions(
 _SORT_COLUMNS = {
     "session_id":        "s.session_id",
     "duration_minutes":  "COALESCE(s.duration_minutes, 0)",
-    "turn_count":        "COALESCE(tc.turn_count, 0)",
-    "flag_count":        "COALESCE(fc.flag_count, 0)",
-    "llm_flag_count":    "COALESCE(fc.llm_flag_count, 0)",
-    "manual_flag_count": "COALESCE(fc.manual_flag_count, 0)",
+    "turn_count":        "turn_count",
+    "flag_count":        "flag_count",
+    "llm_flag_count":    "llm_flag_count",
+    "manual_flag_count": "manual_flag_count",
 }
 
 # Default language visibility (matches the previous client-side allowlist).
 _ALLOWED_LANGUAGES = ("english", "hindi", "hinglish")
 
-# Flag / turn count enrichment — one aggregated row per session. Counts mirror
-# the previous behaviour (all flags; LLM = LLM+REGEX source, MANUAL separately).
-_COUNTS_FROM = """
-    FROM sessions s
-    LEFT JOIN (
-        SELECT session_id,
-               COUNT(*) AS flag_count,
-               SUM(CASE WHEN source IN ('LLM','REGEX') THEN 1 ELSE 0 END) AS llm_flag_count,
-               SUM(CASE WHEN source = 'MANUAL'         THEN 1 ELSE 0 END) AS manual_flag_count
-        FROM flags
-        GROUP BY session_id
-    ) fc ON fc.session_id = s.session_id
-    LEFT JOIN (
-        SELECT session_id, COUNT(*) AS turn_count
-        FROM turns
-        GROUP BY session_id
-    ) tc ON tc.session_id = s.session_id
-"""
+_SESSION_FROM = "FROM sessions s"
+
+_VISIBLE_FLAG_SQL = "(f.status IS NULL OR f.status != 'DISMISSED')"
+_FLAG_COUNT_SQL = (
+    "SELECT COUNT(*) FROM flags f "
+    f"WHERE f.session_id = s.session_id AND {_VISIBLE_FLAG_SQL}"
+)
+_LLM_FLAG_COUNT_SQL = (
+    "SELECT COUNT(*) FROM flags f "
+    f"WHERE f.session_id = s.session_id AND {_VISIBLE_FLAG_SQL} "
+    "AND f.source IN ('LLM','REGEX')"
+)
+_MANUAL_FLAG_COUNT_SQL = (
+    "SELECT COUNT(*) FROM flags f "
+    f"WHERE f.session_id = s.session_id AND {_VISIBLE_FLAG_SQL} "
+    "AND f.source = 'MANUAL'"
+)
+_TURN_COUNT_SQL = "SELECT COUNT(*) FROM turns t WHERE t.session_id = s.session_id"
 
 
 def fetch_sessions_page(
@@ -193,6 +201,7 @@ def fetch_sessions_page(
     language: str = None,
     session_type: str = None,
     astrotalk: str = None,          # 'flagged' | 'clean' | None
+    flag_category: str = None,      # only sessions carrying this flag category
     min_confidence: float = 0,      # 0-100
     min_duration=None,
     max_duration=None,
@@ -211,15 +220,22 @@ def fetch_sessions_page(
     if status:
         where.append("s.review_status = ?"); params.append(status)
 
-    # Role-based default visibility — only when no explicit status filter is set.
-    if not status:
+    # Special "Locked" login: sees ONLY locked sessions, regardless of role
+    # defaults or any explicit status filter.
+    if reviewer_name == "Locked":
+        where.append("s.review_status = 'LOCKED'")
+    # Role-based default visibility — only when no explicit status filter is
+    # set AND no flag-category filter is active (filtering by flag should show
+    # every matching session regardless of review status).
+    # L2 works the post-submission queue: no PENDING (still with L1), no LOCKED.
+    elif not status and not flag_category:
         if reviewer_role == "L1":
             where.append("s.review_status NOT IN ('SUBMITTED_FOR_REVIEW','LOCKED')")
         elif reviewer_role == "L2":
-            where.append("s.review_status != 'LOCKED'")
+            where.append("s.review_status NOT IN ('PENDING','LOCKED')")
 
     # L1 sees only sessions assigned to them; L2 may filter by a specific assignee.
-    if reviewer_role == "L1" and reviewer_name:
+    if reviewer_role == "L1" and reviewer_name and reviewer_name != "Locked":
         where.append("s.assigned_to = ?"); params.append(reviewer_name)
     elif assigned_to:
         where.append("s.assigned_to = ?"); params.append(assigned_to)
@@ -244,6 +260,15 @@ def fetch_sessions_page(
     elif astrotalk == "clean":
         where.append("(s.astrotalk_flagged IS NULL OR s.astrotalk_flagged != 1)")
 
+    if flag_category:
+        where.append(
+            """EXISTS (SELECT 1 FROM flags f
+                       WHERE f.session_id = s.session_id
+                         AND (f.status IS NULL OR f.status != 'DISMISSED')
+                         AND LOWER(REPLACE(REPLACE(f.category_code,'-','_'),' ','_')) = ?)"""
+        )
+        params.append(flag_category.strip().lower().replace("-", "_").replace(" ", "_"))
+
     if min_confidence:
         where.append("COALESCE(s.confidence_score, 0) * 100 >= ?"); params.append(min_confidence)
 
@@ -253,9 +278,9 @@ def fetch_sessions_page(
         where.append("COALESCE(s.duration_minutes, 0) <= ?"); params.append(max_duration)
 
     if min_turns not in (None, ""):
-        where.append("COALESCE(tc.turn_count, 0) >= ?"); params.append(min_turns)
+        where.append(f"COALESCE(({_TURN_COUNT_SQL}), 0) >= ?"); params.append(min_turns)
     if max_turns not in (None, ""):
-        where.append("COALESCE(tc.turn_count, 0) <= ?"); params.append(max_turns)
+        where.append(f"COALESCE(({_TURN_COUNT_SQL}), 0) <= ?"); params.append(max_turns)
 
     where_sql = " AND ".join(where)
 
@@ -265,16 +290,16 @@ def fetch_sessions_page(
 
     data_sql = f"""
         SELECT s.*,
-               COALESCE(fc.flag_count, 0)        AS flag_count,
-               COALESCE(fc.llm_flag_count, 0)    AS llm_flag_count,
-               COALESCE(fc.manual_flag_count, 0) AS manual_flag_count,
-               COALESCE(tc.turn_count, 0)        AS turn_count
-        {_COUNTS_FROM}
+               COALESCE(({_FLAG_COUNT_SQL}), 0)        AS flag_count,
+               COALESCE(({_LLM_FLAG_COUNT_SQL}), 0)    AS llm_flag_count,
+               COALESCE(({_MANUAL_FLAG_COUNT_SQL}), 0) AS manual_flag_count,
+               COALESCE(({_TURN_COUNT_SQL}), 0)        AS turn_count
+        {_SESSION_FROM}
         WHERE {where_sql}
         ORDER BY {order_sql}
         LIMIT ? OFFSET ?
     """
-    count_sql = f"SELECT COUNT(*) {_COUNTS_FROM} WHERE {where_sql}"
+    count_sql = f"SELECT COUNT(*) {_SESSION_FROM} WHERE {where_sql}"
 
     with get_connection() as conn:
         total = conn.execute(count_sql, params).fetchone()[0]
@@ -291,7 +316,10 @@ def fetch_session_detail(session_id: str) -> dict:
             "SELECT * FROM turns WHERE session_id = ? ORDER BY turn_id", (session_id,)
         ).fetchall()
         flags = conn.execute(
-            "SELECT * FROM flags WHERE session_id = ?", (session_id,)
+            """SELECT * FROM flags
+               WHERE session_id = ?
+                 AND (status IS NULL OR status != 'DISMISSED')""",
+            (session_id,),
         ).fetchall()
 
     return {
@@ -412,8 +440,11 @@ def get_session_flag_summary(session_id: str) -> dict:
     amended_parent_ids = {r["parent_flag_id"] for r in rows if r["parent_flag_id"] is not None}
     active_rows = [
         r for r in rows
-        if r["parent_flag_id"] is not None  # amendment = active
-        or r["flag_id"] not in amended_parent_ids  # original with no amendment = active
+        if (r["status"] or "") != "DISMISSED"
+        and (
+            r["parent_flag_id"] is not None  # amendment = active
+            or r["flag_id"] not in amended_parent_ids  # original with no amendment = active
+        )
     ]
 
     total_flags    = len(active_rows)
@@ -438,6 +469,24 @@ def lock_session(session_id: str, reviewer_id: str) -> None:
                WHERE session_id = ?""",
             (reviewer_id, session_id),
         )
+
+
+def lock_all_submitted_sessions(reviewer_id: str) -> int:
+    """Bulk-lock every session currently SUBMITTED_FOR_REVIEW in one pass.
+
+    Same per-session effect as lock_session; returns how many were locked so
+    the caller (L2 'Lock all submitted' action) can report the count.
+    """
+    with get_connection() as conn:
+        cur = conn.execute(
+            """UPDATE sessions
+               SET review_status = 'LOCKED',
+                   locked_by     = ?,
+                   locked_at     = datetime('now')
+               WHERE review_status = 'SUBMITTED_FOR_REVIEW'""",
+            (reviewer_id,),
+        )
+        return cur.rowcount
 
 
 def unlock_session(session_id: str) -> None:
