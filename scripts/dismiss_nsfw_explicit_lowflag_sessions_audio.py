@@ -60,6 +60,7 @@ from store.audio_db import (  # noqa: E402
 TARGET_INTENT = "NSFW_EXPLICIT"
 MAX_LIVE_FLAGS = 5
 DEFAULT_STATUSES = ("PENDING", "LOCKED")
+PREVIEW_ROWS = 20  # cap the per-session table; totals still cover every session
 
 REVIEWER_ID = "AUTO_DISMISS"
 NOTE = "Auto-dismiss: NSFW_EXPLICIT flag on a session with <=5 live flags"
@@ -172,10 +173,14 @@ def run(commit: bool, statuses, max_flags) -> int:
               f"({total_explicit:,} NSFW_EXPLICIT flag(s) to dismiss):\n")
         print(f"  {'SESSION':<10} {'STATUS':<20} {'LIVE':>5} {'EXPLICIT':>9} {'RESULT':>9}")
         print(f"  {'-'*10} {'-'*20} {'-'*5} {'-'*9} {'-'*9}")
-        for e in eligible:
+        for e in eligible[:PREVIEW_ROWS]:
             result = "CLEAN" if e["becomes_clean"] else "FLAGGED"
             print(f"  {e['s_id']:<10} {e['review_status']:<20} {e['live_count']:>5} "
                   f"{len(e['explicit_flag_ids']):>9} {result:>9}")
+        if len(eligible) > PREVIEW_ROWS:
+            print(f"  ... and {len(eligible) - PREVIEW_ROWS:,} more "
+                  f"(showing first {PREVIEW_ROWS} of {len(eligible):,}; "
+                  f"totals below cover all)")
         print()
 
         status_counts = Counter(e["review_status"] for e in eligible)
