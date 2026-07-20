@@ -235,7 +235,7 @@ export default function SessionQueue({ reviewerName, reviewerRole, onSelectSessi
     { label: 'Pending L1 Review', value: pending,                             color: C.accent      },
     { label: 'Pending L2 Review', value: submitted,                           color: '#185FA5'     },
     { label: 'Locked',            value: locked,                              color: '#444441'     },
-    { label: 'Flagged / Unflagged (AstroTalk)',
+    { label: 'GT Flagged / Unflagged (AstroTalk)',
       value: <><span style={{ color: C.severeText }}>{astroFlagged}</span>
         <span style={{ color: C.textMuted }}> / </span>
         <span style={{ color: C.cleanText }}>{astroClean}</span></>,

@@ -166,6 +166,8 @@ def fetch_audio_sessions_page(
     duration_max: float = None,
     flags_min: int = None,
     flags_max: int = None,
+    pauses_min: int = None,
+    pauses_max: int = None,
     roles: str = None,
     reviewer: str = None,
     verdict: str = None,
@@ -241,7 +243,13 @@ def fetch_audio_sessions_page(
     elif has_video in ("0", "false", "no"):
         where.append("(s.has_video = 0 OR s.has_video IS NULL)")
     if lang:
-        where.append("s.lang LIKE ?"); params.append(f"%{lang}%")
+        lang_values = [v.strip() for v in lang.split(',') if v.strip()]
+        if lang_values:
+            like_clauses = []
+            for lv in lang_values:
+                like_clauses.append("s.lang LIKE ?")
+                params.append(f"%{lv}%")
+            where.append(f"({' OR '.join(like_clauses)})")
     if duration_min is not None:
         where.append("COALESCE(s.duration_seconds, sc.max_ts_end, 0) >= ?"); params.append(duration_min)
     if duration_max is not None:
@@ -250,6 +258,12 @@ def fetch_audio_sessions_page(
         where.append("COALESCE(fc.flag_count, 0) >= ?"); params.append(flags_min)
     if flags_max is not None:
         where.append("COALESCE(fc.flag_count, 0) <= ?"); params.append(flags_max)
+    if pauses_min is not None:
+        where.append("CASE WHEN s.pauses IS NOT NULL AND s.pauses != '' THEN COALESCE(json_array_length(s.pauses), 0) ELSE 0 END >= ?")
+        params.append(pauses_min)
+    if pauses_max is not None:
+        where.append("CASE WHEN s.pauses IS NOT NULL AND s.pauses != '' THEN COALESCE(json_array_length(s.pauses), 0) ELSE 0 END <= ?")
+        params.append(pauses_max)
     if roles == "assigned":
         where.append("s.speaker1_role IS NOT NULL AND s.speaker2_role IS NOT NULL")
     elif roles == "unassigned":
@@ -306,6 +320,7 @@ def fetch_audio_sessions_page(
         'duration': 'COALESCE(s.duration_seconds, sc.max_ts_end, 0)',
         'segments': 'segment_count',
         'flags': 'flag_count',
+        'pauses': 'pause_count',
         'verdict': AUDIO_OVERALL_VERDICT_SQL,
         'status': 's.review_status',
     }
@@ -324,7 +339,8 @@ def fetch_audio_sessions_page(
             f"""SELECT s.*,
                        COALESCE(fc.flag_count, 0)    AS flag_count,
                        COALESCE(sc.segment_count, 0) AS segment_count,
-                       COALESCE(s.duration_seconds, sc.max_ts_end, 0) AS duration_seconds
+                       COALESCE(s.duration_seconds, sc.max_ts_end, 0) AS duration_seconds,
+                       CASE WHEN s.pauses IS NOT NULL AND s.pauses != '' THEN COALESCE(json_array_length(s.pauses), 0) ELSE 0 END AS pause_count
                 {base}
                 {order_clause}
                 LIMIT ? OFFSET ?""",

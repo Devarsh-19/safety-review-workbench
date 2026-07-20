@@ -6,7 +6,7 @@ import StatusBadge from './StatusBadge';
 import VerdictBadge from './VerdictBadge';
 import LoadingSpinner from './LoadingSpinner';
 import HasVideoBadge from './HasVideoBadge';
-import { getAudioSessions, getAudioStats, lockAudioSession, lockAllSubmittedAudioSessions, getAudioViolationStats } from '../api';
+import { getAudioSessions, getAudioStats, lockAudioSession, lockAllSubmittedAudioSessions, getAudioViolationStats, getAudioLanguages } from '../api';
 
 const PAGE_SIZE = 50;
 
@@ -70,6 +70,8 @@ const EMPTY_FILTERS = {
   durationMax: '',   // minutes
   flagsMin: '',
   flagsMax: '',
+  pausesMin: '',
+  pausesMax: '',
   flagCategory: '',
   roles: '',
   assignedTo: '',
@@ -119,6 +121,36 @@ export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelect
     }
   };
 
+  // Unique language values for the checkbox dropdown filter
+  const [availableLanguages, setAvailableLanguages] = useState([]);
+  const [langDropdownOpen, setLangDropdownOpen] = useState(false);
+  const langDropdownRef = useRef(null);
+
+  useEffect(() => {
+    getAudioLanguages().then(setAvailableLanguages).catch(() => {});
+  }, []);
+
+  // Close dropdown on outside click
+  useEffect(() => {
+    if (!langDropdownOpen) return;
+    const handleClick = (e) => {
+      if (langDropdownRef.current && !langDropdownRef.current.contains(e.target)) {
+        setLangDropdownOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClick);
+    return () => document.removeEventListener('mousedown', handleClick);
+  }, [langDropdownOpen]);
+
+  // Helper: parse comma-separated lang string into an array
+  const selectedLangs = filterInputs.lang ? filterInputs.lang.split(',').map(s => s.trim()).filter(Boolean) : [];
+  const toggleLang = (lang) => {
+    const next = selectedLangs.includes(lang)
+      ? selectedLangs.filter(l => l !== lang)
+      : [...selectedLangs, lang];
+    setFilter('lang', next.join(','));
+  };
+
   const heatmapMax = heatmapData.length > 0 ? Math.max(...heatmapData.map((d) => d.count)) : 1;
 
   // Debounce every filter control: query 300ms after the user stops typing.
@@ -133,7 +165,7 @@ export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelect
   const setFilter = (key, value) =>
     setFilterInputs((prev) => ({ ...prev, [key]: value }));
 
-  const hasActiveFilters = Object.values(filterInputs).some((v) => v !== '');
+  const hasActiveFilters = Object.entries(filterInputs).some(([, v]) => Array.isArray(v) ? v.length > 0 : v !== '');
   const clearFilters = () => setFilterInputs(EMPTY_FILTERS);
 
   const load = useCallback(() => {
@@ -150,6 +182,8 @@ export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelect
         duration_max: minutesToSeconds(filters.durationMax),
         flags_min: filters.flagsMin,
         flags_max: filters.flagsMax,
+        pauses_min: filters.pausesMin,
+        pauses_max: filters.pausesMax,
         flag_category: filters.flagCategory,
         roles: filters.roles,
         assigned_to: filters.assignedTo,
@@ -213,11 +247,13 @@ export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelect
     { label: 'Pending for L1 Review', value: stats?.total_pending ?? 0, color: (stats?.total_pending ?? 0) > 0 ? C.accent : C.textSecondary },
     { label: 'Submitted for L2 Review', value: stats?.count_submitted ?? 0, color: (stats?.count_submitted ?? 0) > 0 ? '#185FA5' : C.textSecondary },
     { label: 'Clean', value: stats?.count_clean ?? 0, color: (stats?.count_clean ?? 0) > 0 ? C.cleanText : C.textSecondary },
-    { label: 'Locked Total', value: lockedTotal, color: lockedTotal > 0 ? '#444441' : C.textSecondary,
+    {
+      label: 'Locked Total', value: lockedTotal, color: lockedTotal > 0 ? '#444441' : C.textSecondary,
       children: [
         { label: 'Clean', value: lockedClean, color: lockedClean > 0 ? C.cleanText : C.textSecondary },
-        { label: 'Flagged', value: lockedFlagged, color: lockedFlagged > 0 ? C.flaggedText : C.textSecondary },
-      ] },
+        { label: 'GT Flagged', value: lockedFlagged, color: lockedFlagged > 0 ? C.flaggedText : C.textSecondary },
+      ]
+    },
     { label: 'Total Flagged session by LLM', value: totalFlagged, color: totalFlagged > 0 ? C.flaggedText : C.textSecondary },
   ];
 
@@ -238,6 +274,7 @@ export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelect
     { key: 'lang', label: 'Language', sortable: false },
     { key: 'duration', label: 'Duration', sortable: true },
     { key: 'flags', label: 'Flags', sortable: true },
+    { key: 'pauses', label: 'Pauses', sortable: true },
     { key: 'roles', label: 'Speaker Roles', sortable: false },
     ...(reviewerRole === 'L2' ? [
       { key: 'assigned_to', label: 'Assigned To', sortable: false },
@@ -282,12 +319,86 @@ export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelect
       </select>
     ),
     lang: (
-      <input
-        value={filterInputs.lang}
-        onChange={(e) => setFilter('lang', e.target.value)}
-        placeholder="e.g. HINDI"
-        style={filterInputStyle}
-      />
+      <div ref={langDropdownRef} style={{ position: 'relative' }}>
+        <button
+          type="button"
+          onClick={() => setLangDropdownOpen((v) => !v)}
+          style={{
+            ...filterSelectStyle,
+            width: '100%',
+            textAlign: 'left',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: 4,
+            background: selectedLangs.length > 0 ? '#E8F0FE' : C.bgSurface,
+            border: `1px solid ${selectedLangs.length > 0 ? '#A8C7FA' : C.border}`,
+            color: selectedLangs.length > 0 ? '#185FA5' : C.textSecondary,
+          }}
+        >
+          <span style={{
+            overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+            fontSize: 11, maxWidth: 90,
+          }}>
+            {selectedLangs.length === 0 ? 'All' : `${selectedLangs.length} selected`}
+          </span>
+          <span style={{ fontSize: 8, flexShrink: 0 }}>{langDropdownOpen ? '▲' : '▼'}</span>
+        </button>
+        {langDropdownOpen && (
+          <div style={{
+            position: 'absolute', top: '100%', left: 0, zIndex: 100,
+            marginTop: 2, minWidth: 180, maxHeight: 260, overflowY: 'auto',
+            background: C.bgSurface, border: `1px solid ${C.border}`,
+            borderRadius: 6, boxShadow: '0 4px 16px rgba(0,0,0,0.12)',
+            padding: '6px 0',
+          }}>
+            {selectedLangs.length > 0 && (
+              <button
+                type="button"
+                onClick={() => setFilter('lang', '')}
+                style={{
+                  width: '100%', textAlign: 'left', padding: '5px 12px',
+                  fontSize: 11, fontFamily: MONO, color: C.accent,
+                  background: 'none', border: 'none', cursor: 'pointer',
+                  borderBottom: `1px solid ${C.border}`, marginBottom: 2,
+                }}
+              >
+                ✕ Clear selection
+              </button>
+            )}
+            {availableLanguages.map((lang) => {
+              const checked = selectedLangs.includes(lang);
+              return (
+                <label
+                  key={lang}
+                  style={{
+                    display: 'flex', alignItems: 'center', gap: 8,
+                    padding: '5px 12px', cursor: 'pointer', fontSize: 12,
+                    fontFamily: MONO, color: C.textPrimary,
+                    background: checked ? '#E8F0FE' : 'transparent',
+                    transition: 'background 120ms',
+                  }}
+                  onMouseEnter={(e) => { if (!checked) e.currentTarget.style.background = C.bgMuted; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.background = checked ? '#E8F0FE' : 'transparent'; }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={checked}
+                    onChange={() => toggleLang(lang)}
+                    style={{ accentColor: '#185FA5', cursor: 'pointer', margin: 0 }}
+                  />
+                  {lang}
+                </label>
+              );
+            })}
+            {availableLanguages.length === 0 && (
+              <div style={{ padding: '8px 12px', fontSize: 11, color: C.textMuted, fontStyle: 'italic' }}>
+                No languages found
+              </div>
+            )}
+          </div>
+        )}
+      </div>
     ),
     duration: (
       <div style={{ display: 'flex', gap: 4 }}>
@@ -337,6 +448,24 @@ export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelect
         </div>
       </div>
     ),
+    pauses: (
+      <div style={{ display: 'flex', gap: 4 }}>
+        <input
+          type="number" min="0"
+          value={filterInputs.pausesMin}
+          onChange={(e) => setFilter('pausesMin', e.target.value)}
+          placeholder="min"
+          style={filterInputStyle}
+        />
+        <input
+          type="number" min="0"
+          value={filterInputs.pausesMax}
+          onChange={(e) => setFilter('pausesMax', e.target.value)}
+          placeholder="max"
+          style={filterInputStyle}
+        />
+      </div>
+    ),
     roles: (
       <select
         value={filterInputs.roles}
@@ -371,7 +500,7 @@ export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelect
         style={filterSelectStyle}
       >
         <option value="">All</option>
-        <option value="FLAGGED">Flagged</option>
+        <option value="FLAGGED">GT Flagged</option>
         <option value="CLEAN">Clean</option>
       </select>
     ),
@@ -382,7 +511,7 @@ export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelect
         style={filterSelectStyle}
       >
         <option value="">All</option>
-        <option value="FLAGGED">Flagged</option>
+        <option value="FLAGGED">GT Flagged</option>
         <option value="CLEAN">Clean</option>
       </select>
     ),
@@ -730,7 +859,26 @@ export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelect
                 >
                   <td style={{ padding: '10px 14px', fontFamily: MONO }}>{r.s_id}</td>
                   <td style={{ padding: '10px 14px' }}><HasVideoBadge value={r.has_video} compact /></td>
-                  <td style={{ padding: '10px 14px' }}>{r.lang || '—'}</td>
+                  <td style={{ padding: '10px 14px' }}>
+                    {r.lang ? (
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                        {r.lang.split(',').map((l, i) => {
+                          const lang = l.trim();
+                          if (!lang) return null;
+                          return (
+                            <span key={i} style={{
+                              fontSize: 10, fontFamily: MONO, fontWeight: 500,
+                              padding: '2px 6px', borderRadius: 4,
+                              background: '#F0F4F8', border: '1px solid #D9E2EC',
+                              color: '#334E68', textTransform: 'uppercase',
+                            }}>
+                              {lang}
+                            </span>
+                          );
+                        })}
+                      </div>
+                    ) : '—'}
+                  </td>
                   <td style={{ padding: '10px 14px', fontFamily: MONO }}>{formatDuration(r.duration_seconds)}</td>
                   <td style={{
                     padding: '10px 14px', fontFamily: MONO,
@@ -738,6 +886,13 @@ export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelect
                     fontWeight: r.flag_count > 0 ? 600 : 400,
                   }}>
                     {r.flag_count}
+                  </td>
+                  <td style={{
+                    padding: '10px 14px', fontFamily: MONO,
+                    color: r.pause_count > 0 ? C.severeText : C.textSecondary,
+                    fontWeight: r.pause_count > 0 ? 600 : 400,
+                  }}>
+                    {r.pause_count}
                   </td>
                   <td style={{ padding: '10px 14px', fontSize: 12, color: C.textSecondary }}>
                     {r.speaker1_role && r.speaker2_role

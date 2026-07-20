@@ -1235,6 +1235,27 @@ def audio_violation_stats():
         return []
 
 
+@app.get("/audio/languages")
+def audio_languages():
+    """Return sorted list of distinct individual language values across all audio sessions.
+    The lang column may contain comma-separated values like 'HINDI, ENGLISH'
+    so we split and deduplicate."""
+    try:
+        with get_audio_connection() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT lang FROM audio_sessions WHERE lang IS NOT NULL AND lang != ''"
+            ).fetchall()
+        langs = set()
+        for r in rows:
+            for part in r["lang"].split(","):
+                part = part.strip()
+                if part:
+                    langs.add(part)
+        return sorted(langs)
+    except Exception:
+        return []
+
+
 @app.get("/audio/sessions")
 def audio_sessions(
     status: Optional[str] = None,
@@ -1248,6 +1269,8 @@ def audio_sessions(
     duration_max: Optional[float] = Query(default=None, ge=0),
     flags_min: Optional[int] = Query(default=None, ge=0),
     flags_max: Optional[int] = Query(default=None, ge=0),
+    pauses_min: Optional[int] = Query(default=None, ge=0),
+    pauses_max: Optional[int] = Query(default=None, ge=0),
     roles: Optional[str] = None,
     reviewer: Optional[str] = None,
     verdict: Optional[str] = None,
@@ -1265,6 +1288,7 @@ def audio_sessions(
         has_video=has_video, lang=lang,
         duration_min=duration_min, duration_max=duration_max,
         flags_min=flags_min, flags_max=flags_max,
+        pauses_min=pauses_min, pauses_max=pauses_max,
         roles=roles, reviewer=reviewer,
         verdict=verdict, astrotalk_verdict=astrotalk_verdict,
         flag_category=flag_category,

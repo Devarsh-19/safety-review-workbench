@@ -721,9 +721,36 @@ export default function AudioSessionViewer({ sId, sessionList, reviewerName, rev
               <span style={{ fontSize: 16, fontFamily: MONO, fontWeight: 600 }}>
                 Session {session.s_id}
               </span>
-              <VerdictBadge verdict={session.overall_verdict} />
               <StatusBadge status={session.review_status} />
               <HasVideoBadge value={session.has_video} />
+              {/* GT verdict badge — mirrors chat SessionViewer's AstroTalk badge */}
+              {(() => {
+                const isGtFlagged = session.overall_verdict === 'FLAGGED' || session.overall_verdict === 'SEVERE';
+                return (
+                  <span style={{
+                    fontSize: 11, fontFamily: MONO, padding: '2px 8px', borderRadius: 3,
+                    background: isGtFlagged ? C.severeBg : C.bgStatsrow,
+                    color:      isGtFlagged ? C.severeText : C.textSecondary,
+                    border: `1px solid ${isGtFlagged ? C.severeBorder : C.border}`,
+                  }}>
+                    GT: {isGtFlagged ? 'Flagged' : 'Clean'}
+                  </span>
+                );
+              })()}
+              {/* AstroTalk verdict badge */}
+              {(() => {
+                const isAstroFlagged = session.astrotalk_verdict === 'FLAGGED' || session.astrotalk_verdict === 'SEVERE';
+                return (
+                  <span style={{
+                    fontSize: 11, fontFamily: MONO, padding: '2px 8px', borderRadius: 3,
+                    background: isAstroFlagged ? C.flaggedBg : C.bgStatsrow,
+                    color:      isAstroFlagged ? C.flaggedText : C.textSecondary,
+                    border: `1px solid ${isAstroFlagged ? C.flaggedBorder : C.border}`,
+                  }}>
+                    AstroTalk: {isAstroFlagged ? 'Flagged' : 'Clean'}
+                  </span>
+                );
+              })()}
               {sessionRisk && (
                 <span
                   title="Session risk rating set by the L1 reviewer"
@@ -738,11 +765,31 @@ export default function AudioSessionViewer({ sId, sessionList, reviewerName, rev
                   {sessionRisk} RISK
                 </span>
               )}
-              <span style={{ fontSize: 12, color: C.textSecondary }}>
-                {session.lang || 'unknown language'} · {segments.length} segments · {visibleFlags.length} flags
-                {unactionedCount > 0 ? ` (${unactionedCount} unactioned)` : ''}
-                {pauses.length > 0 ? ` · ${pauses.length} pauses` : ''}
-              </span>
+              <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 6, fontSize: 12, color: C.textSecondary }}>
+                {session.lang ? (
+                  <div style={{ display: 'flex', gap: 4 }}>
+                    {session.lang.split(',').map((l, i) => {
+                      const lang = l.trim();
+                      if (!lang) return null;
+                      return (
+                        <span key={i} style={{
+                          fontSize: 10, fontFamily: MONO, fontWeight: 500,
+                          padding: '2px 6px', borderRadius: 4,
+                          background: '#F0F4F8', border: '1px solid #D9E2EC',
+                          color: '#334E68', textTransform: 'uppercase',
+                        }}>
+                          {lang}
+                        </span>
+                      );
+                    })}
+                  </div>
+                ) : 'unknown language'}
+                <span>
+                  · {segments.length} segments · {visibleFlags.length} flags
+                  {unactionedCount > 0 ? ` (${unactionedCount} unactioned)` : ''}
+                  {pauses.length > 0 ? ` · ${pauses.length} pauses` : ''}
+                </span>
+              </div>
               {/* Review trail — who did what, when (chat parity) */}
               {(session.submitted_by || session.reviewer_id || session.locked_by) && (
                 <span style={{ fontSize: 12, color: C.textSecondary, fontFamily: MONO }}>
@@ -803,6 +850,37 @@ export default function AudioSessionViewer({ sId, sessionList, reviewerName, rev
                 color: C.severeText, fontSize: 13,
               }}>
                 {error}
+              </div>
+            )}
+
+            {/* Pauses */}
+            {pauses.length > 0 && (
+              <div style={{
+                background: C.bgSurface, border: `1px solid ${C.border}`,
+                borderRadius: 6, padding: '12px 18px', marginBottom: 16,
+              }}>
+                <div style={{
+                  fontSize: 11, fontFamily: MONO, textTransform: 'uppercase',
+                  letterSpacing: '0.05em', color: C.textSecondary, marginBottom: 8,
+                }}>
+                  Pauses ({pauses.length})
+                </div>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                  {pauses.map((p, i) => (
+                    <button
+                      key={i}
+                      onClick={() => seekTo(p.ts_start)}
+                      style={{
+                        padding: '4px 8px', fontSize: 11, fontFamily: MONO,
+                        background: C.bgMuted, border: `1px solid ${C.border}`,
+                        borderRadius: 4, color: C.textPrimary, cursor: 'pointer',
+                      }}
+                      title="Click to jump to this pause"
+                    >
+                      {formatTime(p.ts_start)} - {formatTime(p.ts_end)} ({Math.round(p.duration_seconds)}s)
+                    </button>
+                  ))}
+                </div>
               </div>
             )}
 
