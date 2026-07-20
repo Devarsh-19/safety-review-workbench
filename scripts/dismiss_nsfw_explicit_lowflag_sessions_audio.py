@@ -130,6 +130,10 @@ def run(commit: bool, statuses, max_flags) -> int:
 
         if not eligible:
             print("No qualifying sessions found. Nothing to dismiss.")
+            print("  Sessions that would become CLEAN:")
+            print(f"    PENDING                  {0:>6,}")
+            print(f"    LOCKED                   {0:>6,}")
+            print(f"    {'TOTAL':<24} {0:>6,}")
             print(f"  (skipped: {skipped_no_explicit} without a live NSFW_EXPLICIT flag, "
                   f"{skipped_too_many} with more than {max_flags} live flags)")
             return 0
@@ -148,6 +152,21 @@ def run(commit: bool, statuses, max_flags) -> int:
         for status, count in sorted(status_counts.items()):
             print(f"    {status:<24} {count:>6,}")
         print()
+
+        # Every qualifying session has ALL its live flags dismissed, so each one
+        # becomes CLEAN. Bifurcate that CLEAN count by review_status.
+        pending_clean = status_counts.get("PENDING", 0)
+        locked_clean = status_counts.get("LOCKED", 0)
+        other_clean = len(eligible) - pending_clean - locked_clean
+        verb = "became" if commit else "will become"
+        print(f"  Sessions that {verb} CLEAN:")
+        print(f"    PENDING                  {pending_clean:>6,}")
+        print(f"    LOCKED                   {locked_clean:>6,}")
+        if other_clean:
+            print(f"    OTHER STATUSES           {other_clean:>6,}")
+        print(f"    {'TOTAL':<24} {len(eligible):>6,}")
+        print()
+
         print(f"  Skipped (no live NSFW_EXPLICIT flag) : {skipped_no_explicit:,}")
         print(f"  Skipped (> {max_flags} live flags)             : {skipped_too_many:,}")
         print()
