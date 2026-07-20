@@ -33,6 +33,7 @@ Defaults to exports/session_turns_with_flags.csv.
 
 Usage:
   python scripts/export_session_turns_with_flags.py
+  python scripts/export_session_turns_with_flags.py --flagged-only        # skip CLEAN sessions
   python scripts/export_session_turns_with_flags.py --out exports/session_turns_with_flags.xlsx
   python scripts/export_session_turns_with_flags.py --report-unlinked
 """
@@ -80,10 +81,20 @@ HEADER = [
     "has_active_flag", "active_flag_count", "active_flag_categories",
 ]
 
-# One query does everything: aggregate each turn's ACTIVE flags in SQL, then
-# LEFT JOIN onto every turn so turns with no flag still appear (has_active_flag
-# = 0). The cursor yields the final columns in HEADER order, ready to stream.
-EXPORT_SQL = """
+# A "flagged" session = overall_verdict is not CLEAN — the same definition the
+# violation-breakdown scripts use. (A CLEAN session has no active flags anyway,
+# so this only drops turns that would all be has_active_flag = 0.) NULL verdicts
+# are excluded by != 'CLEAN', which is intended: only genuinely-flagged sessions.
+_FLAGGED_WHERE = "WHERE s.overall_verdict != 'CLEAN'"
+
+
+def build_export_sql(flagged_only: bool = False) -> str:
+    """One query does everything: aggregate each turn's ACTIVE flags in SQL, then
+    LEFT JOIN onto every turn so turns with no flag still appear (has_active_flag
+    = 0). Columns come out in HEADER order, ready to stream. With flagged_only,
+    CLEAN sessions are dropped."""
+    where = _FLAGGED_WHERE if flagged_only else ""
+    return f"""
     WITH active AS (
         SELECT f.session_id, f.turn_id, f.category_code
         FROM flags f
@@ -108,14 +119,30 @@ EXPORT_SQL = """
     FROM turns t
     JOIN sessions s ON s.session_id = t.session_id
     LEFT JOIN agg a ON a.session_id = t.session_id AND a.turn_id = t.turn_id
+    {where}
     ORDER BY s.session_id, t.turn_id
 """
 
-# Row count for the summary line. A plain COUNT(*) over turns walks the smallest
-# index once — far cheaper than re-running the full export JOIN just to count.
-# Equals the exported row count under referential integrity (every turn has a
-# session, enforced by the FK); orphan turns, if any, would be the only skew.
-EXPORT_COUNT_SQL = "SELECT COUNT(*) FROM turns"
+
+# Unfiltered base query (all sessions) — kept as a module constant so the JSON
+# export script can import it unchanged.
+EXPORT_SQL = build_export_sql()
+
+
+def build_export_count_sql(flagged_only: bool = False) -> str:
+    """Row count for the summary line. Unfiltered, a plain COUNT(*) over turns
+    walks the smallest index once. Flagged-only needs the sessions join to test
+    the verdict, but only over the (smaller) flagged subset."""
+    if not flagged_only:
+        # Equals the exported row count under referential integrity (every turn
+        # has a session, per the FK); orphan turns would be the only skew.
+        return "SELECT COUNT(*) FROM turns"
+    return f"""
+        SELECT COUNT(*)
+        FROM turns t
+        JOIN sessions s ON s.session_id = t.session_id
+        {_FLAGGED_WHERE}
+    """
 
 COUNT_UNLINKED_SQL = """
     SELECT COUNT(*)
@@ -130,21 +157,21 @@ COUNT_UNLINKED_SQL = """
 """
 
 
-def write_csv(conn, out_path):
+def write_csv(conn, out_path, flagged_only=False):
     """Stream the export cursor straight to CSV. csv.writerows consumes the
     cursor at C speed — no Python per-row loop."""
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    cur = conn.execute(EXPORT_SQL)
+    cur = conn.execute(build_export_sql(flagged_only))
     # utf-8-sig so Excel renders Hindi/other non-ASCII correctly.
     # 1 MB buffer so a multi-million-row write isn't dominated by tiny syscalls.
     with open(out_path, "w", newline="", encoding="utf-8-sig", buffering=1 << 20) as fh:
         writer = csv.writer(fh)
         writer.writerow(HEADER)
         writer.writerows(cur)
-    return conn.execute(EXPORT_COUNT_SQL).fetchone()[0]
+    return conn.execute(build_export_count_sql(flagged_only)).fetchone()[0]
 
 
-def write_xlsx(conn, out_path):
+def write_xlsx(conn, out_path, flagged_only=False):
     """Slower path — openpyxl materialises every cell. Prefer CSV for big data."""
     try:
         from openpyxl import Workbook
@@ -155,7 +182,7 @@ def write_xlsx(conn, out_path):
     ws = wb.create_sheet("session_turns")
     ws.append(HEADER)
     n = 0
-    for row in conn.execute(EXPORT_SQL):
+    for row in conn.execute(build_export_sql(flagged_only)):
         ws.append(list(row))
         n += 1
     wb.save(out_path)
@@ -170,6 +197,9 @@ def main():
                         help="Output .csv or .xlsx path (default: exports/session_turns_with_flags.csv).")
     parser.add_argument("--report-unlinked", action="store_true",
                         help="Also print how many active flags have no resolvable turn.")
+    parser.add_argument("--flagged-only", action="store_true",
+                        help="Export only flagged sessions (overall_verdict != 'CLEAN'); "
+                             "skip CLEAN sessions entirely.")
     args = parser.parse_args()
 
     out_path = Path(args.out)
@@ -177,16 +207,17 @@ def main():
     try:
         unlinked = conn.execute(COUNT_UNLINKED_SQL).fetchone()[0] if args.report_unlinked else None
         if out_path.suffix.lower() == ".xlsx":
-            n = write_xlsx(conn, out_path)
+            n = write_xlsx(conn, out_path, args.flagged_only)
         else:
-            n = write_csv(conn, out_path)
+            n = write_csv(conn, out_path, args.flagged_only)
     finally:
         conn.close()
 
     print("=" * 64)
     print("  Session turns + active-flag markers")
-    print(f"  DB  : {DB_PATH}")
-    print(f"  Out : {out_path}  ({n:,} turn rows)")
+    print(f"  DB    : {DB_PATH}")
+    print(f"  Scope : {'flagged sessions only (verdict != CLEAN)' if args.flagged_only else 'all sessions'}")
+    print(f"  Out   : {out_path}  ({n:,} turn rows)")
     if unlinked is not None:
         print(f"  Active flags with no resolvable turn (not in export): {unlinked:,}")
     print("=" * 64)
