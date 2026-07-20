@@ -243,7 +243,7 @@ export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelect
       { key: 'assigned_to', label: 'Assigned To', sortable: false },
       { key: 'reviewer', label: 'Reviewer', sortable: false },
     ] : []),
-    { key: 'verdict', label: 'LLM Verdict', sortable: true },
+    { key: 'verdict', label: 'GT FLAG', sortable: true },
     { key: 'astrotalk_verdict', label: 'Astrotalk', sortable: false },
     { key: 'status', label: 'Status', sortable: true },
     { key: 'action', label: 'Action', sortable: false },
@@ -414,10 +414,10 @@ export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelect
   const pctTn = totalReviewedEval ? ((countTn / totalReviewedEval) * 100).toFixed(2) : '0.00';
 
   const classReportCells = [
-    { label: 'True Positive', sub: 'LLM Flagged - AstroTalk Flagged', val: countTp, pct: pctTp, color: C.flaggedText },
-    { label: 'False Positive', sub: 'LLM Clean - AstroTalk Flagged', val: countFp, pct: pctFp, color: '#854F0B' },
-    { label: 'False Negative', sub: 'LLM Flagged - AstroTalk Clean', val: countFn, pct: pctFn, color: C.flaggedText },
-    { label: 'True Negative', sub: 'LLM Clean - AstroTalk Clean', val: countTn, pct: pctTn, color: C.cleanText },
+    { label: 'True Positive', sub: 'GT Flagged - AstroTalk Flagged', val: countTp, pct: pctTp, color: C.flaggedText },
+    { label: 'False Positive', sub: 'GT Clean - AstroTalk Flagged', val: countFp, pct: pctFp, color: '#854F0B' },
+    { label: 'False Negative', sub: 'GT Flagged - AstroTalk Clean', val: countFn, pct: pctFn, color: C.flaggedText },
+    { label: 'True Negative', sub: 'GT Clean - AstroTalk Clean', val: countTn, pct: pctTn, color: C.cleanText },
   ];
 
   return (
