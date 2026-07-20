@@ -3,7 +3,10 @@ export_session_turns_with_flags.py
 
 Chat review database (store/astrotalk.db). Flat export of EVERY session with ALL
 its turns — one row per turn, in (session_id, turn_id) order — with extra columns
-marking which turns carry an ACTIVE flag. Read-only.
+marking which turns carry an ACTIVE flag.
+
+Strictly read-only: the DB is opened with mode=ro, so SQLite rejects any write —
+this script cannot modify the database.
 
 "Active" flag = the same rule the app and the other scripts use:
   - status is not DISMISSED, and
@@ -31,6 +34,7 @@ Usage:
 
 import argparse
 import csv
+import sqlite3
 import sys
 from collections import defaultdict
 from pathlib import Path
@@ -39,7 +43,15 @@ from dotenv import load_dotenv
 load_dotenv()
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from store.db import get_connection, DB_PATH  # noqa: E402
+from store.db import DB_PATH  # noqa: E402
+
+
+def get_readonly_connection() -> sqlite3.Connection:
+    """Open the chat DB strictly read-only (mode=ro): SQLite rejects any write,
+    so this export can never modify the database. A live app is undisturbed."""
+    conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    return conn
 
 
 HEADER = [
@@ -74,46 +86,48 @@ def active_flags_by_turn(conn):
 
 def count_unlinked_active_flags(conn):
     """Active flags with a NULL or non-resolving turn_id — they can't be attached
-    to any turn row, so report them separately."""
+    to any turn row, so report them separately. LEFT JOIN on the turns PK is
+    cheaper than a correlated NOT EXISTS."""
     return conn.execute(
         """
-        SELECT COUNT(*) FROM flags f
+        SELECT COUNT(*)
+        FROM flags f
+        LEFT JOIN turns t
+          ON t.session_id = f.session_id AND t.turn_id = f.turn_id
         WHERE (f.status IS NULL OR f.status != 'DISMISSED')
           AND f.flag_id NOT IN (
               SELECT parent_flag_id FROM flags WHERE parent_flag_id IS NOT NULL
           )
-          AND (
-              f.turn_id IS NULL
-              OR NOT EXISTS (
-                  SELECT 1 FROM turns t
-                  WHERE t.session_id = f.session_id AND t.turn_id = f.turn_id
-              )
-          )
+          AND t.turn_id IS NULL
         """
     ).fetchone()[0]
 
 
 def build_rows(conn):
+    """Stream one row per turn in (session_id, turn_id) order.
+
+    A single JOIN drives the whole export (not one query per session), and the
+    cursor is iterated lazily so memory stays flat regardless of DB size. The
+    per-turn flag map is a small in-memory dict keyed by (session_id, turn_id).
+    """
     by_turn = active_flags_by_turn(conn)
 
-    sessions = conn.execute(
-        """SELECT session_id, overall_verdict, review_status, astrotalk_flagged
-           FROM sessions ORDER BY session_id"""
-    ).fetchall()
-
-    for s in sessions:
-        turns = conn.execute(
-            """SELECT turn_id, speaker, is_automated, timestamp, message_text
-               FROM turns WHERE session_id = ? ORDER BY turn_id""",
-            (s["session_id"],),
-        ).fetchall()
-        for t in turns:
-            cats = by_turn.get((s["session_id"], t["turn_id"]), [])
-            yield [
-                s["session_id"], s["overall_verdict"], s["review_status"], s["astrotalk_flagged"],
-                t["turn_id"], t["speaker"], t["is_automated"], t["timestamp"], t["message_text"],
-                1 if cats else 0, len(cats), ", ".join(cats),
-            ]
+    cur = conn.execute(
+        """
+        SELECT s.session_id, s.overall_verdict, s.review_status, s.astrotalk_flagged,
+               t.turn_id, t.speaker, t.is_automated, t.timestamp, t.message_text
+        FROM turns t
+        JOIN sessions s ON s.session_id = t.session_id
+        ORDER BY s.session_id, t.turn_id
+        """
+    )
+    for r in cur:
+        cats = by_turn.get((r["session_id"], r["turn_id"]), [])
+        yield [
+            r["session_id"], r["overall_verdict"], r["review_status"], r["astrotalk_flagged"],
+            r["turn_id"], r["speaker"], r["is_automated"], r["timestamp"], r["message_text"],
+            1 if cats else 0, len(cats), ", ".join(cats),
+        ]
 
 
 def write_csv(rows, out_path):
@@ -159,17 +173,16 @@ def main():
     args = parser.parse_args()
 
     out_path = Path(args.out)
-    conn = get_connection()
+    conn = get_readonly_connection()
     try:
-        rows = list(build_rows(conn))
         unlinked = count_unlinked_active_flags(conn) if args.report_unlinked else None
+        # Stream the cursor straight to disk — rows are never all held in memory.
+        if out_path.suffix.lower() == ".xlsx":
+            n = write_xlsx(build_rows(conn), out_path)
+        else:
+            n = write_csv(build_rows(conn), out_path)
     finally:
         conn.close()
-
-    if out_path.suffix.lower() == ".xlsx":
-        n = write_xlsx(rows, out_path)
-    else:
-        n = write_csv(rows, out_path)
 
     print("=" * 64)
     print("  Session turns + active-flag markers")
