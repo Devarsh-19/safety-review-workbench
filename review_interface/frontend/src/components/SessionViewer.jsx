@@ -1056,8 +1056,10 @@ export default function SessionViewer({ sessionId, sessionList, reviewerName, re
               </div>
             )}
 
-            {/* Confirm-all / Dismiss-all: bulk-action every unconfirmed active flag */}
-            {!loading && unactionedFlagCount >= 2 && (
+            {/* Confirm-all / Dismiss-all: bulk-action every unconfirmed active flag.
+                Gated by flagsEditable (same as the per-flag buttons) so it never
+                renders on a LOCKED session or one that has frozen for this role. */}
+            {!loading && flagsEditable && unactionedFlagCount >= 2 && (
               <div style={{ marginBottom: 14, display: 'flex', gap: 8 }}>
                 <button
                   onClick={() => handleConfirmAll(unactionedFlagCount)}

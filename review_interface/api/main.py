@@ -877,6 +877,20 @@ def confirm_flag_endpoint(flag_id: int, body: LockRequest):
         raise HTTPException(status_code=500, detail=str(exc))
 
 
+def _reject_if_locked(conn, session_id: str) -> None:
+    """Guard bulk flag mutations: a LOCKED session is immutable. The frontend
+    already hides the Confirm-all / Dismiss-all buttons on locked sessions
+    (flagsEditable = !isLocked), but the API must enforce it too so the state
+    can't be reached directly."""
+    row = conn.execute(
+        "SELECT review_status FROM sessions WHERE session_id = ?", (session_id,)
+    ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"Session {session_id!r} not found")
+    if row["review_status"] == "LOCKED":
+        raise HTTPException(status_code=409, detail="Session is locked — flags are read-only")
+
+
 @app.post("/sessions/{session_id}/confirm-all-flags")
 def confirm_all_flags_endpoint(session_id: str, body: LockRequest):
     """
@@ -890,6 +904,7 @@ def confirm_all_flags_endpoint(session_id: str, body: LockRequest):
     conn = get_connection()
     try:
         with conn:
+            _reject_if_locked(conn, session_id)
             rows = conn.execute(
                 "SELECT flag_id, parent_flag_id, status FROM flags WHERE session_id = ?",
                 (session_id,),
@@ -944,6 +959,7 @@ def dismiss_all_flags_endpoint(session_id: str, body: LockRequest):
     conn = get_connection()
     try:
         with conn:
+            _reject_if_locked(conn, session_id)
             rows = conn.execute(
                 "SELECT flag_id, parent_flag_id, status FROM flags WHERE session_id = ?",
                 (session_id,),
