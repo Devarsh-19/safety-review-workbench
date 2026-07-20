@@ -56,6 +56,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from store.audio_db import (  # noqa: E402
     get_audio_connection,
     recompute_audio_session_verdict,
+    _active_audio_flag_rows,
     AUDIO_DB_PATH,
 )
 
@@ -125,6 +126,27 @@ def find_targets(conn):
     return targets
 
 
+def predict_now_clean(conn, targets) -> int:
+    """How many affected sessions would be left with NO active flag once the
+    target flags are dismissed (i.e. would become CLEAN). A session goes CLEAN
+    when every one of its live flags is in the dismiss set."""
+    dismiss_by_sid: dict[int, set] = {}
+    for t in targets:
+        dismiss_by_sid.setdefault(t["s_id"], set()).add(t["flag_id"])
+
+    now_clean = 0
+    for s_id, dismissing in dismiss_by_sid.items():
+        rows = conn.execute(
+            "SELECT flag_id, parent_flag_id, status FROM audio_flags WHERE s_id = ?",
+            (s_id,),
+        ).fetchall()
+        live = [r for r in _active_audio_flag_rows(rows) if (r["status"] or "") != "DISMISSED"]
+        # CLEAN if no live flag survives the dismissal.
+        if all(r["flag_id"] in dismissing for r in live):
+            now_clean += 1
+    return now_clean
+
+
 def run(commit: bool) -> dict:
     """Dismiss matching flags. Returns {'flags': N, 'sessions': M, 'now_clean': C}."""
     conn = get_audio_connection()
@@ -154,12 +176,17 @@ def run(commit: bool) -> dict:
         print()
 
         if not commit:
-            print(f"  Affected {REVIEW_STATUS} sessions: {len(session_ids):,}")
+            predicted_clean = predict_now_clean(conn, targets)
+            print(f"  Affected {REVIEW_STATUS} sessions      : {len(session_ids):,}")
+            print(f"  Sessions that would become CLEAN : {predicted_clean:,}")
+            print(f"  Sessions still FLAGGED after     : {len(session_ids) - predicted_clean:,}")
+            print()
             print(f"DRY RUN — would dismiss {len(targets):,} flag(s) across "
-                  f"{len(session_ids):,} session(s) and recompute their verdicts "
-                  f"(sessions left with no active flag become CLEAN). No changes "
-                  f"written. Re-run with --commit to apply.")
-            return {"flags": len(targets), "sessions": len(session_ids), "now_clean": 0}
+                  f"{len(session_ids):,} session(s); {predicted_clean:,} would become CLEAN "
+                  f"({len(session_ids) - predicted_clean:,} keep other active flags). "
+                  f"No changes written. Re-run with --commit to apply.")
+            return {"flags": len(targets), "sessions": len(session_ids),
+                    "now_clean": predicted_clean}
 
         for t in targets:
             conn.execute(
