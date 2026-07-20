@@ -23,7 +23,12 @@ Turns with no flag get has_active_flag = 0, count 0, empty categories. Active
 flags whose turn_id does not resolve to a turn (NULL / stale) are not attached to
 any turn row; pass --report-unlinked to print how many there are.
 
-Output (--out): .csv (utf-8-sig, opens cleanly in Excel) or .xlsx (needs openpyxl).
+Performance: all flag aggregation is done in SQL (one query), and CSV output is
+streamed straight from the cursor with csv.writerows — no per-row Python work and
+nothing buffered in memory, so it stays fast on a large production DB.
+
+Output (--out): .csv (utf-8-sig, opens cleanly in Excel; the fast default) or
+.xlsx (needs openpyxl; slower — openpyxl builds every cell in memory).
 Defaults to exports/session_turns_with_flags.csv.
 
 Usage:
@@ -36,7 +41,6 @@ import argparse
 import csv
 import sqlite3
 import sys
-from collections import defaultdict
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -48,9 +52,22 @@ from store.db import DB_PATH  # noqa: E402
 
 def get_readonly_connection() -> sqlite3.Connection:
     """Open the chat DB strictly read-only (mode=ro): SQLite rejects any write,
-    so this export can never modify the database. A live app is undisturbed."""
+    so this export can never modify the database. A live app is undisturbed.
+    No row_factory — plain tuples stream fastest into csv.writerows.
+
+    Tuned for a large (multi-GB) DB: memory-map the file so reads come from the
+    OS page cache instead of syscalls, and give SQLite a bigger page cache. Both
+    are session-local PRAGMAs — they change nothing on disk. Failures (e.g. mmap
+    unsupported) are non-fatal; the export just runs a little slower."""
     conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
-    conn.row_factory = sqlite3.Row
+    for pragma in (
+        "PRAGMA mmap_size = 8000000000",  # up to ~8 GB memory-mapped reads
+        "PRAGMA cache_size = -262144",    # 256 MB page cache (negative = KiB)
+    ):
+        try:
+            conn.execute(pragma)
+        except sqlite3.Error:
+            pass
     return conn
 
 
@@ -63,12 +80,11 @@ HEADER = [
     "has_active_flag", "active_flag_count", "active_flag_categories",
 ]
 
-
-def active_flags_by_turn(conn):
-    """Map (session_id, turn_id) -> [category_code, ...] over ACTIVE flags only.
-    Amendment rows win over amended originals; DISMISSED rows are excluded."""
-    rows = conn.execute(
-        """
+# One query does everything: aggregate each turn's ACTIVE flags in SQL, then
+# LEFT JOIN onto every turn so turns with no flag still appear (has_active_flag
+# = 0). The cursor yields the final columns in HEADER order, ready to stream.
+EXPORT_SQL = """
+    WITH active AS (
         SELECT f.session_id, f.turn_id, f.category_code
         FROM flags f
         WHERE (f.status IS NULL OR f.status != 'DISMISSED')
@@ -76,88 +92,72 @@ def active_flags_by_turn(conn):
           AND f.flag_id NOT IN (
               SELECT parent_flag_id FROM flags WHERE parent_flag_id IS NOT NULL
           )
-        """
-    ).fetchall()
-    by_turn = defaultdict(list)
-    for r in rows:
-        by_turn[(r["session_id"], r["turn_id"])].append(r["category_code"] or "")
-    return by_turn
-
-
-def count_unlinked_active_flags(conn):
-    """Active flags with a NULL or non-resolving turn_id — they can't be attached
-    to any turn row, so report them separately. LEFT JOIN on the turns PK is
-    cheaper than a correlated NOT EXISTS."""
-    return conn.execute(
-        """
-        SELECT COUNT(*)
-        FROM flags f
-        LEFT JOIN turns t
-          ON t.session_id = f.session_id AND t.turn_id = f.turn_id
-        WHERE (f.status IS NULL OR f.status != 'DISMISSED')
-          AND f.flag_id NOT IN (
-              SELECT parent_flag_id FROM flags WHERE parent_flag_id IS NOT NULL
-          )
-          AND t.turn_id IS NULL
-        """
-    ).fetchone()[0]
-
-
-def build_rows(conn):
-    """Stream one row per turn in (session_id, turn_id) order.
-
-    A single JOIN drives the whole export (not one query per session), and the
-    cursor is iterated lazily so memory stays flat regardless of DB size. The
-    per-turn flag map is a small in-memory dict keyed by (session_id, turn_id).
-    """
-    by_turn = active_flags_by_turn(conn)
-
-    cur = conn.execute(
-        """
-        SELECT s.session_id, s.overall_verdict, s.review_status, s.astrotalk_flagged,
-               t.turn_id, t.speaker, t.is_automated, t.timestamp, t.message_text
-        FROM turns t
-        JOIN sessions s ON s.session_id = t.session_id
-        ORDER BY s.session_id, t.turn_id
-        """
+    ),
+    agg AS (
+        SELECT session_id, turn_id,
+               COUNT(*)                        AS cnt,
+               group_concat(category_code, ', ') AS cats
+        FROM active
+        GROUP BY session_id, turn_id
     )
-    for r in cur:
-        cats = by_turn.get((r["session_id"], r["turn_id"]), [])
-        yield [
-            r["session_id"], r["overall_verdict"], r["review_status"], r["astrotalk_flagged"],
-            r["turn_id"], r["speaker"], r["is_automated"], r["timestamp"], r["message_text"],
-            1 if cats else 0, len(cats), ", ".join(cats),
-        ]
+    SELECT s.session_id, s.overall_verdict, s.review_status, s.astrotalk_flagged,
+           t.turn_id, t.speaker, t.is_automated, t.timestamp, t.message_text,
+           CASE WHEN a.cnt IS NULL THEN 0 ELSE 1 END AS has_active_flag,
+           COALESCE(a.cnt, 0)                        AS active_flag_count,
+           COALESCE(a.cats, '')                      AS active_flag_categories
+    FROM turns t
+    JOIN sessions s ON s.session_id = t.session_id
+    LEFT JOIN agg a ON a.session_id = t.session_id AND a.turn_id = t.turn_id
+    ORDER BY s.session_id, t.turn_id
+"""
+
+# Row count for the summary line. A plain COUNT(*) over turns walks the smallest
+# index once — far cheaper than re-running the full export JOIN just to count.
+# Equals the exported row count under referential integrity (every turn has a
+# session, enforced by the FK); orphan turns, if any, would be the only skew.
+EXPORT_COUNT_SQL = "SELECT COUNT(*) FROM turns"
+
+COUNT_UNLINKED_SQL = """
+    SELECT COUNT(*)
+    FROM flags f
+    LEFT JOIN turns t
+      ON t.session_id = f.session_id AND t.turn_id = f.turn_id
+    WHERE (f.status IS NULL OR f.status != 'DISMISSED')
+      AND f.flag_id NOT IN (
+          SELECT parent_flag_id FROM flags WHERE parent_flag_id IS NOT NULL
+      )
+      AND t.turn_id IS NULL
+"""
 
 
-def write_csv(rows, out_path):
+def write_csv(conn, out_path):
+    """Stream the export cursor straight to CSV. csv.writerows consumes the
+    cursor at C speed — no Python per-row loop."""
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    n = 0
+    cur = conn.execute(EXPORT_SQL)
     # utf-8-sig so Excel renders Hindi/other non-ASCII correctly.
-    with open(out_path, "w", newline="", encoding="utf-8-sig") as fh:
+    # 1 MB buffer so a multi-million-row write isn't dominated by tiny syscalls.
+    with open(out_path, "w", newline="", encoding="utf-8-sig", buffering=1 << 20) as fh:
         writer = csv.writer(fh)
         writer.writerow(HEADER)
-        for row in rows:
-            writer.writerow(row)
-            n += 1
-    return n
+        writer.writerows(cur)
+    return conn.execute(EXPORT_COUNT_SQL).fetchone()[0]
 
 
-def write_xlsx(rows, out_path):
+def write_xlsx(conn, out_path):
+    """Slower path — openpyxl materialises every cell. Prefer CSV for big data."""
     try:
         from openpyxl import Workbook
     except ImportError:
         sys.exit("  xlsx mode needs openpyxl (pip install openpyxl), or use a .csv --out.")
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "session_turns"
+    wb = Workbook(write_only=True)
+    ws = wb.create_sheet("session_turns")
     ws.append(HEADER)
     n = 0
-    for row in rows:
-        ws.append(row)
+    for row in conn.execute(EXPORT_SQL):
+        ws.append(list(row))
         n += 1
-    ws.freeze_panes = "A2"
     wb.save(out_path)
     return n
 
@@ -175,12 +175,11 @@ def main():
     out_path = Path(args.out)
     conn = get_readonly_connection()
     try:
-        unlinked = count_unlinked_active_flags(conn) if args.report_unlinked else None
-        # Stream the cursor straight to disk — rows are never all held in memory.
+        unlinked = conn.execute(COUNT_UNLINKED_SQL).fetchone()[0] if args.report_unlinked else None
         if out_path.suffix.lower() == ".xlsx":
-            n = write_xlsx(build_rows(conn), out_path)
+            n = write_xlsx(conn, out_path)
         else:
-            n = write_csv(build_rows(conn), out_path)
+            n = write_csv(conn, out_path)
     finally:
         conn.close()
 
