@@ -1,34 +1,37 @@
 """
 dismiss_nsfw_explicit_lowflag_sessions_audio.py
 
-Session-level cleanup for the audio review database (store/audio_review.db):
-dismiss every live flag of any session that carries an NSFW_EXPLICIT flag and is
-lightly flagged overall. A session with an explicit hit but only a handful of
-flags is treated as low-signal and cleared in one go.
+Cleanup for the audio review database (store/audio_review.db): on any lightly
+flagged session that carries an NSFW_EXPLICIT flag, dismiss ONLY the
+NSFW_EXPLICIT flags. Other intents on the session (ABUSIVE_LANGUAGE,
+FEAR_MANIPULATION, …) are left ACTIVE and untouched.
 
-SESSION-LEVEL FILTER — a session qualifies when BOTH hold:
+A session is IN SCOPE when BOTH hold:
 
   1. "Has NSFW_EXPLICIT" — the session has at least one LIVE flag whose intent is
      NSFW_EXPLICIT (case/format-insensitive: 'NSFW-EXPLICIT', 'nsfw explicit' …
      all match). Live = active (amendment row, or an original with no amendment)
      and not already DISMISSED.
 
-  2. "flag count <= 5" — the session's live flag count is between 1 and 5. This
-     matches the flag_count column in the queue exactly (active, non-dismissed,
-     amended originals excluded). Sessions with more than 5 live flags are left
-     alone.
+  2. "flag count <= 5" — the session's live flag count (ALL intents, not just
+     explicit) is between 1 and 5. This matches the flag_count column in the
+     queue exactly. Sessions with more than 5 live flags are left alone.
 
-Dismissal follows the audio script convention (see remove_audio_output.py): a
-SOFT dismiss of EVERY live flag on the qualifying session — each live flag row is
-set to status = 'DISMISSED' (restorable via undismiss), a 'DISMISSED' row is
-written to audio_review_log, and the session verdict is recomputed (a session
-left with no active flag becomes CLEAN). Flags are NEVER hard-deleted.
+What gets dismissed: only the LIVE NSFW_EXPLICIT flag rows on in-scope sessions.
+A session becomes CLEAN only when NSFW_EXPLICIT was its ONLY live intent; a
+session that also has other live flags stays FLAGGED (those flags remain active).
+
+Dismissal follows the audio script convention (soft dismiss): each targeted flag
+row is set to status = 'DISMISSED' (restorable via undismiss), a 'DISMISSED' row
+is written to audio_review_log, and the session verdict is recomputed. Flags are
+NEVER hard-deleted.
 
 SCOPE: by default only PENDING and LOCKED sessions are cleaned. Sessions that are
 SUBMITTED_FOR_REVIEW or REVIEWED are left alone. Override with --status.
 
 DRY-RUN BY DEFAULT — running with no flags only previews what would change and
-prints the number of sessions that would be affected. Pass --commit to apply.
+prints how many sessions would become CLEAN (split by PENDING / LOCKED). Pass
+--commit to apply.
 
 Usage:
   python scripts/dismiss_nsfw_explicit_lowflag_sessions_audio.py            # preview PENDING+LOCKED (dry-run)
@@ -59,7 +62,7 @@ MAX_LIVE_FLAGS = 5
 DEFAULT_STATUSES = ("PENDING", "LOCKED")
 
 REVIEWER_ID = "AUTO_DISMISS"
-NOTE = "Auto-dismiss: session had an NSFW_EXPLICIT flag and <=5 live flags"
+NOTE = "Auto-dismiss: NSFW_EXPLICIT flag on a session with <=5 live flags"
 
 
 def _norm_intent(intent) -> str:
@@ -71,7 +74,12 @@ def _norm_intent(intent) -> str:
 def find_qualifying_sessions(conn, statuses, max_flags):
     """Return (eligible, skipped_no_explicit, skipped_too_many).
 
-    eligible: list of dicts {s_id, review_status, live_flag_ids} ready to clean.
+    eligible: list of dicts per in-scope session:
+        {s_id, review_status, live_count, explicit_flag_ids, becomes_clean}
+      - explicit_flag_ids: the LIVE NSFW_EXPLICIT flags to dismiss.
+      - becomes_clean: True when explicit was the session's only live intent, so
+        dismissing it leaves no active flag (session -> CLEAN). False when other
+        live flags remain (session stays FLAGGED).
     statuses: iterable of review_status values to consider (None -> all statuses).
     """
     status_set = set(statuses) if statuses else None
@@ -100,13 +108,15 @@ def find_qualifying_sessions(conn, statuses, max_flags):
         # already dismissed — exactly what the queue's flag_count column shows.
         live = [r for r in _active_audio_flag_rows(rows) if (r["status"] or "") != "DISMISSED"]
 
+        explicit = [r for r in live if _norm_intent(r["intent"]) == TARGET_INTENT]
+
         # Rule 1: at least one LIVE NSFW_EXPLICIT flag on the session.
-        if not any(_norm_intent(r["intent"]) == TARGET_INTENT for r in live):
+        if not explicit:
             skipped_no_explicit += 1
             continue
 
-        # Rule 2: 1..max_flags live flags (a session with a live explicit flag
-        # already has >=1, so the lower bound is implicit).
+        # Rule 2: 1..max_flags live flags total (a session with a live explicit
+        # flag already has >=1, so the lower bound is implicit).
         if len(live) > max_flags:
             skipped_too_many += 1
             continue
@@ -114,11 +124,32 @@ def find_qualifying_sessions(conn, statuses, max_flags):
         eligible.append({
             "s_id": s_id,
             "review_status": review_status or "—",
-            "live_flag_ids": [r["flag_id"] for r in live],
+            "live_count": len(live),
+            "explicit_flag_ids": [r["flag_id"] for r in explicit],
+            # CLEAN only if explicit was the ONLY live intent — no other flag
+            # remains active after we dismiss the explicit ones.
+            "becomes_clean": len(explicit) == len(live),
         })
 
     eligible.sort(key=lambda e: e["s_id"])
     return eligible, skipped_no_explicit, skipped_too_many
+
+
+def _print_clean_bifurcation(eligible, commit: bool) -> None:
+    """Print how many sessions become CLEAN, split PENDING / LOCKED / other.
+    A session becomes CLEAN only when NSFW_EXPLICIT was its only live intent."""
+    clean = [e for e in eligible if e["becomes_clean"]]
+    clean_counts = Counter(e["review_status"] for e in clean)
+    pending_clean = clean_counts.get("PENDING", 0)
+    locked_clean = clean_counts.get("LOCKED", 0)
+    other_clean = len(clean) - pending_clean - locked_clean
+    verb = "became" if commit else "will become"
+    print(f"  Sessions that {verb} CLEAN (explicit was their only flag):")
+    print(f"    PENDING                  {pending_clean:>6,}")
+    print(f"    LOCKED                   {locked_clean:>6,}")
+    if other_clean:
+        print(f"    OTHER STATUSES           {other_clean:>6,}")
+    print(f"    {'TOTAL':<24} {len(clean):>6,}")
 
 
 def run(commit: bool, statuses, max_flags) -> int:
@@ -129,42 +160,32 @@ def run(commit: bool, statuses, max_flags) -> int:
         )
 
         if not eligible:
-            print("No qualifying sessions found. Nothing to dismiss.")
-            print("  Sessions that would become CLEAN:")
-            print(f"    PENDING                  {0:>6,}")
-            print(f"    LOCKED                   {0:>6,}")
-            print(f"    {'TOTAL':<24} {0:>6,}")
+            print("No sessions in scope. Nothing to dismiss.")
+            _print_clean_bifurcation([], commit)
             print(f"  (skipped: {skipped_no_explicit} without a live NSFW_EXPLICIT flag, "
                   f"{skipped_too_many} with more than {max_flags} live flags)")
             return 0
 
-        total_flags = sum(len(e["live_flag_ids"]) for e in eligible)
-        print(f"Found {len(eligible):,} qualifying session(s) "
-              f"({total_flags:,} live flag(s) to dismiss):\n")
-        print(f"  {'SESSION':<10} {'STATUS':<24} {'LIVE FLAGS':>10}")
-        print(f"  {'-'*10} {'-'*24} {'-'*10}")
+        total_explicit = sum(len(e["explicit_flag_ids"]) for e in eligible)
+        stay_flagged = sum(1 for e in eligible if not e["becomes_clean"])
+        print(f"Found {len(eligible):,} in-scope session(s) "
+              f"({total_explicit:,} NSFW_EXPLICIT flag(s) to dismiss):\n")
+        print(f"  {'SESSION':<10} {'STATUS':<20} {'LIVE':>5} {'EXPLICIT':>9} {'RESULT':>9}")
+        print(f"  {'-'*10} {'-'*20} {'-'*5} {'-'*9} {'-'*9}")
         for e in eligible:
-            print(f"  {e['s_id']:<10} {e['review_status']:<24} {len(e['live_flag_ids']):>10}")
+            result = "CLEAN" if e["becomes_clean"] else "FLAGGED"
+            print(f"  {e['s_id']:<10} {e['review_status']:<20} {e['live_count']:>5} "
+                  f"{len(e['explicit_flag_ids']):>9} {result:>9}")
         print()
 
         status_counts = Counter(e["review_status"] for e in eligible)
-        print("  Breakdown by review_status:")
+        print("  In-scope sessions by review_status:")
         for status, count in sorted(status_counts.items()):
             print(f"    {status:<24} {count:>6,}")
         print()
 
-        # Every qualifying session has ALL its live flags dismissed, so each one
-        # becomes CLEAN. Bifurcate that CLEAN count by review_status.
-        pending_clean = status_counts.get("PENDING", 0)
-        locked_clean = status_counts.get("LOCKED", 0)
-        other_clean = len(eligible) - pending_clean - locked_clean
-        verb = "became" if commit else "will become"
-        print(f"  Sessions that {verb} CLEAN:")
-        print(f"    PENDING                  {pending_clean:>6,}")
-        print(f"    LOCKED                   {locked_clean:>6,}")
-        if other_clean:
-            print(f"    OTHER STATUSES           {other_clean:>6,}")
-        print(f"    {'TOTAL':<24} {len(eligible):>6,}")
+        _print_clean_bifurcation(eligible, commit)
+        print(f"  Sessions still FLAGGED (kept other flags): {stay_flagged:,}")
         print()
 
         print(f"  Skipped (no live NSFW_EXPLICIT flag) : {skipped_no_explicit:,}")
@@ -172,13 +193,13 @@ def run(commit: bool, statuses, max_flags) -> int:
         print()
 
         if not commit:
-            print(f"DRY RUN — {len(eligible):,} session(s) would be affected "
-                  f"({total_flags:,} live flag(s) dismissed, verdicts recomputed to "
-                  f"CLEAN). No changes written. Re-run with --commit to apply.")
+            print(f"DRY RUN — would dismiss {total_explicit:,} NSFW_EXPLICIT flag(s) across "
+                  f"{len(eligible):,} session(s). No changes written. Re-run with "
+                  f"--commit to apply.")
             return len(eligible)
 
         for e in eligible:
-            for fid in e["live_flag_ids"]:
+            for fid in e["explicit_flag_ids"]:
                 conn.execute(
                     "UPDATE audio_flags SET status = 'DISMISSED' WHERE flag_id = ?",
                     (fid,),
@@ -190,8 +211,8 @@ def run(commit: bool, statuses, max_flags) -> int:
                 )
             recompute_audio_session_verdict(e["s_id"], conn)
         conn.commit()
-        print(f"Done. Dismissed {total_flags:,} live flag(s) across {len(eligible):,} "
-              f"session(s); verdicts recomputed (now CLEAN).")
+        print(f"Done. Dismissed {total_explicit:,} NSFW_EXPLICIT flag(s) across "
+              f"{len(eligible):,} session(s); verdicts recomputed.")
         return len(eligible)
     finally:
         conn.close()
@@ -199,8 +220,8 @@ def run(commit: bool, statuses, max_flags) -> int:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Session-level dismiss: clear sessions that have an "
-                    "NSFW_EXPLICIT flag and <=5 live flags (audio DB)."
+        description="Dismiss NSFW_EXPLICIT flags on sessions with <=5 live flags "
+                    "(audio DB); other intents are left active."
     )
     parser.add_argument("--commit", action="store_true",
                         help="Actually dismiss (default is dry-run preview only).")
@@ -208,7 +229,7 @@ def main() -> None:
                         help="Comma-separated review_status values to clean. "
                              "Default: PENDING,LOCKED. Pass 'ALL' to consider every status.")
     parser.add_argument("--max-flags", type=int, default=MAX_LIVE_FLAGS,
-                        help=f"Only clear sessions with at most this many live flags "
+                        help=f"Only touch sessions with at most this many live flags "
                              f"(default: {MAX_LIVE_FLAGS}).")
     args = parser.parse_args()
 
@@ -218,13 +239,13 @@ def main() -> None:
     else:
         statuses = tuple(s.strip().upper() for s in args.status.split(",") if s.strip())
 
-    print("=" * 68)
-    print("  Dismiss sessions with an NSFW_EXPLICIT flag and <=%d live flags (audio)"
+    print("=" * 72)
+    print("  Dismiss NSFW_EXPLICIT flags on sessions with <=%d live flags (audio)"
           % args.max_flags)
-    print("=" * 68)
+    print("=" * 72)
     print(f"  Database  : {AUDIO_DB_PATH}")
-    print(f"  Intent    : {TARGET_INTENT}")
-    print(f"  Max flags : <= {args.max_flags} live flags")
+    print(f"  Intent    : {TARGET_INTENT} (only these flags are dismissed)")
+    print(f"  Max flags : <= {args.max_flags} live flags (all intents)")
     print(f"  Scope     : {', '.join(statuses) if statuses else 'ALL statuses'}")
     print(f"  Mode      : {'COMMIT' if args.commit else 'DRY-RUN'}")
     print()
