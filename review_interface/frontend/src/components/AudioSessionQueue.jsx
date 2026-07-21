@@ -254,7 +254,7 @@ export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelect
         { label: 'GT Flagged', value: lockedFlagged, color: lockedFlagged > 0 ? C.flaggedText : C.textSecondary },
       ]
     },
-    { label: 'Total Flagged session by LLM', value: totalFlagged, color: totalFlagged > 0 ? C.flaggedText : C.textSecondary },
+    { label: 'Total Flagged session by GT', value: totalFlagged, color: totalFlagged > 0 ? C.flaggedText : C.textSecondary },
   ];
 
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
@@ -478,20 +478,34 @@ export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelect
       </select>
     ),
     assigned_to: (
-      <input
+      <select
         value={filterInputs.assignedTo}
         onChange={(e) => setFilter('assignedTo', e.target.value)}
-        placeholder="Name…"
-        style={filterInputStyle}
-      />
+        style={filterSelectStyle}
+      >
+        <option value="">All</option>
+        <option value="Nikhil">Nikhil</option>
+        <option value="Yusuf">Yusuf</option>
+        <option value="Vineet">Vineet</option>
+        <option value="Gaurav">Gaurav</option>
+        <option value="Divyansh">Divyansh</option>
+        <option value="Devarsh">Devarsh</option>
+      </select>
     ),
     reviewer: (
-      <input
+      <select
         value={filterInputs.reviewer}
         onChange={(e) => setFilter('reviewer', e.target.value)}
-        placeholder="Name…"
-        style={filterInputStyle}
-      />
+        style={filterSelectStyle}
+      >
+        <option value="">All</option>
+        <option value="Nikhil">Nikhil</option>
+        <option value="Yusuf">Yusuf</option>
+        <option value="Vineet">Vineet</option>
+        <option value="Gaurav">Gaurav</option>
+        <option value="Divyansh">Divyansh</option>
+        <option value="Devarsh">Devarsh</option>
+      </select>
     ),
     verdict: (
       <select
