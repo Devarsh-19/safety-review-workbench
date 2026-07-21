@@ -90,7 +90,7 @@ def _format_categories(categories: dict[str, int]) -> str:
     return "{" + ",".join(f"{k}:{v}" for k, v in sorted(categories.items())) + "}"
 
 
-def export(out_path: Path, flagged_only: bool = False) -> None:
+def export(out_path: Path) -> None:
     conn = get_connection()
 
     print("  Loading turn counts...")
@@ -118,10 +118,8 @@ def export(out_path: Path, flagged_only: bool = False) -> None:
                       astrotalk_flagged
                FROM sessions ORDER BY session_id"""
         ):
-            fs = flag_summary.get(s["session_id"])
-            if flagged_only and not fs:
-                continue
             n_sessions += 1
+            fs = flag_summary.get(s["session_id"])
             if fs:
                 n_flagged += 1
             writer.writerow({
@@ -152,22 +150,19 @@ def main() -> None:
         description="Export ALL ingested sessions (one row per session) with clean/flagged status"
     )
     p.add_argument("--out", default=None, help="Output CSV path")
-    p.add_argument("--flagged-only", action="store_true",
-                   help="Export only sessions with at least one active flag")
     args = p.parse_args()
 
     if args.out:
         out_path = Path(args.out)
     else:
         stamp = datetime.now().strftime("%Y%m%d")
-        name = "flagged_sessions" if args.flagged_only else "all_ingested_sessions"
-        out_path = Path(__file__).resolve().parents[1] / "exports" / f"{name}_{stamp}.csv"
+        out_path = Path(__file__).resolve().parents[1] / "exports" / f"all_ingested_sessions_{stamp}.csv"
 
     print("=" * 60)
     print("  Export ALL ingested sessions (clean vs flagged)")
     print(f"  DB: {os.getenv('DB_PATH', 'store/results.db')}")
     print("=" * 60)
-    export(out_path, flagged_only=args.flagged_only)
+    export(out_path)
 
 
 if __name__ == "__main__":
