@@ -31,6 +31,8 @@ LOW — any of (only if not HIGH):
 MEDIUM — the default bucket: any session not meeting a HIGH condition and not
 meeting any LOW path.
 
+CLEAN — a session with no active flags at all (nothing to grade).
+
 Flag population (what counts as a flag)
 ---------------------------------------
 "Active" flags only, matching scripts/astro_flag_ge5.py and the review queue:
@@ -111,8 +113,13 @@ def classify_severity(flags: list[tuple[str, bool]]) -> tuple[str, str]:
     ``flags`` is a list of ``(category_code, is_astrologer)`` for the session's
     active flags. ``rule`` is the matched rule id (e.g. 'H1', 'L3', '-') and is
     returned for transparency/auditing.
+
+    A session with no active flags is CLEAN (nothing to grade).
     """
     total = len(flags)
+    if total == 0:                                             # no active flags
+        return "CLEAN", "no_flags"
+
     astro_count = sum(1 for _, is_astro in flags if is_astro)
     categories = {cat for cat, _ in flags}
 
@@ -260,7 +267,7 @@ def write_csv(severities: dict, path: Path) -> None:
 
 def _distribution(severities: dict) -> str:
     counts = Counter(sev for sev, _ in severities.values())
-    order = ["HIGH", "MEDIUM", "LOW"]
+    order = ["HIGH", "MEDIUM", "LOW", "CLEAN"]
     return ", ".join(f"{k}={counts.get(k, 0)}" for k in order)
 
 
