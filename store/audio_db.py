@@ -114,6 +114,7 @@ def initialise_audio_db() -> None:
         "ALTER TABLE audio_sessions ADD COLUMN duration_seconds REAL",  # real audio duration from the pipeline (ffprobe)
         "ALTER TABLE audio_sessions ADD COLUMN manual_risk_level TEXT", # L1's whole-session risk rating: HIGH / MEDIUM / LOW
         "ALTER TABLE audio_sessions ADD COLUMN session_note TEXT",      # reviewer's overall observation note (chat parity)
+        "ALTER TABLE audio_sessions ADD COLUMN astrotalk_severity TEXT",# auto-derived HIGH / MEDIUM / LOW from the Severity Criteria (chat parity)
     ]
     with get_audio_connection() as conn:
         for migration in migrations:
