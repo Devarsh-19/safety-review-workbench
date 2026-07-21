@@ -102,10 +102,9 @@ def get_readonly_connection(db_path: str = DB_PATH) -> sqlite3.Connection:
 
 HEADER = [
     # session-level context (repeated on every turn of the session)
-    "session_id", "overall_verdict", "review_status", "reviewed_at", "locked_by",
-    "astrotalk_flagged", "language",
+    "session_id", "astrotalk_flagged", "language",
     # turn-level
-    "turn_id", "speaker", "is_automated", "timestamp", "message_text",
+    "turn_id", "speaker", "timestamp", "message_text",
     # flag summary for THIS turn (active flags only)
     "has_active_flag", "active_flag_count", "active_flag_categories",
 ]
@@ -140,10 +139,8 @@ def build_export_sql(flagged_only: bool = False) -> str:
         FROM active
         GROUP BY session_id, turn_id
     )
-    SELECT s.session_id, s.overall_verdict, s.review_status,
-           DATE(COALESCE(s.reviewed_at, s.locked_at, s.submitted_at)) AS reviewed_at,
-           s.locked_by, s.astrotalk_flagged, {_LANG_EXPR} AS language,
-           t.turn_id, t.speaker, t.is_automated, t.timestamp, t.message_text,
+    SELECT s.session_id, s.astrotalk_flagged, {_LANG_EXPR} AS language,
+           t.turn_id, t.speaker, t.timestamp, t.message_text,
            CASE WHEN a.cnt IS NULL THEN 0 ELSE 1 END AS has_active_flag,
            COALESCE(a.cnt, 0)                        AS active_flag_count,
            COALESCE(a.cats, '')                      AS active_flag_categories
@@ -189,19 +186,15 @@ def build_session_count_sql(flagged_only: bool = False) -> str:
 
 
 # --- Audio DB (store/audio_review.db) ---------------------------------------
-# Same shape as the chat export, mapped onto the audio schema:
-#   sessions -> audio_sessions (s_id), turns -> audio_segments (seg_id),
-#   flags -> audio_flags (intent = category). Audio segments carry no message
-#   text; the per-segment fields are speaker / tone / ts_start / ts_end. Audio
-#   session verdicts are binary (SEVERE is legacy for FLAGGED), normalised here.
-AUDIO_HEADER = [
-    # session-level context (repeated on every segment of the session)
-    "s_id", "overall_verdict", "astrotalk_verdict", "review_status",
-    # segment-level ("turn" of an audio session)
-    "seg_id", "speaker", "ts_start", "ts_end", "tone",
-    # flag summary for THIS segment (active flags only)
-    "has_active_flag", "active_flag_count", "active_flag_intents",
-]
+# The audio export uses the EXACT SAME columns/names as the chat export (HEADER),
+# so the two CSVs line up 1:1. The audio schema is mapped onto those column names:
+#   session_id  <- audio_sessions.s_id      turn_id     <- audio_segments.seg_id
+#   language    <- audio_sessions.lang      timestamp   <- audio_segments.ts_start
+#   astrotalk_flagged <- audio_sessions.astrotalk_verdict FLAGGED/CLEAN -> 1/0.
+#   message_text <- audio_flags.transcript for that segment. Audio segments carry
+#     NO transcript of their own (only speaker/tone/timing); the spoken text lives
+#     only on flags, so an unflagged segment necessarily has a blank message_text.
+#   active_flag_categories <- audio_flags.intent (audio's category analogue).
 
 # Normalise the legacy SEVERE verdict to FLAGGED (store/audio_db.py parity).
 _AUDIO_VERDICT = "CASE WHEN {c} = 'SEVERE' THEN 'FLAGGED' ELSE {c} END"
@@ -211,20 +204,24 @@ _AUDIO_FLAGGED_WHERE = "WHERE s.overall_verdict != 'CLEAN'"
 
 
 def build_audio_export_sql(flagged_only: bool = False) -> str:
-    """Audio counterpart of build_export_sql: aggregate each segment's ACTIVE
-    flags, then LEFT JOIN onto every segment so unflagged segments still appear.
-    Active-flag rule matches store/audio_db.py: not DISMISSED and not an amended
-    original (an original superseded by an amendment row does not count).
+    """Audio counterpart of build_export_sql, emitting the SAME columns as the
+    chat export (HEADER). Aggregate each segment's ACTIVE flags — count, intents
+    (as active_flag_categories) and their transcripts (as message_text) — then
+    LEFT JOIN onto every segment so unflagged segments still appear. Active-flag
+    rule matches store/audio_db.py: not DISMISSED and not an amended original (an
+    original superseded by an amendment row does not count).
 
     Driven FROM audio_sessions with a LEFT JOIN to audio_segments, so a session
     that has NO segments still emits exactly one row (blank segment fields,
-    has_active_flag = 0) instead of vanishing from the export."""
+    has_active_flag = 0) instead of vanishing from the export.
+
+    message_text is the segment's active-flag transcript(s): audio_segments store
+    no text of their own, so an unflagged segment has a blank message_text."""
     where = _AUDIO_FLAGGED_WHERE if flagged_only else ""
-    overall = _AUDIO_VERDICT.format(c="s.overall_verdict")
     astro = _AUDIO_VERDICT.format(c="s.astrotalk_verdict")
     return f"""
     WITH active AS (
-        SELECT af.s_id, af.seg_id, af.intent
+        SELECT af.s_id, af.seg_id, af.intent, af.transcript
         FROM audio_flags af
         WHERE (af.status IS NULL OR af.status != 'DISMISSED')
           AND af.seg_id IS NOT NULL
@@ -234,17 +231,24 @@ def build_audio_export_sql(flagged_only: bool = False) -> str:
     ),
     agg AS (
         SELECT s_id, seg_id,
-               COUNT(*)                    AS cnt,
-               group_concat(intent, ', ')  AS intents
+               COUNT(*)                        AS cnt,
+               group_concat(intent, ', ')      AS cats,
+               group_concat(transcript, ' | ') AS texts
         FROM active
         GROUP BY s_id, seg_id
     )
-    SELECT s.s_id, {overall} AS overall_verdict, {astro} AS astrotalk_verdict,
-           s.review_status,
-           t.seg_id, t.speaker, t.ts_start, t.ts_end, t.tone,
-           CASE WHEN a.cnt IS NULL THEN 0 ELSE 1 END AS has_active_flag,
-           COALESCE(a.cnt, 0)                        AS active_flag_count,
-           COALESCE(a.intents, '')                   AS active_flag_intents
+    SELECT s.s_id                                        AS session_id,
+           CASE WHEN {astro} = 'FLAGGED' THEN 1
+                WHEN {astro} = 'CLEAN'   THEN 0
+                ELSE NULL END                           AS astrotalk_flagged,
+           s.lang                                       AS language,
+           t.seg_id                                     AS turn_id,
+           t.speaker                                    AS speaker,
+           t.ts_start                                   AS timestamp,
+           COALESCE(a.texts, '')                        AS message_text,
+           CASE WHEN a.cnt IS NULL THEN 0 ELSE 1 END    AS has_active_flag,
+           COALESCE(a.cnt, 0)                           AS active_flag_count,
+           COALESCE(a.cats, '')                         AS active_flag_categories
     FROM audio_sessions s
     LEFT JOIN audio_segments t ON t.s_id = s.s_id
     LEFT JOIN agg a ON a.s_id = t.s_id AND a.seg_id = t.seg_id
@@ -387,13 +391,13 @@ def export_chat(out_path, flagged_only, parts, report_unlinked):
 
 
 def export_audio(out_path, flagged_only):
-    """Audio DB -> per-segment CSV, always a single file."""
+    """Audio DB -> per-segment CSV, always a single file. Same columns as chat."""
     conn = get_readonly_connection(AUDIO_DB_PATH)
     try:
         n, counts, paths = write_csv(
             conn, out_path,
             export_sql=build_audio_export_sql(flagged_only),
-            header=AUDIO_HEADER,
+            header=HEADER,
             count_sql=build_audio_count_sql(flagged_only),
             parts=1,
         )
