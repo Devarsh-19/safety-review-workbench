@@ -282,7 +282,8 @@ def apply_changes(conn, plan, conf_threshold, actor):
             lock_note = NOTE_LOCK_SINGLE if p["speakers"] == 1 else NOTE_LOCK_MULTI
             conn.execute(
                 """UPDATE audio_sessions
-                   SET review_status = 'LOCKED', locked_by = ?, locked_at = datetime('now')
+                   SET review_status = 'LOCKED', locked_by = ?, locked_at = datetime('now'),
+                       reviewed_at = datetime('now')
                    WHERE s_id = ?""",
                 (actor, s_id),
             )
