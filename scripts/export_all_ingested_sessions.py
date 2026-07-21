@@ -24,11 +24,19 @@ Output columns (one row per session):
     flag_categories       - active flag counts per category, e.g. {NSFW:3,CSAM:4}
     flag_sources          - distinct active flag sources (LLM/REGEX/MANUAL), ';'-joined
 
-Read-only — never modifies the database.
+Covers BOTH databases (one row per session in each):
+  chat  (store/astrotalk.db)     sessions / turns    / flags
+  audio (store/audio_review.db)  audio_sessions / audio_segments / audio_flags
+Use --db to run only one. reviewed_at is date-only and falls back to
+locked_at then submitted_at when the real reviewed_at is missing.
+
+Read-only — never modifies either database.
 
 Usage:
-  python scripts/export_all_ingested_sessions.py
-  python scripts/export_all_ingested_sessions.py --out C:/path/to/file.csv
+  python scripts/export_all_ingested_sessions.py                 # chat + audio
+  python scripts/export_all_ingested_sessions.py --db audio      # audio only
+  python scripts/export_all_ingested_sessions.py --out C:/path/to/chat.csv
+  python scripts/export_all_ingested_sessions.py --audio-out C:/path/to/audio.csv
 """
 
 import argparse
@@ -42,13 +50,26 @@ from dotenv import load_dotenv
 load_dotenv()
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from store.db import get_connection  # noqa: E402
+from store.db import get_connection, DB_PATH  # noqa: E402
+from store.audio_db import get_audio_connection, AUDIO_DB_PATH  # noqa: E402
 
 CSV_COLUMNS = [
     "session_id", "session_date", "session_type", "duration_minutes", "n_turns",
     "review_status", "verdict", "reviewed_by", "reviewed_at", "locked_by",
     "session_note",
     "astrotalk_flagged",
+    "is_flagged", "n_active_flags", "user_flag_count", "astrologer_flag_count",
+    "flag_categories", "flag_sources",
+]
+
+# Audio inventory — same shape mapped onto the audio schema. Audio has no
+# session_date/session_type; it carries lang + a real duration in seconds, and
+# its platform signal is astrotalk_verdict (CLEAN/FLAGGED) not astrotalk_flagged.
+AUDIO_CSV_COLUMNS = [
+    "s_id", "lang", "session_type", "duration_minutes", "n_segments",
+    "review_status", "verdict", "reviewed_by", "reviewed_at", "locked_by",
+    "session_note",
+    "astrotalk_verdict",
     "is_flagged", "n_active_flags", "user_flag_count", "astrologer_flag_count",
     "flag_categories", "flag_sources",
 ]
@@ -96,6 +117,50 @@ def _active_flag_summaries(conn, speaker_by_turn: dict) -> dict[str, dict]:
     return summaries
 
 
+def _active_audio_flag_summaries(conn, seg_speaker: dict, session_roles: dict) -> dict:
+    """Audio counterpart of _active_flag_summaries over audio_flags.
+
+    Active = amendment row, or original with no amendment; DISMISSED rows are
+    excluded (audio keeps them, unlike chat). category = intent, source = LLM/
+    MANUAL. Each active flag is bucketed by speaker role: its segment's raw
+    diarization label (seg_speaker[(s_id, seg_id)]) is mapped to USER/ASTROLOGER
+    via the session's speaker1_role/speaker2_role (session_roles[s_id][label]).
+    Flags on an unresolvable segment, or whose role is unassigned, fall into
+    neither bucket, so user_n + astro_n <= n.
+    """
+    rows = conn.execute(
+        """SELECT flag_id, parent_flag_id, s_id, seg_id, source, intent, status
+           FROM audio_flags"""
+    ).fetchall()
+
+    amended_parents = {r["parent_flag_id"] for r in rows if r["parent_flag_id"] is not None}
+
+    summaries: dict = {}
+    for r in rows:
+        is_active = (
+            r["parent_flag_id"] is not None
+            or r["flag_id"] not in amended_parents
+        )
+        if not is_active or (r["status"] or "") == "DISMISSED":
+            continue
+        s = summaries.setdefault(
+            r["s_id"],
+            {"n": 0, "sources": set(), "categories": {}, "user_n": 0, "astro_n": 0},
+        )
+        s["n"] += 1
+        if r["source"]:
+            s["sources"].add(r["source"])
+        cat = r["intent"] or "UNKNOWN"
+        s["categories"][cat] = s["categories"].get(cat, 0) + 1
+        label = seg_speaker.get((r["s_id"], r["seg_id"]))
+        role = session_roles.get(r["s_id"], {}).get(label)
+        if role == "USER":
+            s["user_n"] += 1
+        elif role == "ASTROLOGER":
+            s["astro_n"] += 1
+    return summaries
+
+
 def _format_categories(categories: dict[str, int]) -> str:
     """Render category counts as a compact dict string, e.g. {NSFW:3,CSAM:4}."""
     if not categories:
@@ -103,7 +168,7 @@ def _format_categories(categories: dict[str, int]) -> str:
     return "{" + ",".join(f"{k}:{v}" for k, v in sorted(categories.items())) + "}"
 
 
-def export(out_path: Path) -> None:
+def export_chat(out_path: Path) -> None:
     conn = get_connection()
 
     print("  Loading turn counts...")
@@ -171,24 +236,116 @@ def export(out_path: Path) -> None:
     print(f"  CSV written        : {out_path}")
 
 
+def export_audio(out_path: Path) -> None:
+    conn = get_audio_connection()
+
+    print("  Loading segment counts...")
+    n_segments_by_session = {
+        r["s_id"]: r["n"]
+        for r in conn.execute(
+            "SELECT s_id, COUNT(*) AS n FROM audio_segments GROUP BY s_id"
+        ).fetchall()
+    }
+
+    print("  Loading segment speakers...")
+    seg_speaker = {
+        (r["s_id"], r["seg_id"]): r["speaker"]
+        for r in conn.execute("SELECT s_id, seg_id, speaker FROM audio_segments").fetchall()
+    }
+
+    print("  Loading speaker roles...")
+    # Map each session's raw diarization labels to the reviewer-assigned role.
+    session_roles = {
+        r["s_id"]: {"SPEAKER_1": r["speaker1_role"], "SPEAKER_2": r["speaker2_role"]}
+        for r in conn.execute(
+            "SELECT s_id, speaker1_role, speaker2_role FROM audio_sessions"
+        ).fetchall()
+    }
+
+    print("  Loading active flags...")
+    flag_summary = _active_audio_flag_summaries(conn, seg_speaker, session_roles)
+
+    print("  Exporting audio sessions...")
+    n_sessions = 0
+    n_flagged = 0
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with out_path.open("w", newline="", encoding="utf-8") as fh:
+        writer = csv.DictWriter(fh, fieldnames=AUDIO_CSV_COLUMNS)
+        writer.writeheader()
+
+        for s in conn.execute(
+            """SELECT s_id, lang, duration_seconds, review_status,
+                      CASE WHEN overall_verdict = 'SEVERE' THEN 'FLAGGED'
+                           ELSE overall_verdict END AS verdict,
+                      CASE WHEN astrotalk_verdict = 'SEVERE' THEN 'FLAGGED'
+                           ELSE astrotalk_verdict END AS astrotalk_verdict,
+                      submitted_by, reviewer_id,
+                      DATE(COALESCE(reviewed_at, locked_at, submitted_at)) AS reviewed_at,
+                      locked_by, session_note
+               FROM audio_sessions ORDER BY s_id"""
+        ):
+            n_sessions += 1
+            fs = flag_summary.get(s["s_id"])
+            if fs:
+                n_flagged += 1
+            dur = s["duration_seconds"]
+            writer.writerow({
+                "s_id":                    s["s_id"],
+                "lang":                    s["lang"] or "",
+                "session_type":            "voice",
+                "duration_minutes":        round(dur / 60, 2) if dur else "",
+                "n_segments":              n_segments_by_session.get(s["s_id"], 0),
+                "review_status":           s["review_status"] or "",
+                "verdict":                 s["verdict"] or "",
+                "reviewed_by":             s["submitted_by"] or s["reviewer_id"] or "",
+                "reviewed_at":             s["reviewed_at"] or "",
+                "locked_by":               s["locked_by"] or "",
+                "session_note":            s["session_note"] or "",
+                "astrotalk_verdict":       s["astrotalk_verdict"] or "",
+                "is_flagged":              1 if fs else 0,
+                "n_active_flags":          fs["n"] if fs else 0,
+                "user_flag_count":         fs["user_n"] if fs else 0,
+                "astrologer_flag_count":   fs["astro_n"] if fs else 0,
+                "flag_categories":         _format_categories(fs["categories"]) if fs else "",
+                "flag_sources":            ";".join(sorted(fs["sources"])) if fs else "",
+            })
+
+    conn.close()
+    print(f"  Sessions exported  : {n_sessions}")
+    print(f"  Flagged (>=1 flag) : {n_flagged}")
+    print(f"  Clean (no flags)   : {n_sessions - n_flagged}")
+    print(f"  CSV written        : {out_path}")
+
+
 def main() -> None:
     p = argparse.ArgumentParser(
-        description="Export ALL ingested sessions (one row per session) with clean/flagged status"
+        description="Export ALL ingested sessions (one row per session) with clean/flagged "
+                    "status, for the chat and/or audio database."
     )
-    p.add_argument("--out", default=None, help="Output CSV path")
+    p.add_argument("--db", choices=("both", "chat", "audio"), default="both",
+                   help="Which database(s) to export (default: both).")
+    p.add_argument("--out", default=None, help="Chat output CSV path")
+    p.add_argument("--audio-out", default=None, help="Audio output CSV path")
     args = p.parse_args()
 
-    if args.out:
-        out_path = Path(args.out)
-    else:
-        stamp = datetime.now().strftime("%Y%m%d")
-        out_path = Path(__file__).resolve().parents[1] / "exports" / f"all_ingested_sessions_{stamp}.csv"
+    stamp = datetime.now().strftime("%Y%m%d")
+    exports_dir = Path(__file__).resolve().parents[1] / "exports"
 
-    print("=" * 60)
-    print("  Export ALL ingested sessions (clean vs flagged)")
-    print(f"  DB: {os.getenv('DB_PATH', 'store/results.db')}")
-    print("=" * 60)
-    export(out_path)
+    if args.db in ("both", "chat"):
+        out_path = Path(args.out) if args.out else exports_dir / f"all_ingested_sessions_{stamp}.csv"
+        print("=" * 60)
+        print("  Export ALL ingested CHAT sessions (clean vs flagged)")
+        print(f"  DB: {DB_PATH}")
+        print("=" * 60)
+        export_chat(out_path)
+
+    if args.db in ("both", "audio"):
+        out_path = Path(args.audio_out) if args.audio_out else exports_dir / f"all_ingested_audio_sessions_{stamp}.csv"
+        print("=" * 60)
+        print("  Export ALL ingested AUDIO sessions (clean vs flagged)")
+        print(f"  DB: {AUDIO_DB_PATH}")
+        print("=" * 60)
+        export_audio(out_path)
 
 
 if __name__ == "__main__":
