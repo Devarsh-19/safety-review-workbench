@@ -134,7 +134,8 @@ def export(out_path: Path) -> None:
         for s in conn.execute(
             """SELECT session_id, session_date, session_type, duration_minutes,
                       review_status, overall_verdict, submitted_by, reviewer_id,
-                      DATE(reviewed_at) AS reviewed_at, locked_by, session_note,
+                      DATE(COALESCE(reviewed_at, locked_at, submitted_at)) AS reviewed_at,
+                      locked_by, session_note,
                       astrotalk_flagged
                FROM sessions ORDER BY session_id"""
         ):

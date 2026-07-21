@@ -131,7 +131,8 @@ def build_export_sql(flagged_only: bool = False) -> str:
         GROUP BY session_id, turn_id
     )
     SELECT s.session_id, s.overall_verdict, s.review_status,
-           DATE(s.reviewed_at) AS reviewed_at, s.locked_by, s.astrotalk_flagged,
+           DATE(COALESCE(s.reviewed_at, s.locked_at, s.submitted_at)) AS reviewed_at,
+           s.locked_by, s.astrotalk_flagged,
            t.turn_id, t.speaker, t.is_automated, t.timestamp, t.message_text,
            CASE WHEN a.cnt IS NULL THEN 0 ELSE 1 END AS has_active_flag,
            COALESCE(a.cnt, 0)                        AS active_flag_count,
