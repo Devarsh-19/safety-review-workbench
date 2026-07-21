@@ -201,7 +201,11 @@ def build_audio_export_sql(flagged_only: bool = False) -> str:
     """Audio counterpart of build_export_sql: aggregate each segment's ACTIVE
     flags, then LEFT JOIN onto every segment so unflagged segments still appear.
     Active-flag rule matches store/audio_db.py: not DISMISSED and not an amended
-    original (an original superseded by an amendment row does not count)."""
+    original (an original superseded by an amendment row does not count).
+
+    Driven FROM audio_sessions with a LEFT JOIN to audio_segments, so a session
+    that has NO segments still emits exactly one row (blank segment fields,
+    has_active_flag = 0) instead of vanishing from the export."""
     where = _AUDIO_FLAGGED_WHERE if flagged_only else ""
     overall = _AUDIO_VERDICT.format(c="s.overall_verdict")
     astro = _AUDIO_VERDICT.format(c="s.astrotalk_verdict")
@@ -228,8 +232,8 @@ def build_audio_export_sql(flagged_only: bool = False) -> str:
            CASE WHEN a.cnt IS NULL THEN 0 ELSE 1 END AS has_active_flag,
            COALESCE(a.cnt, 0)                        AS active_flag_count,
            COALESCE(a.intents, '')                   AS active_flag_intents
-    FROM audio_segments t
-    JOIN audio_sessions s ON s.s_id = t.s_id
+    FROM audio_sessions s
+    LEFT JOIN audio_segments t ON t.s_id = s.s_id
     LEFT JOIN agg a ON a.s_id = t.s_id AND a.seg_id = t.seg_id
     {where}
     ORDER BY s.s_id, t.seg_id
@@ -237,14 +241,18 @@ def build_audio_export_sql(flagged_only: bool = False) -> str:
 
 
 def build_audio_count_sql(flagged_only: bool = False) -> str:
-    """Segment-row count for the summary line."""
-    if not flagged_only:
-        return "SELECT COUNT(*) FROM audio_segments"
+    """Row count for the summary line. Matches the export: one row per segment,
+    plus one row for every session that has no segments at all."""
+    where = f" {_AUDIO_FLAGGED_WHERE}" if flagged_only else ""
+    seg_join = "JOIN audio_sessions s ON s.s_id = t.s_id" if flagged_only else ""
     return f"""
-        SELECT COUNT(*)
-        FROM audio_segments t
-        JOIN audio_sessions s ON s.s_id = t.s_id
-        {_AUDIO_FLAGGED_WHERE}
+        SELECT (
+            SELECT COUNT(*) FROM audio_segments t {seg_join}{where}
+        ) + (
+            SELECT COUNT(*) FROM audio_sessions s
+            WHERE NOT EXISTS (SELECT 1 FROM audio_segments g WHERE g.s_id = s.s_id){
+                (" AND " + _AUDIO_FLAGGED_WHERE.replace("WHERE ", "")) if flagged_only else ""}
+        )
     """
 
 
