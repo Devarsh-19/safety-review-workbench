@@ -193,8 +193,15 @@ def build_session_count_sql(flagged_only: bool = False) -> str:
 #   astrotalk_flagged <- audio_sessions.astrotalk_verdict FLAGGED/CLEAN -> 1/0.
 #   message_text <- audio_flags.transcript for that segment. Audio segments carry
 #     NO transcript of their own (only speaker/tone/timing); the spoken text lives
-#     only on flags, so an unflagged segment necessarily has a blank message_text.
+#     only on flags. A segment with no flag therefore has no transcript anywhere
+#     in the DB, so its message_text is the explicit _AUDIO_NO_TEXT marker below
+#     (not a blank cell, which reads as an export bug).
 #   active_flag_categories <- audio_flags.intent (audio's category analogue).
+
+# Shown for a real audio segment that has no flag transcript — the DB stores no
+# per-segment transcript, so there is genuinely no text to export for it. A
+# distinct marker (rather than "") makes clear the cell is empty by data, not bug.
+_AUDIO_NO_TEXT = "[no transcript]"
 
 # Normalise the legacy SEVERE verdict to FLAGGED (store/audio_db.py parity).
 _AUDIO_VERDICT = "CASE WHEN {c} = 'SEVERE' THEN 'FLAGGED' ELSE {c} END"
@@ -215,8 +222,9 @@ def build_audio_export_sql(flagged_only: bool = False) -> str:
     that has NO segments still emits exactly one row (blank segment fields,
     has_active_flag = 0) instead of vanishing from the export.
 
-    message_text is the segment's active-flag transcript(s): audio_segments store
-    no text of their own, so an unflagged segment has a blank message_text."""
+    message_text is the segment's active-flag transcript(s); audio_segments store
+    no text of their own, so a segment with no flag shows the _AUDIO_NO_TEXT marker
+    (blank only for the placeholder row of a session that has no segments)."""
     where = _AUDIO_FLAGGED_WHERE if flagged_only else ""
     astro = _AUDIO_VERDICT.format(c="s.astrotalk_verdict")
     return f"""
@@ -245,7 +253,9 @@ def build_audio_export_sql(flagged_only: bool = False) -> str:
            t.seg_id                                     AS turn_id,
            t.speaker                                    AS speaker,
            t.ts_start                                   AS timestamp,
-           COALESCE(a.texts, '')                        AS message_text,
+           CASE WHEN a.texts IS NOT NULL THEN a.texts
+                WHEN t.seg_id IS NOT NULL THEN '{_AUDIO_NO_TEXT}'
+                ELSE '' END                             AS message_text,
            CASE WHEN a.cnt IS NULL THEN 0 ELSE 1 END    AS has_active_flag,
            COALESCE(a.cnt, 0)                           AS active_flag_count,
            COALESCE(a.cats, '')                         AS active_flag_categories
