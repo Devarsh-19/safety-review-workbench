@@ -5,6 +5,7 @@ import TopBar from './TopBar';
 import Footer from './Footer';
 import StatusBadge from './StatusBadge';
 import VerdictBadge from './VerdictBadge';
+import SeverityBadge from './SeverityBadge';
 import LoadingSpinner from './LoadingSpinner';
 import HasVideoBadge, { getHasVideoState } from './HasVideoBadge';
 import {
@@ -722,6 +723,7 @@ export default function AudioSessionViewer({ sId, sessionList, reviewerName, rev
                 Session {session.s_id}
               </span>
               <StatusBadge status={session.review_status} />
+              <SeverityBadge severity={session.astrotalk_severity} labeled />
               <HasVideoBadge value={session.has_video} />
               {/* GT verdict badge — mirrors chat SessionViewer's AstroTalk badge */}
               {(() => {

@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { C, MONO } from '../tokens';
 import VerdictBadge from './VerdictBadge';
+import SeverityBadge from './SeverityBadge';
 import {
   getSessionDetail, getSessionFlags, submitReview,
   manualFlag, saveSessionNote,
@@ -736,6 +737,7 @@ export default function SessionViewer({ sessionId, sessionList, reviewerName, re
             {isLocked && <span style={{ marginRight: 4 }}>🔒</span>}{sessionId}
           </span>
           {!loading && <VerdictBadge verdict={session.overall_verdict} />}
+          {!loading && <SeverityBadge severity={session.astrotalk_severity} labeled />}
           {!loading && (
             <span style={{
               fontSize: 11, fontFamily: MONO, padding: '2px 8px', borderRadius: 3,

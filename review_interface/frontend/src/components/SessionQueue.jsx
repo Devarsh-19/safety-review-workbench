@@ -3,6 +3,7 @@ import { C, MONO } from '../tokens';
 import TopBar from './TopBar';
 import Footer from './Footer';
 import VerdictBadge from './VerdictBadge';
+import SeverityBadge from './SeverityBadge';
 import StatusBadge from './StatusBadge';
 import LoadingSpinner from './LoadingSpinner';
 import { getSessions, getStats, submitReview, exportCsv, getViolationStats, lockAllSubmittedSessions } from '../api';
@@ -139,8 +140,8 @@ export default function SessionQueue({ reviewerName, reviewerRole, onSelectSessi
 
   // ── Dynamic column list — L2 gets an 'Assigned To' column after Session ID
   const COLS = reviewerRole === 'L2'
-    ? ['Session ID', 'Assigned To', 'Verdict', 'AstroTalk', 'Flags', 'LLM Flags', 'Manual Flags', 'Language', 'Type', 'Duration', 'Turns', 'Status', 'Reviewer', 'Action']
-    : ['Session ID', 'Verdict', 'AstroTalk', 'Flags', 'LLM Flags', 'Manual Flags', 'Language', 'Type', 'Duration', 'Turns', 'Status', 'Reviewer', 'Action'];
+    ? ['Session ID', 'Assigned To', 'Verdict', 'Severity', 'AstroTalk', 'Flags', 'LLM Flags', 'Manual Flags', 'Language', 'Type', 'Duration', 'Turns', 'Status', 'Reviewer', 'Action']
+    : ['Session ID', 'Verdict', 'Severity', 'AstroTalk', 'Flags', 'LLM Flags', 'Manual Flags', 'Language', 'Type', 'Duration', 'Turns', 'Status', 'Reviewer', 'Action'];
 
   // ── Data fetching ──────────────────────────────────────────────────────
 
@@ -703,6 +704,7 @@ export default function SessionQueue({ reviewerName, reviewerRole, onSelectSessi
                   </th>
                   {reviewerRole === 'L2' && <th style={{ padding: '4px 8px' }} />/* Assigned To */}
                   <th style={{ padding: '4px 8px' }} />{/* Verdict */}
+                  <th style={{ padding: '4px 8px' }} />{/* Severity */}
                   <th style={{ padding: '4px 8px', fontWeight: 'normal' }}>{/* AstroTalk */}
                     <select value={colFilterAstro} onChange={(e) => setColFilterAstro(e.target.value)}
                       style={filterInputSt('astro')}>
@@ -787,6 +789,9 @@ export default function SessionQueue({ reviewerName, reviewerRole, onSelectSessi
                       )}
 
                       <td style={td(isLast)}><VerdictBadge verdict={s.overall_verdict} /></td>
+
+                      {/* Session severity (Severity Criteria) */}
+                      <td style={td(isLast)}><SeverityBadge severity={s.astrotalk_severity} /></td>
 
                       {/* AstroTalk's own flag from the input CSV */}
                       <td style={td(isLast)}>
