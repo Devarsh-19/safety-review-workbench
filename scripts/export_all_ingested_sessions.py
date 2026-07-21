@@ -65,14 +65,43 @@ CSV_COLUMNS = [
 ]
 
 
+_INGEST_CSV_DEFAULT = Path(__file__).resolve().parents[1] / "data" / "raw" / "Chat_data.csv"
+
+
 def _language(code) -> str:
-    """Human-readable language taken from the INPUT language_code (1-24) mapped
-    via LANGUAGE_MAP (English/Hindi/...); '' when the input has no code. The
-    langdetect-derived language_detected is intentionally not used."""
+    """Human-readable language for a 1-24 code mapped via LANGUAGE_MAP
+    (English/Hindi/...); '' when there is no code. The langdetect-derived
+    language_detected is intentionally not used."""
     try:
         return LANGUAGE_MAP.get(int(code), "") if code not in (None, "") else ""
     except (TypeError, ValueError):
         return ""
+
+
+def _load_ingest_languages(csv_path) -> dict:
+    """session_id -> primary language CODE from the raw ingest CSV (the source of
+    truth for a session's language). The language column holds AstroTalk numeric
+    codes (e.g. '1' or a multilingual '1,2,5'); the primary (first) code is kept,
+    matching DataLoader._parse_language. Empty dict if the file is absent — the
+    export then falls back to the DB's own language_code."""
+    result: dict = {}
+    path = Path(csv_path) if csv_path else None
+    if not path or not path.exists():
+        return result
+    with path.open(encoding="utf-8", errors="replace", newline="") as fh:
+        reader = csv.DictReader(fh)
+        cols = reader.fieldnames or []
+        lang_col = next((c for c in ("language", "language_code", "language_detected") if c in cols), None)
+        if "session_id" not in cols or not lang_col:
+            return result
+        for row in reader:
+            sid = row.get("session_id")
+            if not sid or sid in result:
+                continue
+            val = (row.get(lang_col) or "").strip()
+            if val:
+                result[sid] = val.split(",")[0].strip()  # primary code
+    return result
 
 # Audio inventory — same shape mapped onto the audio schema. Audio has no
 # session_date/session_type; it carries lang + a real duration in seconds, and
@@ -180,8 +209,13 @@ def _format_categories(categories: dict[str, int]) -> str:
     return "{" + ",".join(f"{k}:{v}" for k, v in sorted(categories.items())) + "}"
 
 
-def export_chat(out_path: Path) -> None:
+def export_chat(out_path: Path, ingest_csv=None) -> None:
     conn = get_connection()
+
+    print("  Loading ingest languages...")
+    ingest_lang = _load_ingest_languages(ingest_csv)
+    print(f"    {len(ingest_lang)} session language(s) from ingest CSV"
+          + (f": {ingest_csv}" if ingest_lang else " (none — using DB language_code only)"))
 
     print("  Loading turn counts...")
     n_turns_by_session = {
@@ -225,7 +259,7 @@ def export_chat(out_path: Path) -> None:
                 "session_id":              s["session_id"],
                 "session_date":            s["session_date"],
                 "session_type":            s["session_type"],
-                "language":                _language(s["language_code"]),
+                "language":                _language(ingest_lang.get(s["session_id"]) or s["language_code"]),
                 "duration_minutes":        s["duration_minutes"],
                 "n_turns":                 n_turns_by_session.get(s["session_id"], 0),
                 "review_status":           s["review_status"] or "",
@@ -340,6 +374,9 @@ def main() -> None:
                    help="Which database(s) to export (default: both).")
     p.add_argument("--out", default=None, help="Chat output CSV path")
     p.add_argument("--audio-out", default=None, help="Audio output CSV path")
+    p.add_argument("--ingest-csv", default=str(_INGEST_CSV_DEFAULT),
+                   help="Raw ingest CSV used as the per-session language reference "
+                        f"(chat; default: {_INGEST_CSV_DEFAULT}).")
     args = p.parse_args()
 
     stamp = datetime.now().strftime("%Y%m%d")
@@ -351,7 +388,7 @@ def main() -> None:
         print("  Export ALL ingested CHAT sessions (clean vs flagged)")
         print(f"  DB: {DB_PATH}")
         print("=" * 60)
-        export_chat(out_path)
+        export_chat(out_path, ingest_csv=args.ingest_csv)
 
     if args.db in ("both", "audio"):
         out_path = Path(args.audio_out) if args.audio_out else exports_dir / f"all_ingested_audio_sessions_{stamp}.csv"
