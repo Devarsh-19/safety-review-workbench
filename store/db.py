@@ -167,9 +167,6 @@ _SORT_COLUMNS = {
     "manual_flag_count": "manual_flag_count",
 }
 
-# Default language visibility (matches the previous client-side allowlist).
-_ALLOWED_LANGUAGES = ("english", "hindi", "hinglish")
-
 _SESSION_FROM = "FROM sessions s"
 
 _VISIBLE_FLAG_SQL = "(f.status IS NULL OR f.status != 'DISMISSED')"
@@ -245,12 +242,10 @@ def fetch_sessions_page(
 
     if language:
         where.append("LOWER(s.language_detected) LIKE ?"); params.append(f"%{language.lower()}%")
-    else:
-        # Default allowlist (unknown language is shown, not hidden).
-        where.append(
-            "(s.language_detected IS NULL OR LOWER(s.language_detected) IN (?,?,?))"
-        )
-        params.extend(_ALLOWED_LANGUAGES)
+    # No default language allowlist: sessions of ALL languages display. Previously
+    # only english/hindi/hinglish (plus unknown) were shown, so other-language
+    # sessions (e.g. marathi/tamil) were hidden from the dashboard unless the user
+    # explicitly typed that language into the filter.
 
     if session_type:
         where.append("s.session_type = ?"); params.append(session_type)

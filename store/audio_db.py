@@ -226,14 +226,14 @@ def fetch_audio_sessions_page(
         elif reviewer_role == "L2":
             where.append("s.review_status = 'SUBMITTED_FOR_REVIEW'")
 
-    # L1 reviewers (including "Multilingual", now a plain assignee) are scoped to
-    # the sessions assigned to them. Regional-language sessions are routed to
-    # "Multilingual" at assignment time, so no language-based filtering is needed.
-    # "Locked" and "Astrotalk Review" are read-only personas with their own
-    # visibility rules above — they are not assignees, so skip the assignee scope.
-    if reviewer_role == "L1" and reviewer_name and reviewer_name not in ("Locked", "Astrotalk Review"):
-        where.append("s.assigned_to = ?"); params.append(reviewer_name)
-    elif assigned_to:
+    # L1 reviewers see sessions of ALL languages: the dashboard is no longer
+    # scoped to the reviewer's own assignments. Regional-language sessions were
+    # previously routed to the "Multilingual" assignee and therefore hidden from
+    # everyone else's dashboard; dropping the per-reviewer assignee scope makes
+    # every language display for every L1 reviewer. Status-based visibility above
+    # still applies (L1 sees only reviewable sessions, not others' submitted/locked).
+    # The explicit "Assigned To" filter (L2 dropdown) is still honoured below.
+    if assigned_to:
         where.append("s.assigned_to LIKE ?"); params.append(f"%{assigned_to}%")
 
     if search:

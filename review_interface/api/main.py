@@ -1126,15 +1126,12 @@ def audio_stats(
     reviewer_name: Optional[str] = None,
     reviewer_role: Optional[str] = None,
 ):
-    # L1 (incl. "Multilingual", now a plain assignee): scope all counts to the
-    # sessions assigned to this reviewer (chat parity). "Astrotalk Review" is a
-    # read-only L1 client persona, not an assignee, so it is not scoped here.
-    if reviewer_role == "L1" and reviewer_name and reviewer_name != "Astrotalk Review":
-        scope  = " WHERE assigned_to = ?"
-        params = (reviewer_name,)
-    else:
-        scope  = ""
-        params = ()
+    # Stats are unscoped so the strip counts sessions of ALL languages, matching
+    # the queue: L1 dashboards no longer hide other-language sessions routed to
+    # the "Multilingual" assignee. (Previously L1 counts were scoped to
+    # assigned_to = reviewer_name.)
+    scope  = ""
+    params = ()
 
     try:
         with get_audio_connection() as conn:
