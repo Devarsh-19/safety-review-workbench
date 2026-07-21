@@ -52,9 +52,11 @@ load_dotenv()
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from store.db import get_connection, DB_PATH  # noqa: E402
 from store.audio_db import get_audio_connection, AUDIO_DB_PATH  # noqa: E402
+from engine.language_detector import LANGUAGE_MAP  # noqa: E402
 
 CSV_COLUMNS = [
-    "session_id", "session_date", "session_type", "duration_minutes", "n_turns",
+    "session_id", "session_date", "session_type", "language", "duration_minutes",
+    "n_turns",
     "review_status", "verdict", "reviewed_by", "reviewed_at", "locked_by",
     "session_note",
     "astrotalk_flagged",
@@ -62,11 +64,22 @@ CSV_COLUMNS = [
     "flag_categories", "flag_sources",
 ]
 
+
+def _language(detected, code) -> str:
+    """Human-readable language: the detected label if present, else the 1-24
+    language_code mapped via LANGUAGE_MAP (English/Hindi/...); '' if neither."""
+    if detected:
+        return detected
+    try:
+        return LANGUAGE_MAP.get(int(code), "") if code not in (None, "") else ""
+    except (TypeError, ValueError):
+        return ""
+
 # Audio inventory — same shape mapped onto the audio schema. Audio has no
 # session_date/session_type; it carries lang + a real duration in seconds, and
 # its platform signal is astrotalk_verdict (CLEAN/FLAGGED) not astrotalk_flagged.
 AUDIO_CSV_COLUMNS = [
-    "s_id", "lang", "session_type", "duration_minutes", "n_segments",
+    "s_id", "language", "session_type", "duration_minutes", "n_segments",
     "review_status", "verdict", "reviewed_by", "reviewed_at", "locked_by",
     "session_note",
     "astrotalk_verdict",
@@ -197,7 +210,8 @@ def export_chat(out_path: Path) -> None:
         writer.writeheader()
 
         for s in conn.execute(
-            """SELECT session_id, session_date, session_type, duration_minutes,
+            """SELECT session_id, session_date, session_type,
+                      language_detected, language_code, duration_minutes,
                       review_status, overall_verdict, submitted_by, reviewer_id,
                       DATE(COALESCE(reviewed_at, locked_at, submitted_at)) AS reviewed_at,
                       locked_by, session_note,
@@ -212,6 +226,7 @@ def export_chat(out_path: Path) -> None:
                 "session_id":              s["session_id"],
                 "session_date":            s["session_date"],
                 "session_type":            s["session_type"],
+                "language":                _language(s["language_detected"], s["language_code"]),
                 "duration_minutes":        s["duration_minutes"],
                 "n_turns":                 n_turns_by_session.get(s["session_id"], 0),
                 "review_status":           s["review_status"] or "",
@@ -291,7 +306,7 @@ def export_audio(out_path: Path) -> None:
             dur = s["duration_seconds"]
             writer.writerow({
                 "s_id":                    s["s_id"],
-                "lang":                    s["lang"] or "",
+                "language":                s["lang"] or "",
                 "session_type":            "voice",
                 "duration_minutes":        round(dur / 60, 2) if dur else "",
                 "n_segments":              n_segments_by_session.get(s["s_id"], 0),
