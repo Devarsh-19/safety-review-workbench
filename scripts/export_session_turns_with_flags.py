@@ -66,6 +66,15 @@ load_dotenv()
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from store.db import DB_PATH  # noqa: E402
 from store.audio_db import AUDIO_DB_PATH  # noqa: E402
+from engine.language_detector import LANGUAGE_MAP  # noqa: E402
+
+# Chat language taken from the INPUT language_code (1-24) mapped via LANGUAGE_MAP
+# (English/Hindi/...). Built as SQL so the per-turn cursor still streams straight
+# to CSV. Names contain no quotes. The langdetect-derived language_detected is
+# intentionally not used.
+_LANG_EXPR = "CASE CAST(s.language_code AS TEXT) " + "".join(
+    f"WHEN '{code}' THEN '{name}' " for code, name in LANGUAGE_MAP.items()
+) + "ELSE '' END"
 
 
 def get_readonly_connection(db_path: str = DB_PATH) -> sqlite3.Connection:
@@ -93,7 +102,7 @@ def get_readonly_connection(db_path: str = DB_PATH) -> sqlite3.Connection:
 HEADER = [
     # session-level context (repeated on every turn of the session)
     "session_id", "overall_verdict", "review_status", "reviewed_at", "locked_by",
-    "astrotalk_flagged",
+    "astrotalk_flagged", "language",
     # turn-level
     "turn_id", "speaker", "is_automated", "timestamp", "message_text",
     # flag summary for THIS turn (active flags only)
@@ -132,7 +141,7 @@ def build_export_sql(flagged_only: bool = False) -> str:
     )
     SELECT s.session_id, s.overall_verdict, s.review_status,
            DATE(COALESCE(s.reviewed_at, s.locked_at, s.submitted_at)) AS reviewed_at,
-           s.locked_by, s.astrotalk_flagged,
+           s.locked_by, s.astrotalk_flagged, {_LANG_EXPR} AS language,
            t.turn_id, t.speaker, t.is_automated, t.timestamp, t.message_text,
            CASE WHEN a.cnt IS NULL THEN 0 ELSE 1 END AS has_active_flag,
            COALESCE(a.cnt, 0)                        AS active_flag_count,

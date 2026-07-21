@@ -65,11 +65,10 @@ CSV_COLUMNS = [
 ]
 
 
-def _language(detected, code) -> str:
-    """Human-readable language: the detected label if present, else the 1-24
-    language_code mapped via LANGUAGE_MAP (English/Hindi/...); '' if neither."""
-    if detected:
-        return detected
+def _language(code) -> str:
+    """Human-readable language taken from the INPUT language_code (1-24) mapped
+    via LANGUAGE_MAP (English/Hindi/...); '' when the input has no code. The
+    langdetect-derived language_detected is intentionally not used."""
     try:
         return LANGUAGE_MAP.get(int(code), "") if code not in (None, "") else ""
     except (TypeError, ValueError):
@@ -211,7 +210,7 @@ def export_chat(out_path: Path) -> None:
 
         for s in conn.execute(
             """SELECT session_id, session_date, session_type,
-                      language_detected, language_code, duration_minutes,
+                      language_code, duration_minutes,
                       review_status, overall_verdict, submitted_by, reviewer_id,
                       DATE(COALESCE(reviewed_at, locked_at, submitted_at)) AS reviewed_at,
                       locked_by, session_note,
@@ -226,7 +225,7 @@ def export_chat(out_path: Path) -> None:
                 "session_id":              s["session_id"],
                 "session_date":            s["session_date"],
                 "session_type":            s["session_type"],
-                "language":                _language(s["language_detected"], s["language_code"]),
+                "language":                _language(s["language_code"]),
                 "duration_minutes":        s["duration_minutes"],
                 "n_turns":                 n_turns_by_session.get(s["session_id"], 0),
                 "review_status":           s["review_status"] or "",
