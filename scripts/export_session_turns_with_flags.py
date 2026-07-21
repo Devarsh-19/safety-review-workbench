@@ -68,13 +68,14 @@ from store.db import DB_PATH  # noqa: E402
 from store.audio_db import AUDIO_DB_PATH  # noqa: E402
 from engine.language_detector import LANGUAGE_MAP  # noqa: E402
 
-# Chat language taken from the INPUT language_code (1-24) mapped via LANGUAGE_MAP
-# (English/Hindi/...). Built as SQL so the per-turn cursor still streams straight
-# to CSV. Names contain no quotes. The langdetect-derived language_detected is
-# intentionally not used.
-_LANG_EXPR = "CASE CAST(s.language_code AS TEXT) " + "".join(
+# Chat language shown to match the UI: language_detected first (the column the
+# review UI displays), falling back to the input language_code (1-24) mapped via
+# LANGUAGE_MAP (English/Hindi/...). Built as SQL so the per-turn cursor still
+# streams straight to CSV. Names contain no quotes.
+_LANG_CASE = "CASE CAST(s.language_code AS TEXT) " + "".join(
     f"WHEN '{code}' THEN '{name}' " for code, name in LANGUAGE_MAP.items()
 ) + "ELSE '' END"
+_LANG_EXPR = f"COALESCE(NULLIF(s.language_detected, ''), {_LANG_CASE})"
 
 
 def get_readonly_connection(db_path: str = DB_PATH) -> sqlite3.Connection:

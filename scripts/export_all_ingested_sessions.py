@@ -70,8 +70,8 @@ _INGEST_CSV_DEFAULT = Path(__file__).resolve().parents[1] / "data" / "raw" / "Ch
 
 def _language(code) -> str:
     """Human-readable language for a 1-24 code mapped via LANGUAGE_MAP
-    (English/Hindi/...); '' when there is no code. The langdetect-derived
-    language_detected is intentionally not used."""
+    (English/Hindi/...); '' when there is no code. Used as a fallback after the
+    UI-facing language_detected column."""
     try:
         return LANGUAGE_MAP.get(int(code), "") if code not in (None, "") else ""
     except (TypeError, ValueError):
@@ -244,7 +244,7 @@ def export_chat(out_path: Path, ingest_csv=None) -> None:
 
         for s in conn.execute(
             """SELECT session_id, session_date, session_type,
-                      language_code, duration_minutes,
+                      language_detected, language_code, duration_minutes,
                       review_status, overall_verdict, submitted_by, reviewer_id,
                       DATE(COALESCE(reviewed_at, locked_at, submitted_at)) AS reviewed_at,
                       locked_by, session_note,
@@ -259,7 +259,8 @@ def export_chat(out_path: Path, ingest_csv=None) -> None:
                 "session_id":              s["session_id"],
                 "session_date":            s["session_date"],
                 "session_type":            s["session_type"],
-                "language":                _language(ingest_lang.get(s["session_id"]) or s["language_code"]),
+                "language":                (s["language_detected"]
+                                            or _language(ingest_lang.get(s["session_id"]) or s["language_code"])),
                 "duration_minutes":        s["duration_minutes"],
                 "n_turns":                 n_turns_by_session.get(s["session_id"], 0),
                 "review_status":           s["review_status"] or "",
