@@ -42,6 +42,7 @@ Usage:
 import argparse
 import csv
 import os
+import re
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -202,6 +203,32 @@ def _active_audio_flag_summaries(conn, seg_speaker: dict, session_roles: dict) -
     return summaries
 
 
+def _speaker_num(label) -> int:
+    """Numeric part of a diarization label, matching the frontend's speakerNum
+    (SPEAKER_00 before SPEAKER_01). Labels with no digits sort last."""
+    m = re.search(r"\d+", str(label))
+    return int(m.group()) if m else 2**53
+
+
+def _role_by_label(labels, speaker1_role, speaker2_role) -> dict:
+    """Order distinct labels like the UI (numeric part, then string) and map the
+    first two to speaker1_role / speaker2_role. Extra speakers get no role.
+
+    This is why the export must NOT hardcode 'SPEAKER_1'/'SPEAKER_2': real
+    diarization emits 'SPEAKER_00'/'SPEAKER_01', so the role must be resolved by
+    label ORDER, not by a fixed label string."""
+    ordered = sorted(set(labels), key=lambda l: (_speaker_num(l), str(l)))
+    role_map = {}
+    for idx, label in enumerate(ordered):
+        if idx == 0:
+            role_map[label] = speaker1_role
+        elif idx == 1:
+            role_map[label] = speaker2_role
+        else:
+            role_map[label] = None
+    return role_map
+
+
 def _format_categories(categories: dict[str, int]) -> str:
     """Render category counts as a compact dict string, e.g. {NSFW:3,CSAM:4}."""
     if not categories:
@@ -297,15 +324,22 @@ def export_audio(out_path: Path) -> None:
     }
 
     print("  Loading segment speakers...")
-    seg_speaker = {
-        (r["s_id"], r["seg_id"]): r["speaker"]
-        for r in conn.execute("SELECT s_id, seg_id, speaker FROM audio_segments").fetchall()
-    }
+    seg_speaker = {}
+    labels_by_sid: dict = {}
+    for r in conn.execute("SELECT s_id, seg_id, speaker FROM audio_segments").fetchall():
+        seg_speaker[(r["s_id"], r["seg_id"])] = r["speaker"]
+        if r["speaker"]:
+            labels_by_sid.setdefault(r["s_id"], []).append(r["speaker"])
 
     print("  Loading speaker roles...")
-    # Map each session's raw diarization labels to the reviewer-assigned role.
+    # Map each session's raw diarization labels to the reviewer-assigned role by
+    # LABEL ORDER (first distinct label -> speaker1_role, second -> speaker2_role),
+    # matching the UI and violation_breakdown_audio. Hardcoding 'SPEAKER_1'/
+    # 'SPEAKER_2' silently zeroed the buckets on real 'SPEAKER_00'/'SPEAKER_01' data.
     session_roles = {
-        r["s_id"]: {"SPEAKER_1": r["speaker1_role"], "SPEAKER_2": r["speaker2_role"]}
+        r["s_id"]: _role_by_label(
+            labels_by_sid.get(r["s_id"], []), r["speaker1_role"], r["speaker2_role"]
+        )
         for r in conn.execute(
             "SELECT s_id, speaker1_role, speaker2_role FROM audio_sessions"
         ).fetchall()
