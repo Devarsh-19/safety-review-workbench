@@ -1,21 +1,25 @@
 """
 dismiss_or_confirm_by_tone_conf_audio.py
 
-For the audio review database (store/audio_review.db): process PENDING audio
-sessions by applying the following cascading rules to each active flag:
+For the audio review database (store/audio_review.db): process ALL PENDING
+audio sessions in a single pass:
 
-  1. DISMISS: any flag with confidence <= 0.90, regardless of tone.
-     (Both neutral/professional/calm-toned AND other-toned low-confidence flags
-      are dismissed — they are all considered unreliable at this threshold.)
+  Phase 1 — Flag processing (sessions with unactioned flags):
+    1. DISMISS: any flag with confidence <= 0.90, regardless of tone.
+    2. CONFIRM: all remaining active flags (conf > 0.90).
 
-  2. CONFIRM: all remaining active flags (i.e. conf > 0.90).
+  Phase 2 — Already-actioned sessions:
+    Sessions whose flags are ALL already CONFIRMED or DISMISSED (actioned
+    before this script ran) are submitted + locked as-is.
 
-After processing every flag in a session:
+  Phase 3 — CLEAN sessions (no active flags):
+    Sessions with no flags at all (or all dismissed) are submitted + locked.
+
+After processing every session:
   - Recompute the session verdict.
   - If the session's audio_segments contain exactly ONE distinct speaker,
-    set speaker1_role = 'USER' and LOCK the session.
-  - If the session has > 1 distinct speaker, LOCK the session without changing
-    speaker roles (roles remain as-is or NULL).
+    set speaker1_role = 'USER'.
+  - Submit for L2 review (SUBMITTED_FOR_REVIEW) then LOCK.
 
 "Active flag" = the amendment row if a flag was edited, else the original;
 DISMISSED rows and amended originals are ignored.
@@ -58,6 +62,8 @@ SAMPLE_LIMIT = 40
 
 NOTE_DISMISS = "Auto-dismiss: conf <= %.2f (low confidence)"
 NOTE_CONFIRM = "Auto-confirm: conf > %.2f"
+NOTE_SUBMIT = "Auto-submit: all flags actioned, submitted for L2 review"
+NOTE_SUBMIT_CLEAN = "Auto-submit: CLEAN session, no active flags"
 NOTE_LOCK_SINGLE = "Auto-lock: single-speaker session, speaker1 set to USER"
 NOTE_LOCK_MULTI = "Auto-lock: all flags actioned"
 
@@ -125,7 +131,12 @@ def fetch_speaker_counts(conn):
 
 def build_plan(conn, statuses, conf_threshold):
     """For each qualifying session, determine which flags to dismiss/confirm
-    and whether to lock + set speaker roles.
+    and whether to submit + lock + set speaker roles.
+
+    Covers three categories:
+      1. Sessions with unactioned flags → dismiss/confirm them.
+      2. Sessions with all flags already actioned → submit + lock only.
+      3. CLEAN sessions with no active flags → submit + lock only.
 
     Returns a dict {s_id: plan} where plan has:
       dismiss_ids  list[int]  — flag_ids to dismiss (conf <= threshold or NULL)
@@ -133,6 +144,7 @@ def build_plan(conn, statuses, conf_threshold):
       speakers     int        — distinct speakers in session's segments
       set_role     bool       — whether to set speaker1_role = USER
       lock         bool       — whether to lock the session
+      category     str        — 'FLAG_PROCESS' | 'ALREADY_ACTIONED' | 'CLEAN'
       review_status str       — current review_status
     """
     rows_by_sid = defaultdict(list)
@@ -142,35 +154,65 @@ def build_plan(conn, statuses, conf_threshold):
     speaker_counts = fetch_speaker_counts(conn)
     plan = {}
 
+    # --- Track which session IDs have flags (to find CLEAN ones later) ---
+    sessions_with_flags = set(rows_by_sid.keys())
+
     for s_id, rows in rows_by_sid.items():
         active = [
             r for r in active_audio_flag_rows(rows)
             if (r["status"] or "") != "DISMISSED"
         ]
+
+        nspk = speaker_counts.get(s_id, 0)
+        review_status = rows[0]["review_status"] or "-"
+
         if not active:
-            continue  # no active flags — skip
+            # No active flags left (all dismissed) → treat as CLEAN
+            sp1 = (rows[0]["speaker1_role"] or "").strip().upper()
+            set_role = nspk == 1 and sp1 != USER_ROLE
+            plan[s_id] = {
+                "dismiss_ids": [],
+                "confirm_ids": [],
+                "speakers": nspk,
+                "set_role": set_role,
+                "lock": True,
+                "category": "CLEAN",
+                "review_status": review_status,
+                "total_active": 0,
+            }
+            continue
 
-        # Skip flags already fully actioned (CONFIRMED or DISMISSED)
         unactioned = [r for r in active if (r["status"] or "") not in ("CONFIRMED", "DISMISSED")]
-        if not unactioned:
-            continue  # everything already actioned — skip
 
+        if not unactioned:
+            # All flags already actioned → submit + lock only
+            sp1 = (rows[0]["speaker1_role"] or "").strip().upper()
+            set_role = nspk == 1 and sp1 != USER_ROLE
+            plan[s_id] = {
+                "dismiss_ids": [],
+                "confirm_ids": [],
+                "speakers": nspk,
+                "set_role": set_role,
+                "lock": True,
+                "category": "ALREADY_ACTIONED",
+                "review_status": review_status,
+                "total_active": len(active),
+            }
+            continue
+
+        # Has unactioned flags → dismiss low-conf, confirm rest
         dismiss_ids = []
         confirm_ids = []
 
         for r in unactioned:
             if r["conf"] is None or r["conf"] <= conf_threshold:
-                # Rule 1: low confidence → dismiss
                 dismiss_ids.append(r["flag_id"])
             else:
-                # Rule 2: remaining (conf > threshold) → confirm
                 confirm_ids.append(r["flag_id"])
 
         if not dismiss_ids and not confirm_ids:
             continue
 
-        nspk = speaker_counts.get(s_id, 0)
-        # Single speaker → set speaker1_role = USER
         set_role = nspk == 1 and _norm(rows[0]["speaker1_role"]) != USER_ROLE
 
         plan[s_id] = {
@@ -178,9 +220,54 @@ def build_plan(conn, statuses, conf_threshold):
             "confirm_ids": confirm_ids,
             "speakers": nspk,
             "set_role": set_role,
-            "lock": True,  # always lock after processing
-            "review_status": rows[0]["review_status"] or "-",
+            "lock": True,
+            "category": "FLAG_PROCESS",
+            "review_status": review_status,
             "total_active": len(active),
+        }
+
+    # --- Phase 3: CLEAN sessions with NO flags at all ---
+    if statuses:
+        status_clause = "WHERE s.review_status IN (%s)" % ",".join("?" for _ in statuses)
+        params = list(statuses)
+    else:
+        status_clause = ""
+        params = []
+
+    clean_rows = conn.execute(
+        f"""SELECT s.s_id, s.overall_verdict, s.speaker1_role
+            FROM audio_sessions s
+            {status_clause}
+            AND s.s_id NOT IN (
+                SELECT DISTINCT f.s_id FROM audio_flags f
+            )
+            ORDER BY s.s_id"""
+        if status_clause else
+        f"""SELECT s.s_id, s.overall_verdict, s.speaker1_role
+            FROM audio_sessions s
+            WHERE s.s_id NOT IN (
+                SELECT DISTINCT f.s_id FROM audio_flags f
+            )
+            ORDER BY s.s_id""",
+        params,
+    ).fetchall()
+
+    for r in clean_rows:
+        s_id = r["s_id"]
+        if s_id in plan:
+            continue
+        nspk = speaker_counts.get(s_id, 0)
+        sp1 = (r["speaker1_role"] or "").strip().upper()
+        set_role = nspk == 1 and sp1 != USER_ROLE
+        plan[s_id] = {
+            "dismiss_ids": [],
+            "confirm_ids": [],
+            "speakers": nspk,
+            "set_role": set_role,
+            "lock": True,
+            "category": "CLEAN",
+            "review_status": "PENDING",
+            "total_active": 0,
         }
 
     return dict(sorted(plan.items()))
@@ -199,33 +286,40 @@ def print_preview(plan, conf_threshold):
     total_lock = sum(1 for p in plan.values() if p["lock"])
     total_role = sum(1 for p in plan.values() if p["set_role"])
     single_spk = sum(1 for p in plan.values() if p["speakers"] == 1)
+    n_flag_proc = sum(1 for p in plan.values() if p["category"] == "FLAG_PROCESS")
+    n_actioned = sum(1 for p in plan.values() if p["category"] == "ALREADY_ACTIONED")
+    n_clean = sum(1 for p in plan.values() if p["category"] == "CLEAN")
 
+    print(f"  Phase 1 — Flag processing          : {n_flag_proc:,} session(s)")
+    print(f"  Phase 2 — Already actioned          : {n_actioned:,} session(s)")
+    print(f"  Phase 3 — CLEAN (no active flags)   : {n_clean:,} session(s)")
+    print()
     print(f"  Flags to dismiss (conf <= {conf_threshold})   : {total_dismiss:,}")
     print(f"  Flags to confirm (conf > {conf_threshold})    : {total_confirm:,}")
-    print(f"  Sessions to lock                   : {total_lock:,}")
+    print(f"  Sessions to submit + lock          : {total_lock:,}")
     print(f"  Single-speaker sessions (→ USER)   : {single_spk:,}")
     print(f"  speaker1_role sets needed           : {total_role:,}")
     print()
 
-    print(f"  {'SESSION':<12} {'STATUS':<22} {'SPK':<4} {'DISMISS':<8} "
+    print(f"  {'SESSION':<12} {'CATEGORY':<20} {'SPK':<4} {'DISMISS':<8} "
           f"{'CONFIRM':<8} {'SET ROLE':<10} {'LOCK':<6}")
-    print(f"  {'-'*12} {'-'*22} {'-'*4} {'-'*8} {'-'*8} {'-'*10} {'-'*6}")
+    print(f"  {'-'*12} {'-'*20} {'-'*4} {'-'*8} {'-'*8} {'-'*10} {'-'*6}")
     for i, (s_id, p) in enumerate(plan.items()):
         if i >= SAMPLE_LIMIT:
             print(f"  ... {len(plan) - SAMPLE_LIMIT:,} more")
             break
         print(
-            f"  {s_id:<12} {p['review_status']:<22} {p['speakers']:<4} "
+            f"  {s_id:<12} {p['category']:<20} {p['speakers']:<4} "
             f"{len(p['dismiss_ids']):<8} {len(p['confirm_ids']):<8} "
             f"{'yes' if p['set_role'] else '-':<10} {'yes' if p['lock'] else '-':<6}"
         )
     print()
 
-    status_counts = Counter(p["review_status"] for p in plan.values())
-    if status_counts:
-        print("  Sessions by review_status:")
-        for status, count in sorted(status_counts.items()):
-            print(f"    {status:<24} {count:>6,}")
+    cat_counts = Counter(p["category"] for p in plan.values())
+    if cat_counts:
+        print("  Sessions by category:")
+        for cat, count in sorted(cat_counts.items()):
+            print(f"    {cat:<24} {count:>6,}")
         print()
 
 
@@ -262,8 +356,9 @@ def apply_changes(conn, plan, conf_threshold, actor):
                 (s_id, fid, actor, NOTE_CONFIRM % conf_threshold),
             )
 
-        # 3. Recompute verdict after dismiss/confirm
-        recompute_audio_session_verdict(s_id, conn)
+        # 3. Recompute verdict after dismiss/confirm (skip for CLEAN with no flags)
+        if p["dismiss_ids"] or p["confirm_ids"]:
+            recompute_audio_session_verdict(s_id, conn)
 
         # 4. Single speaker → set speaker1_role = USER
         if p["set_role"]:
@@ -277,13 +372,32 @@ def apply_changes(conn, plan, conf_threshold, actor):
                 (s_id, actor, NOTE_LOCK_SINGLE),
             )
 
-        # 5. Lock the session
+        # 5. Submit the session (so it shows as properly submitted)
         if p["lock"]:
+            submit_note = NOTE_SUBMIT_CLEAN if p["category"] == "CLEAN" else NOTE_SUBMIT
             lock_note = NOTE_LOCK_SINGLE if p["speakers"] == 1 else NOTE_LOCK_MULTI
             conn.execute(
                 """UPDATE audio_sessions
-                   SET review_status = 'LOCKED', locked_by = ?, locked_at = datetime('now'),
-                       reviewed_at = datetime('now')
+                   SET review_status = 'SUBMITTED_FOR_REVIEW',
+                       submitted_by  = ?,
+                       submitted_at  = datetime('now'),
+                       reviewer_id   = ?,
+                       reviewed_at   = datetime('now')
+                   WHERE s_id = ?""",
+                (actor, actor, s_id),
+            )
+            conn.execute(
+                """INSERT INTO audio_review_log (s_id, action, reviewer_id, note)
+                   VALUES (?, 'SUBMIT', ?, ?)""",
+                (s_id, actor, submit_note),
+            )
+
+            # 6. Lock the session
+            conn.execute(
+                """UPDATE audio_sessions
+                   SET review_status = 'LOCKED',
+                       locked_by     = ?,
+                       locked_at     = datetime('now')
                    WHERE s_id = ?""",
                 (actor, s_id),
             )
@@ -338,7 +452,7 @@ def main() -> None:
             total_d = sum(len(p["dismiss_ids"]) for p in plan.values())
             total_c = sum(len(p["confirm_ids"]) for p in plan.values())
             print(f"DRY RUN — would dismiss {total_d:,} flag(s), confirm {total_c:,} flag(s), "
-                  f"and lock {len(plan):,} session(s). No changes written. "
+                  f"and submit + lock {len(plan):,} session(s). No changes written. "
                   f"Re-run with --commit to apply.")
             return
 
@@ -353,7 +467,7 @@ def main() -> None:
         total_c = sum(len(p["confirm_ids"]) for p in plan.values())
         total_r = sum(1 for p in plan.values() if p["set_role"])
         print(f"Done. Dismissed {total_d:,} flag(s), confirmed {total_c:,} flag(s), "
-              f"set {total_r:,} speaker role(s), locked {len(plan):,} session(s).")
+              f"set {total_r:,} speaker role(s), submitted + locked {len(plan):,} session(s).")
     finally:
         conn.close()
 
