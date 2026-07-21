@@ -127,7 +127,7 @@ export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelect
   const langDropdownRef = useRef(null);
 
   useEffect(() => {
-    getAudioLanguages().then(setAvailableLanguages).catch(() => {});
+    getAudioLanguages().then(setAvailableLanguages).catch(() => { });
   }, []);
 
   // Close dropdown on outside click
@@ -514,7 +514,7 @@ export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelect
         style={filterSelectStyle}
       >
         <option value="">All</option>
-        <option value="FLAGGED">GT Flagged</option>
+        <option value="FLAGGED">Flagged</option>
         <option value="CLEAN">Clean</option>
       </select>
     ),
@@ -525,7 +525,7 @@ export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelect
         style={filterSelectStyle}
       >
         <option value="">All</option>
-        <option value="FLAGGED">GT Flagged</option>
+        <option value="FLAGGED">Flagged</option>
         <option value="CLEAN">Clean</option>
       </select>
     ),
