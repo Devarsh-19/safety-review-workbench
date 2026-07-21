@@ -92,7 +92,8 @@ def get_readonly_connection(db_path: str = DB_PATH) -> sqlite3.Connection:
 
 HEADER = [
     # session-level context (repeated on every turn of the session)
-    "session_id", "overall_verdict", "review_status", "astrotalk_flagged",
+    "session_id", "overall_verdict", "review_status", "reviewed_at", "locked_by",
+    "astrotalk_flagged",
     # turn-level
     "turn_id", "speaker", "is_automated", "timestamp", "message_text",
     # flag summary for THIS turn (active flags only)
@@ -129,7 +130,8 @@ def build_export_sql(flagged_only: bool = False) -> str:
         FROM active
         GROUP BY session_id, turn_id
     )
-    SELECT s.session_id, s.overall_verdict, s.review_status, s.astrotalk_flagged,
+    SELECT s.session_id, s.overall_verdict, s.review_status,
+           DATE(s.reviewed_at) AS reviewed_at, s.locked_by, s.astrotalk_flagged,
            t.turn_id, t.speaker, t.is_automated, t.timestamp, t.message_text,
            CASE WHEN a.cnt IS NULL THEN 0 ELSE 1 END AS has_active_flag,
            COALESCE(a.cnt, 0)                        AS active_flag_count,

@@ -46,20 +46,25 @@ from store.db import get_connection  # noqa: E402
 
 CSV_COLUMNS = [
     "session_id", "session_date", "session_type", "duration_minutes", "n_turns",
-    "review_status", "verdict", "reviewed_by",
+    "review_status", "verdict", "reviewed_by", "reviewed_at", "locked_by",
+    "session_note",
     "astrotalk_flagged",
-    "is_flagged", "n_active_flags", "flag_categories", "flag_sources",
+    "is_flagged", "n_active_flags", "user_flag_count", "astrologer_flag_count",
+    "flag_categories", "flag_sources",
 ]
 
 
-def _active_flag_summaries(conn) -> dict[str, dict]:
+def _active_flag_summaries(conn, speaker_by_turn: dict) -> dict[str, dict]:
     """Per-session summary of ACTIVE flags (amendment if present, else original).
 
-    Single pass over the whole flags table — no per-session queries.
+    Single pass over the whole flags table — no per-session queries. Each active
+    flag is also bucketed by the speaker of its turn (user vs astrologer) via
+    speaker_by_turn[(session_id, turn_id)]; flags with a NULL/unresolvable turn
+    fall into neither bucket, so user_n + astro_n <= n.
     """
     rows = conn.execute(
-        """SELECT flag_id, parent_flag_id, session_id, source, detection_layer,
-                  category_code
+        """SELECT flag_id, parent_flag_id, session_id, turn_id, source,
+                  detection_layer, category_code
            FROM flags"""
     ).fetchall()
 
@@ -73,13 +78,21 @@ def _active_flag_summaries(conn) -> dict[str, dict]:
         )
         if not is_active:
             continue
-        s = summaries.setdefault(r["session_id"], {"n": 0, "sources": set(), "categories": {}})
+        s = summaries.setdefault(
+            r["session_id"],
+            {"n": 0, "sources": set(), "categories": {}, "user_n": 0, "astro_n": 0},
+        )
         s["n"] += 1
         src = r["source"] or r["detection_layer"]
         if src:
             s["sources"].add(src)
         cat = r["category_code"] or "UNKNOWN"
         s["categories"][cat] = s["categories"].get(cat, 0) + 1
+        speaker = speaker_by_turn.get((r["session_id"], r["turn_id"]))
+        if speaker == "USER":
+            s["user_n"] += 1
+        elif speaker == "ASTROLOGER":
+            s["astro_n"] += 1
     return summaries
 
 
@@ -101,8 +114,14 @@ def export(out_path: Path) -> None:
         ).fetchall()
     }
 
+    print("  Loading turn speakers...")
+    speaker_by_turn = {
+        (r["session_id"], r["turn_id"]): r["speaker"]
+        for r in conn.execute("SELECT session_id, turn_id, speaker FROM turns").fetchall()
+    }
+
     print("  Loading active flags...")
-    flag_summary = _active_flag_summaries(conn)
+    flag_summary = _active_flag_summaries(conn, speaker_by_turn)
 
     print("  Exporting sessions...")
     n_sessions = 0
@@ -115,6 +134,7 @@ def export(out_path: Path) -> None:
         for s in conn.execute(
             """SELECT session_id, session_date, session_type, duration_minutes,
                       review_status, overall_verdict, submitted_by, reviewer_id,
+                      DATE(reviewed_at) AS reviewed_at, locked_by, session_note,
                       astrotalk_flagged
                FROM sessions ORDER BY session_id"""
         ):
@@ -131,9 +151,14 @@ def export(out_path: Path) -> None:
                 "review_status":           s["review_status"] or "",
                 "verdict":                 s["overall_verdict"] or "",
                 "reviewed_by":             s["submitted_by"] or s["reviewer_id"] or "",
+                "reviewed_at":             s["reviewed_at"] or "",
+                "locked_by":               s["locked_by"] or "",
+                "session_note":            s["session_note"] or "",
                 "astrotalk_flagged":       s["astrotalk_flagged"],
                 "is_flagged":              1 if fs else 0,
                 "n_active_flags":          fs["n"] if fs else 0,
+                "user_flag_count":         fs["user_n"] if fs else 0,
+                "astrologer_flag_count":   fs["astro_n"] if fs else 0,
                 "flag_categories":         _format_categories(fs["categories"]) if fs else "",
                 "flag_sources":            ";".join(sorted(fs["sources"])) if fs else "",
             })

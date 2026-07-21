@@ -66,9 +66,9 @@ from scripts.export_session_turns_with_flags import (  # noqa: E402
 )
 
 # Column order returned by EXPORT_SQL (== HEADER in the CSV script).
-(C_SESSION_ID, C_OVERALL, C_STATUS, C_ASTRO,
+(C_SESSION_ID, C_OVERALL, C_STATUS, C_REVIEWED_AT, C_LOCKED_BY, C_ASTRO,
  C_TURN_ID, C_SPEAKER, C_AUTOMATED, C_TS, C_MSG,
- C_HAS_FLAG, C_FLAG_COUNT, C_FLAG_CATS) = range(12)
+ C_HAS_FLAG, C_FLAG_COUNT, C_FLAG_CATS) = range(14)
 
 
 def _turn_obj(r):
@@ -102,6 +102,8 @@ def iter_sessions(cur):
                 "session_id": sid,
                 "overall_verdict": r[C_OVERALL],
                 "review_status": r[C_STATUS],
+                "reviewed_at": r[C_REVIEWED_AT],
+                "locked_by": r[C_LOCKED_BY],
                 "astrotalk_flagged": r[C_ASTRO],
                 "turns": [],
             }
