@@ -190,8 +190,10 @@ def build_session_count_sql(flagged_only: bool = False) -> str:
 # so the two CSVs line up 1:1. The audio schema is mapped onto those column names:
 #   session_id  <- audio_sessions.s_id      turn_id     <- audio_segments.seg_id
 #   language    <- audio_sessions.lang      timestamp   <- "HH:MM:SS | HH:MM:SS"
-#     (audio_segments ts_start | ts_end, formatted to match the review UI's
-#     formatTime; blank for a session with no segments)
+#     (start | end, formatted to match the review UI's formatTime). For a flagged
+#     segment this is the flag's own precise span (falling back to the segment
+#     span), matching what the UI shows; multiple flags on one segment are joined
+#     by ' ; '. Unflagged segments show the segment span; blank when no segment.
 #   speaker     <- the DB role (ASTROLOGER / USER): audio_segments.speaker holds a
 #     diarization label (SPEAKER_1/SPEAKER_2), so labels are ranked per session
 #     (1st -> speaker1_role, 2nd -> speaker2_role) exactly as store/audio_db.py
@@ -243,8 +245,15 @@ def build_audio_export_sql(flagged_only: bool = False) -> str:
     astro = _AUDIO_VERDICT.format(c="s.astrotalk_verdict")
     return f"""
     WITH active AS (
-        SELECT af.s_id, af.seg_id, af.intent, af.transcript
+        -- Prefer the flag's own precise span (af.ts_start/ts_end); fall back to
+        -- the segment span when the flag has none — exactly what the review UI
+        -- shows (AudioSessionViewer.jsx: f.ts_start ?? seg?.ts_start).
+        SELECT af.s_id, af.seg_id, af.intent, af.transcript,
+               COALESCE(af.ts_start, seg.ts_start) AS ts_start,
+               COALESCE(af.ts_end, seg.ts_end)     AS ts_end
         FROM audio_flags af
+        LEFT JOIN audio_segments seg
+               ON seg.s_id = af.s_id AND seg.seg_id = af.seg_id
         WHERE (af.status IS NULL OR af.status != 'DISMISSED')
           AND af.seg_id IS NOT NULL
           AND af.flag_id NOT IN (
@@ -255,7 +264,9 @@ def build_audio_export_sql(flagged_only: bool = False) -> str:
         SELECT s_id, seg_id,
                COUNT(*)                        AS cnt,
                group_concat(intent, ', ')      AS cats,
-               group_concat(transcript, ' | ') AS texts
+               group_concat(transcript, ' | ') AS texts,
+               group_concat({_hms_sql('ts_start')} || ' | ' || {_hms_sql('ts_end')},
+                            ' ; ')             AS spans
         FROM active
         GROUP BY s_id, seg_id
     ),
@@ -287,6 +298,7 @@ def build_audio_export_sql(flagged_only: bool = False) -> str:
                           ELSE NULL END,
                t.speaker)                               AS speaker,
            CASE WHEN t.seg_id IS NULL THEN ''
+                WHEN a.spans IS NOT NULL THEN a.spans
                 ELSE {_hms_sql('t.ts_start')} || ' | ' || {_hms_sql('t.ts_end')}
            END                                          AS timestamp,
            CASE WHEN a.texts IS NOT NULL THEN a.texts
