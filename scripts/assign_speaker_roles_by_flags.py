@@ -24,8 +24,12 @@ Rules (per session, applied in this priority order)
                                               speaker 2 = USER.
    Then the partner speaker (if present) gets the opposite role, so BOTH
    speakers of a flagged session end up mapped.
-3. No existing role and no active flag -> nothing to infer; left untouched and
-   reported as a residual (there is genuinely no signal to assign from).
+3. No existing role and no active flag -> fall back to a talk-time heuristic so
+   the session is still mapped: the speaker with the most total talk-time (sum
+   of segment durations, segment count as tiebreak) is taken to be the
+   ASTROLOGER and the other the USER, since the astrologer does most of the
+   talking in these consultations. A lone single speaker defaults to ASTROLOGER.
+   Pass --no-fallback to skip this and leave such sessions untouched instead.
 
 "Speaker 1 / Speaker 2" are the ranked diarization labels: per session the
 distinct labels are ordered by the numeric part of the label (SPEAKER_1 before
@@ -87,14 +91,19 @@ ROLE_INFER_SQL = """
           )
     ),
     seg_rank AS (
+        -- active_flags is DISTINCT (s_id, seg_id), so the LEFT JOIN never fans a
+        -- segment out; talk / seg_count stay one-row-per-segment accurate.
         SELECT seg.s_id AS s_id, rl.rn AS rank,
-               MAX(CASE WHEN f.seg_id IS NOT NULL THEN 1 ELSE 0 END) AS is_flagged
+               MAX(CASE WHEN f.seg_id IS NOT NULL THEN 1 ELSE 0 END) AS is_flagged,
+               SUM(COALESCE(seg.ts_end, 0) - COALESCE(seg.ts_start, 0)) AS talk,
+               COUNT(*) AS seg_count
         FROM audio_segments seg
         JOIN ranked_labels rl ON rl.s_id = seg.s_id AND rl.label = seg.speaker
         LEFT JOIN active_flags f ON f.s_id = seg.s_id AND f.seg_id = seg.seg_id
         GROUP BY seg.s_id, rl.rn
     )
     SELECT sr.s_id AS s_id, sr.rank AS rank, sr.is_flagged AS is_flagged,
+           sr.talk AS talk, sr.seg_count AS seg_count,
            ss.speaker1_role AS spk1, ss.speaker2_role AS spk2
     FROM seg_rank sr
     JOIN audio_sessions ss ON ss.s_id = sr.s_id
@@ -112,7 +121,7 @@ NEEDING_WORK_SQL = """
 """
 
 
-def _reason(orig1, orig2, flagged: set, new1, new2) -> str:
+def _reason(orig1, orig2, flagged: set, new1, new2, by_talk: bool = False) -> str:
     """Human-readable explanation of what drove the assignment."""
     sets = [p for p in (f"spk1={new1}" if new1 else None,
                         f"spk2={new2}" if new2 else None) if p]
@@ -126,10 +135,13 @@ def _reason(orig1, orig2, flagged: set, new1, new2) -> str:
         return f"only speaker 1 flagged -> {tgt}"
     if f == {2}:
         return f"only speaker 2 flagged -> {tgt}"
+    if by_talk:
+        return f"no flags; assigned by talk-time -> {tgt}"
     return f"-> {tgt}"
 
 
-def _decide(present: set, flagged: set, spk1, spk2) -> tuple:
+def _decide(present: set, flagged: set, spk1, spk2, talk=None,
+            seg_count=None, fallback: bool = True) -> tuple:
     """Decide the roles to WRITE for one session.
 
     Returns (new_speaker1_role, new_speaker2_role, reason), where a None slot
@@ -137,10 +149,13 @@ def _decide(present: set, flagged: set, spk1, spk2) -> tuple:
     None when there is nothing to write.
 
     Only ranks 1 and 2 map to the two role columns; a 3rd+ speaker is ignored.
-    Existing roles are authoritative and win over flag inference.
+    Priority: existing roles win, then active-flag inference, then (unless
+    fallback is off) a talk-time heuristic so every session gets mapped.
     """
     present = present & {1, 2}
     flagged = flagged & {1, 2}
+    talk = talk or {}
+    seg_count = seg_count or {}
     roles = {1: spk1, 2: spk2}
 
     def complement():
@@ -170,30 +185,52 @@ def _decide(present: set, flagged: set, spk1, spk2) -> tuple:
                 roles[r] = role
         complement()
 
+    # 3) Still nothing (no roles, no flags): talk-time fallback. The speaker who
+    #    talks most is taken as the ASTROLOGER; a lone speaker defaults to it.
+    by_talk = False
+    if fallback and roles[1] is None and roles[2] is None:
+        by_talk = True
+        if present == {1, 2}:
+            # Higher (talk, seg_count) wins ASTROLOGER; ties favour speaker 1.
+            key1 = (talk.get(1, 0) or 0, seg_count.get(1, 0) or 0)
+            key2 = (talk.get(2, 0) or 0, seg_count.get(2, 0) or 0)
+            if key1 >= key2:
+                roles[1], roles[2] = ASTROLOGER, USER
+            else:
+                roles[1], roles[2] = USER, ASTROLOGER
+        elif present == {1}:
+            roles[1] = ASTROLOGER
+        elif present == {2}:
+            roles[2] = ASTROLOGER
+
     # Write only the slots that were NULL and are now determined.
     new1 = roles[1] if (spk1 is None and roles[1] is not None) else None
     new2 = roles[2] if (spk2 is None and roles[2] is not None) else None
     if new1 is None and new2 is None:
         return None
-    return new1, new2, _reason(spk1, spk2, flagged, new1, new2)
+    return new1, new2, _reason(spk1, spk2, flagged, new1, new2, by_talk)
 
 
-def compute_assignments(conn) -> list:
+def compute_assignments(conn, fallback: bool = True) -> list:
     """Return a list of (s_id, speaker1_role, speaker2_role, reason)."""
     by_session: dict = {}
     for row in conn.execute(ROLE_INFER_SQL):
         d = by_session.setdefault(
             row["s_id"],
-            {"present": set(), "flagged": set(), "spk1": row["spk1"], "spk2": row["spk2"]},
+            {"present": set(), "flagged": set(), "talk": {}, "seg_count": {},
+             "spk1": row["spk1"], "spk2": row["spk2"]},
         )
         d["present"].add(row["rank"])
+        d["talk"][row["rank"]] = row["talk"]
+        d["seg_count"][row["rank"]] = row["seg_count"]
         if row["is_flagged"]:
             d["flagged"].add(row["rank"])
 
     assignments = []
     for s_id in sorted(by_session):
         d = by_session[s_id]
-        decision = _decide(d["present"], d["flagged"], d["spk1"], d["spk2"])
+        decision = _decide(d["present"], d["flagged"], d["spk1"], d["spk2"],
+                           d["talk"], d["seg_count"], fallback)
         if decision is None:
             continue
         sp1, sp2, reason = decision
@@ -232,6 +269,9 @@ def main() -> None:
     parser.add_argument("--reviewer", default="auto_role_assign",
                         help="reviewer_id recorded in audio_review_log "
                              "(default: auto_role_assign).")
+    parser.add_argument("--no-fallback", action="store_true",
+                        help="Do NOT use the talk-time heuristic for sessions "
+                             "with no flags; leave those untouched instead.")
     args = parser.parse_args()
 
     print("=" * 64)
@@ -242,11 +282,12 @@ def main() -> None:
     conn = get_audio_connection()
     try:
         needing_work = conn.execute(NEEDING_WORK_SQL).fetchone()[0]
-        assignments = compute_assignments(conn)
+        assignments = compute_assignments(conn, fallback=not args.no_fallback)
 
+        print(f"  Fallback (talk-time)       : {'off' if args.no_fallback else 'on':>6}")
         print(f"  Sessions needing roles     : {needing_work:>6,}")
         print(f"  Will assign / complete     : {len(assignments):>6,}")
-        print(f"  Residual (no signal)       : {needing_work - len(assignments):>6,}")
+        print(f"  Residual (still unmapped)  : {needing_work - len(assignments):>6,}")
 
         if assignments:
             print("\n  Planned assignments:")
