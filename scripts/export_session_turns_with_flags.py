@@ -107,6 +107,8 @@ HEADER = [
     "turn_id", "speaker", "timestamp", "message_text",
     # flag summary for THIS turn (active flags only)
     "has_active_flag", "active_flag_count", "active_flag_categories",
+    # audio segment tone (audio export only; blank for chat, which has no tone)
+    "tone",
 ]
 
 # A "flagged" session = overall_verdict is not CLEAN — the same definition the
@@ -143,7 +145,8 @@ def build_export_sql(flagged_only: bool = False) -> str:
            t.turn_id, t.speaker, t.timestamp, t.message_text,
            CASE WHEN a.cnt IS NULL THEN 0 ELSE 1 END AS has_active_flag,
            COALESCE(a.cnt, 0)                        AS active_flag_count,
-           COALESCE(a.cats, '')                      AS active_flag_categories
+           COALESCE(a.cats, '')                      AS active_flag_categories,
+           ''                                        AS tone
     FROM turns t
     JOIN sessions s ON s.session_id = t.session_id
     LEFT JOIN agg a ON a.session_id = t.session_id AND a.turn_id = t.turn_id
@@ -205,6 +208,8 @@ def build_session_count_sql(flagged_only: bool = False) -> str:
 #     in the DB, so its message_text is the explicit _AUDIO_NO_TEXT marker below
 #     (not a blank cell, which reads as an export bug).
 #   active_flag_categories <- audio_flags.intent (audio's category analogue).
+#   tone        <- audio_segments.tone (the flagged segment's tone; blank in the
+#     chat export, whose turns carry no tone).
 
 # Shown for a real audio segment that has no flag transcript — the DB stores no
 # per-segment transcript, so there is genuinely no text to export for it. A
@@ -306,7 +311,8 @@ def build_audio_export_sql(flagged_only: bool = False) -> str:
                 ELSE '' END                             AS message_text,
            CASE WHEN a.cnt IS NULL THEN 0 ELSE 1 END    AS has_active_flag,
            COALESCE(a.cnt, 0)                           AS active_flag_count,
-           COALESCE(a.cats, '')                         AS active_flag_categories
+           COALESCE(a.cats, '')                         AS active_flag_categories,
+           COALESCE(t.tone, '')                         AS tone
     FROM audio_sessions s
     LEFT JOIN audio_segments t ON t.s_id = s.s_id
     LEFT JOIN agg a ON a.s_id = t.s_id AND a.seg_id = t.seg_id
