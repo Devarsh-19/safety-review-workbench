@@ -133,6 +133,24 @@ _FLAGGED_BY_US_SQL = f"""(
               AND {_ACTIVE_FLAG})
 )"""
 
+# ---------------------------------------------------------------------------
+# Audio "flagged by us" for the confusion matrix. The audio taxonomy has no
+# category exclusion list; instead every flag is graded HIGH / MEDIUM / LOW,
+# so a session counts as flagged only when it carries at least one active
+# (non-dismissed, non-amended-parent) flag of HIGH or MEDIUM severity. This is
+# the audio analogue of chat's low-signal drop — LOW-only sessions are treated
+# as clean rather than trusting the blunt session-level overall_verdict.
+# ---------------------------------------------------------------------------
+_AUDIO_FLAGGED_BY_SEVERITY_SQL = """EXISTS (
+    SELECT 1 FROM audio_flags af
+    WHERE af.s_id = audio_sessions.s_id
+      AND UPPER(COALESCE(af.severity, '')) IN ('HIGH', 'MEDIUM')
+      AND (af.status IS NULL OR af.status != 'DISMISSED')
+      AND af.flag_id NOT IN (
+          SELECT parent_flag_id FROM audio_flags WHERE parent_flag_id IS NOT NULL
+      )
+)"""
+
 
 # ---------------------------------------------------------------------------
 # Lifespan — initialise DB (including session_note migration) on startup
@@ -1148,8 +1166,8 @@ def audio_stats(
                     SUM(CASE WHEN overall_verdict = 'CLEAN'              THEN 1 ELSE 0 END) AS count_clean,
                     SUM(CASE WHEN astrotalk_verdict IN ('FLAGGED', 'SEVERE') AND overall_verdict IN ('FLAGGED', 'SEVERE') THEN 1 ELSE 0 END) AS count_tp,
                     SUM(CASE WHEN astrotalk_verdict IN ('FLAGGED', 'SEVERE') AND overall_verdict = 'CLEAN' THEN 1 ELSE 0 END) AS count_fp,
-                    SUM(CASE WHEN astrotalk_verdict = 'CLEAN' AND overall_verdict IN ('FLAGGED', 'SEVERE') THEN 1 ELSE 0 END) AS count_fn,
-                    SUM(CASE WHEN astrotalk_verdict = 'CLEAN' AND overall_verdict = 'CLEAN' THEN 1 ELSE 0 END) AS count_tn
+                    SUM(CASE WHEN astrotalk_verdict = 'CLEAN' AND {_AUDIO_FLAGGED_BY_SEVERITY_SQL} THEN 1 ELSE 0 END) AS count_fn,
+                    SUM(CASE WHEN astrotalk_verdict = 'CLEAN' AND NOT ({_AUDIO_FLAGGED_BY_SEVERITY_SQL}) THEN 1 ELSE 0 END) AS count_tn
                 FROM audio_sessions{scope}
             """, params).fetchone()
             result = {k: (row[k] or 0) for k in row.keys()}
