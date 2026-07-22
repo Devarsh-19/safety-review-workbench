@@ -1159,15 +1159,28 @@ def audio_stats(
                     SUM(CASE WHEN review_status = 'PENDING'              THEN 1 ELSE 0 END) AS total_pending,
                     SUM(CASE WHEN review_status = 'SUBMITTED_FOR_REVIEW' THEN 1 ELSE 0 END) AS count_submitted,
                     SUM(CASE WHEN review_status = 'LOCKED'               THEN 1 ELSE 0 END) AS count_locked,
-                    SUM(CASE WHEN review_status = 'LOCKED' AND overall_verdict = 'CLEAN'                THEN 1 ELSE 0 END) AS count_locked_clean,
-                    SUM(CASE WHEN review_status = 'LOCKED' AND overall_verdict IN ('FLAGGED', 'SEVERE') THEN 1 ELSE 0 END) AS count_locked_flagged,
+                    -- Ground-truth (GT) "flagged" is a FLAG-LEVEL signal — an active
+                    -- HIGH/MEDIUM flag (_AUDIO_FLAGGED_BY_SEVERITY_SQL) — which is the
+                    -- audio analogue of chat's flagged-by-us. overall_verdict stores
+                    -- the severity GRADE (HIGH/MEDIUM/LOW/CLEAN), so it never equals
+                    -- 'FLAGGED'/'SEVERE' and must NOT be used to decide GT here (doing
+                    -- so silently zeroed out every "flagged" count).
+                    SUM(CASE WHEN review_status = 'LOCKED' AND NOT ({_AUDIO_FLAGGED_BY_SEVERITY_SQL}) THEN 1 ELSE 0 END) AS count_locked_clean,
+                    SUM(CASE WHEN review_status = 'LOCKED' AND {_AUDIO_FLAGGED_BY_SEVERITY_SQL}       THEN 1 ELSE 0 END) AS count_locked_flagged,
                     0                                                    AS count_severe,
-                    SUM(CASE WHEN overall_verdict IN ('FLAGGED', 'SEVERE') THEN 1 ELSE 0 END) AS count_flagged,
-                    SUM(CASE WHEN overall_verdict = 'CLEAN'              THEN 1 ELSE 0 END) AS count_clean,
-                    SUM(CASE WHEN astrotalk_verdict IN ('FLAGGED', 'SEVERE') AND overall_verdict IN ('FLAGGED', 'SEVERE') THEN 1 ELSE 0 END) AS count_tp,
-                    SUM(CASE WHEN astrotalk_verdict IN ('FLAGGED', 'SEVERE') AND overall_verdict = 'CLEAN' THEN 1 ELSE 0 END) AS count_fp,
-                    SUM(CASE WHEN astrotalk_verdict = 'CLEAN' AND {_AUDIO_FLAGGED_BY_SEVERITY_SQL} THEN 1 ELSE 0 END) AS count_fn,
-                    SUM(CASE WHEN astrotalk_verdict = 'CLEAN' AND NOT ({_AUDIO_FLAGGED_BY_SEVERITY_SQL}) THEN 1 ELSE 0 END) AS count_tn
+                    SUM(CASE WHEN {_AUDIO_FLAGGED_BY_SEVERITY_SQL} THEN 1 ELSE 0 END) AS count_flagged,
+                    SUM(CASE WHEN NOT ({_AUDIO_FLAGGED_BY_SEVERITY_SQL}) THEN 1 ELSE 0 END) AS count_clean,
+                    -- Confusion matrix (chat parity): rows = AstroTalk's own binary
+                    -- verdict, where NULL (never scored) counts as CLEAN just like
+                    -- chat's astrotalk_flagged; cols = GT flagged-by-severity above.
+                    SUM(CASE WHEN astrotalk_verdict IN ('FLAGGED', 'SEVERE')
+                              AND {_AUDIO_FLAGGED_BY_SEVERITY_SQL} THEN 1 ELSE 0 END) AS count_tp,
+                    SUM(CASE WHEN astrotalk_verdict IN ('FLAGGED', 'SEVERE')
+                              AND NOT ({_AUDIO_FLAGGED_BY_SEVERITY_SQL}) THEN 1 ELSE 0 END) AS count_fp,
+                    SUM(CASE WHEN (astrotalk_verdict IS NULL OR astrotalk_verdict NOT IN ('FLAGGED', 'SEVERE'))
+                              AND {_AUDIO_FLAGGED_BY_SEVERITY_SQL} THEN 1 ELSE 0 END) AS count_fn,
+                    SUM(CASE WHEN (astrotalk_verdict IS NULL OR astrotalk_verdict NOT IN ('FLAGGED', 'SEVERE'))
+                              AND NOT ({_AUDIO_FLAGGED_BY_SEVERITY_SQL}) THEN 1 ELSE 0 END) AS count_tn
                 FROM audio_sessions{scope}
             """, params).fetchone()
             result = {k: (row[k] or 0) for k in row.keys()}
