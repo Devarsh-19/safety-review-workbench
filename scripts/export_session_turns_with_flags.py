@@ -189,7 +189,8 @@ def build_session_count_sql(flagged_only: bool = False) -> str:
 # The audio export uses the EXACT SAME columns/names as the chat export (HEADER),
 # so the two CSVs line up 1:1. The audio schema is mapped onto those column names:
 #   session_id  <- audio_sessions.s_id      turn_id     <- audio_segments.seg_id
-#   language    <- audio_sessions.lang      timestamp   <- audio_segments.ts_start
+#   language    <- audio_sessions.lang      timestamp   <- "ts_start | ts_end"
+#     (audio_segments span, both in seconds; blank for a session with no segments)
 #   speaker     <- the DB role (ASTROLOGER / USER): audio_segments.speaker holds a
 #     diarization label (SPEAKER_1/SPEAKER_2), so labels are ranked per session
 #     (1st -> speaker1_role, 2nd -> speaker2_role) exactly as store/audio_db.py
@@ -276,7 +277,10 @@ def build_audio_export_sql(flagged_only: bool = False) -> str:
                           WHEN 2 THEN s.speaker2_role
                           ELSE NULL END,
                t.speaker)                               AS speaker,
-           t.ts_start                                   AS timestamp,
+           CASE WHEN t.seg_id IS NULL THEN ''
+                ELSE COALESCE(CAST(t.ts_start AS TEXT), '') || ' | '
+                     || COALESCE(CAST(t.ts_end AS TEXT), '')
+           END                                          AS timestamp,
            CASE WHEN a.texts IS NOT NULL THEN a.texts
                 WHEN t.seg_id IS NOT NULL THEN '{_AUDIO_NO_TEXT}'
                 ELSE '' END                             AS message_text,
