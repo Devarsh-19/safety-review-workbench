@@ -1,7 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { C, MONO } from '../tokens';
 import VerdictBadge from './VerdictBadge';
-import SeverityBadge from './SeverityBadge';
 import {
   getSessionDetail, getSessionFlags, submitReview,
   manualFlag, saveSessionNote,
@@ -595,12 +594,15 @@ export default function SessionViewer({ sessionId, sessionList, reviewerName, re
   const isSubmitted        = status === 'SUBMITTED_FOR_REVIEW';
   const isNeedsFinalReview = status === 'NEEDS_FINAL_REVIEW';
   const isReviewed         = status && status !== 'PENDING' && session.reviewer_id;
+  // Read-only confusion-matrix personas (TP/TN/FP/FN) are analysis views only —
+  // never allow them to mutate flags or run review actions.
+  const isClassificationView = ['TP', 'TN', 'FP', 'FN'].includes(reviewerName);
   // Flag editability by role:
   //  - L1 can edit/dismiss/confirm only while the session is still PENDING.
   //    Once they submit for L2 review, their flags freeze (read-only).
   //  - L2 (final reviewer) can edit/dismiss/confirm any session that is not
   //    yet LOCKED — including SUBMITTED_FOR_REVIEW / NEEDS_FINAL_REVIEW.
-  const flagsEditable = !isLocked && (
+  const flagsEditable = !isLocked && !isClassificationView && (
     reviewerRole === 'L2' ? true : status === 'PENDING'
   );
 
@@ -737,7 +739,6 @@ export default function SessionViewer({ sessionId, sessionList, reviewerName, re
             {isLocked && <span style={{ marginRight: 4 }}>🔒</span>}{sessionId}
           </span>
           {!loading && <VerdictBadge verdict={session.overall_verdict} />}
-          {!loading && <SeverityBadge severity={session.astrotalk_severity} labeled />}
           {!loading && (
             <span style={{
               fontSize: 11, fontFamily: MONO, padding: '2px 8px', borderRadius: 3,
@@ -1330,8 +1331,9 @@ export default function SessionViewer({ sessionId, sessionList, reviewerName, re
             )}
           </div>
 
-          {/* ── Decision panel — hidden when locked ──────────────────────── */}
-          {!isLocked && (
+          {/* ── Decision panel — hidden when locked or in a read-only
+                 classification (TP/TN/FP/FN) view ──────────────────────── */}
+          {!isLocked && !isClassificationView && (
           <div style={{ flexShrink: 0, borderTop: `2px solid ${C.border}`, background: C.bgSurface, padding: 20 }}>
 
             {/* ── L1: PENDING — submit form ────────────────────────────────── */}

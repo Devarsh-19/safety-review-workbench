@@ -4,7 +4,6 @@ import TopBar from './TopBar';
 import Footer from './Footer';
 import StatusBadge from './StatusBadge';
 import VerdictBadge from './VerdictBadge';
-import SeverityBadge from './SeverityBadge';
 import LoadingSpinner from './LoadingSpinner';
 import HasVideoBadge from './HasVideoBadge';
 import { getAudioSessions, getAudioStats, lockAudioSession, lockAllSubmittedAudioSessions, getAudioViolationStats, getAudioLanguages } from '../api';
@@ -281,9 +280,8 @@ export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelect
       { key: 'assigned_to', label: 'Assigned To', sortable: false },
       { key: 'reviewer', label: 'Reviewer', sortable: false },
     ] : []),
-    { key: 'verdict', label: 'GT FLAG', sortable: true },
+    { key: 'verdict', label: 'Severity', sortable: true },
     { key: 'astrotalk_verdict', label: 'Astrotalk', sortable: false },
-    { key: 'severity', label: 'Severity', sortable: false },
     { key: 'status', label: 'Status', sortable: true },
     { key: 'action', label: 'Action', sortable: false },
   ];
@@ -516,7 +514,9 @@ export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelect
         style={filterSelectStyle}
       >
         <option value="">All</option>
-        <option value="FLAGGED">Flagged</option>
+        <option value="HIGH">High</option>
+        <option value="MEDIUM">Medium</option>
+        <option value="LOW">Low</option>
         <option value="CLEAN">Clean</option>
       </select>
     ),
@@ -927,7 +927,6 @@ export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelect
                   )}
                   <td style={{ padding: '10px 14px' }}><VerdictBadge verdict={r.overall_verdict} /></td>
                   <td style={{ padding: '10px 14px' }}><VerdictBadge verdict={r.astrotalk_verdict} /></td>
-                  <td style={{ padding: '10px 14px' }}><SeverityBadge severity={r.astrotalk_severity} /></td>
                   <td style={{ padding: '10px 14px' }}><StatusBadge status={r.review_status} /></td>
                   <td style={{ padding: '10px 14px' }}>
                     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'stretch', gap: 5 }}>

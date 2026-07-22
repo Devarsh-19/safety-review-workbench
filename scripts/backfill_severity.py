@@ -85,73 +85,11 @@ from store.db import get_connection, DB_PATH                    # noqa: E402
 from store.audio_db import (                                    # noqa: E402
     get_audio_connection,
     AUDIO_DB_PATH,
-    initialise_audio_db,
 )
+from engine.severity_rules import classify_severity            # noqa: E402
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_OUT_DIR = PROJECT_ROOT / "exports"
-
-# Categories that, when entirely absent from a session, satisfy LOW rule L4.
-HARMFUL_CATEGORIES = {
-    "NSFW",
-    "NSFW_EXPLICIT",
-    "NSFW_GROOMING",
-    "NSFW_APPEARANCE",
-    "CSAM_RISK",
-    "VIOLENCE",
-    "ABUSIVE_LANGUAGE",
-    "SELF_HARM",
-}
-
-
-# --------------------------------------------------------------------------- #
-# Severity classification (pure logic, DB-agnostic)
-# --------------------------------------------------------------------------- #
-def classify_severity(flags: list[tuple[str, bool]]) -> tuple[str, str]:
-    """Return ``(severity, rule)`` for one session.
-
-    ``flags`` is a list of ``(category_code, is_astrologer)`` for the session's
-    active flags. ``rule`` is the matched rule id (e.g. 'H1', 'L3', '-') and is
-    returned for transparency/auditing.
-
-    A session with no active flags is CLEAN (nothing to grade).
-    """
-    total = len(flags)
-    if total == 0:                                             # no active flags
-        return "CLEAN", "no_flags"
-
-    astro_count = sum(1 for _, is_astro in flags if is_astro)
-    categories = {cat for cat, _ in flags}
-
-    csam_astro = sum(1 for cat, a in flags if cat == "CSAM_RISK" and a)
-    nsfwx_total = sum(1 for cat, _ in flags if cat == "NSFW_EXPLICIT")
-    nsfwx_astro = sum(1 for cat, a in flags if cat == "NSFW_EXPLICIT" and a)
-
-    # ---- HIGH (checked first; wins over LOW) ----
-    if csam_astro >= 3:                                          # H1
-        return "HIGH", "H1"
-    if nsfwx_astro >= 5:                                         # H2
-        return "HIGH", "H2"
-    if (                                                        # H3
-        nsfwx_total >= 1
-        and any(cat != "NSFW_EXPLICIT" for cat, _ in flags)      # co-occurrence
-        and total >= 20
-        and nsfwx_astro >= 2
-    ):
-        return "HIGH", "H3"
-
-    # ---- LOW ----
-    if total >= 1 and astro_count == 0:                         # L1: user-only
-        return "LOW", "L1"
-    if total >= 10 and astro_count <= 3:                        # L2
-        return "LOW", "L2"
-    if total <= 5:                                             # L3
-        return "LOW", "L3"
-    if not (categories & HARMFUL_CATEGORIES):                   # L4
-        return "LOW", "L4"
-
-    # ---- MEDIUM (default bucket) ----
-    return "MEDIUM", "-"
 
 
 # --------------------------------------------------------------------------- #
@@ -278,7 +216,7 @@ def backfill_chat(severities: dict, dry_run: bool) -> int:
     conn = get_connection()
     try:
         conn.executemany(
-            "UPDATE sessions SET astrotalk_severity = ? WHERE session_id = ?",
+            "UPDATE sessions SET overall_verdict = ? WHERE session_id = ?",
             updates,
         )
         conn.commit()
@@ -291,12 +229,10 @@ def backfill_audio(severities: dict, dry_run: bool) -> int:
     updates = [(sev, sid) for sid, (sev, _) in severities.items()]
     if dry_run:
         return len(updates)
-    # Ensure the astrotalk_severity column exists (idempotent migration).
-    initialise_audio_db()
     conn = get_audio_connection()
     try:
         conn.executemany(
-            "UPDATE audio_sessions SET astrotalk_severity = ? WHERE s_id = ?",
+            "UPDATE audio_sessions SET overall_verdict = ? WHERE s_id = ?",
             updates,
         )
         conn.commit()
@@ -361,10 +297,10 @@ def main() -> None:
         print(f"\n  Backfilling severity into DB{tag}:")
         if args.backfill in ("both", "chat"):
             n = backfill_chat(chat, args.dry_run)
-            print(f"    chat  : {n:>6,} sessions -> sessions.astrotalk_severity")
+            print(f"    chat  : {n:>6,} sessions -> sessions.overall_verdict")
         if args.backfill in ("both", "audio"):
             n = backfill_audio(audio, args.dry_run)
-            print(f"    audio : {n:>6,} sessions -> audio_sessions.astrotalk_severity")
+            print(f"    audio : {n:>6,} sessions -> audio_sessions.overall_verdict")
 
     print("\nDone.")
 

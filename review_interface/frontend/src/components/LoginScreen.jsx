@@ -5,14 +5,17 @@ import Footer from './Footer';
 import { getStats, getAudioStats } from '../api';
 
 const REVIEWERS = [
-  { name: 'Gaurav',   role: 'L1' },
-  { name: 'Yusuf',    role: 'L1' },
-  { name: 'Nikhil',   role: 'L1' },
-  { name: 'Divyansh', role: 'L1' },
-  { name: 'Vineet',   role: 'L1' },
-  { name: 'Devarsh',  role: 'L1' },
-  { name: 'Amogh',    role: 'L2' },
-  { name: 'Locked',   role: 'L2' },   // read-only view of LOCKED sessions only
+  // Human reviewers (L1/L2). Restricted to the audio workspace so the chat
+  // login screen exposes only the confusion-matrix personas (TP/TN/FP/FN).
+  { name: 'Gaurav',   role: 'L1', workspaces: ['audio'] },
+  { name: 'Yusuf',    role: 'L1', workspaces: ['audio'] },
+  { name: 'Nikhil',   role: 'L1', workspaces: ['audio'] },
+  { name: 'Divyansh', role: 'L1', workspaces: ['audio'] },
+  { name: 'Vineet',   role: 'L1', workspaces: ['audio'] },
+  { name: 'Devarsh',  role: 'L1', workspaces: ['audio'] },
+  { name: 'Amogh',    role: 'L2', workspaces: ['audio'] },
+  // Locked stays available everywhere (chat + audio): read-only view of LOCKED sessions only.
+  { name: 'Locked',   role: 'L2' },
   // Audio-only, read-only L1 client persona: sees ONLY LOCKED sessions that
   // carry an NSFW_EXPLICIT flag. As L1 it has no L2 authority (no lock/unlock or
   // final-review actions). `workspaces` restricts which login workspaces list it.
@@ -20,6 +23,14 @@ const REVIEWERS = [
   // Audio-only L1 bucket for non-Hindi/English/Hinglish (regional-language)
   // sessions, populated by scripts/assign_multilingual_audio.py.
   { name: 'Multilingual', role: 'L1', workspaces: ['audio'] },
+  // Chat-only, read-only confusion-matrix views. AstroTalk (astrotalk_flagged) is
+  // the predictor evaluated against our workbench review (has active flag) as
+  // ground truth. Logging in as one shows ONLY that bucket (filtered server-side
+  // in fetch_sessions_page).
+  { name: 'TP', label: 'True Positive',  role: 'L1', workspaces: ['chat'] },
+  { name: 'TN', label: 'True Negative',  role: 'L1', workspaces: ['chat'] },
+  { name: 'FP', label: 'False Positive', role: 'L1', workspaces: ['chat'] },
+  { name: 'FN', label: 'False Negative', role: 'L1', workspaces: ['chat'] },
 ];
 
 const WORKSPACES = [
@@ -234,7 +245,7 @@ export default function LoginScreen({ onLogin }) {
             >
               <option value="" disabled>Select your name…</option>
               {availableReviewers.map((r) => (
-                <option key={r.name} value={r.name}>{r.name}</option>
+                <option key={r.name} value={r.name}>{r.label || r.name}</option>
               ))}
             </select>
 

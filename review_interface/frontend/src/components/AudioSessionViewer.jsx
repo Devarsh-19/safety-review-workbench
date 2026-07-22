@@ -5,7 +5,6 @@ import TopBar from './TopBar';
 import Footer from './Footer';
 import StatusBadge from './StatusBadge';
 import VerdictBadge from './VerdictBadge';
-import SeverityBadge from './SeverityBadge';
 import LoadingSpinner from './LoadingSpinner';
 import HasVideoBadge, { getHasVideoState } from './HasVideoBadge';
 import {
@@ -723,22 +722,10 @@ export default function AudioSessionViewer({ sId, sessionList, reviewerName, rev
                 Session {session.s_id}
               </span>
               <StatusBadge status={session.review_status} />
-              <SeverityBadge severity={session.astrotalk_severity} labeled />
               <HasVideoBadge value={session.has_video} />
-              {/* GT verdict badge — mirrors chat SessionViewer's AstroTalk badge */}
-              {(() => {
-                const isGtFlagged = session.overall_verdict === 'FLAGGED' || session.overall_verdict === 'SEVERE';
-                return (
-                  <span style={{
-                    fontSize: 11, fontFamily: MONO, padding: '2px 8px', borderRadius: 3,
-                    background: isGtFlagged ? C.severeBg : C.bgStatsrow,
-                    color:      isGtFlagged ? C.severeText : C.textSecondary,
-                    border: `1px solid ${isGtFlagged ? C.severeBorder : C.border}`,
-                  }}>
-                    GT: {isGtFlagged ? 'Flagged' : 'Clean'}
-                  </span>
-                );
-              })()}
+              {/* Session severity (stored in overall_verdict) */}
+              <span style={{ fontSize: 11, fontFamily: MONO, color: C.textSecondary }}>Severity:</span>
+              <VerdictBadge verdict={session.overall_verdict} />
               {/* AstroTalk verdict badge */}
               {(() => {
                 const isAstroFlagged = session.astrotalk_verdict === 'FLAGGED' || session.astrotalk_verdict === 'SEVERE';

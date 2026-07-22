@@ -114,7 +114,6 @@ def initialise_audio_db() -> None:
         "ALTER TABLE audio_sessions ADD COLUMN duration_seconds REAL",  # real audio duration from the pipeline (ffprobe)
         "ALTER TABLE audio_sessions ADD COLUMN manual_risk_level TEXT", # L1's whole-session risk rating: HIGH / MEDIUM / LOW
         "ALTER TABLE audio_sessions ADD COLUMN session_note TEXT",      # reviewer's overall observation note (chat parity)
-        "ALTER TABLE audio_sessions ADD COLUMN astrotalk_severity TEXT",# auto-derived HIGH / MEDIUM / LOW from the Severity Criteria (chat parity)
     ]
     with get_audio_connection() as conn:
         for migration in migrations:
@@ -379,26 +378,61 @@ def _active_audio_flag_rows(rows) -> list:
 
 
 def recompute_audio_session_verdict(s_id: int, conn) -> str:
-    """Recompute and persist overall_verdict + confidence_score from the
-    session's active flags.
-    Audio LLM session verdicts are binary: any active non-dismissed flag makes
-    the session FLAGGED; otherwise it is CLEAN."""
-    from engine.verdict_rules import get_db_confidence_for_verdict
+    """Recompute and persist the session's severity (stored in overall_verdict)
+    + confidence_score from its current active flags, using the Severity
+    Criteria (engine.severity_rules.classify_severity). Each flag's sender is
+    resolved seg_id -> ranked diarization label -> speaker1/2_role. Returns the
+    severity string (HIGH / MEDIUM / LOW / CLEAN)."""
+    from engine.severity_rules import classify_severity, SEVERITY_CONFIDENCE
 
+    # Each flag with its intent and whether the ASTROLOGER sent it. Labels are
+    # ranked by numeric part (SPEAKER_1 before SPEAKER_2); 1st -> speaker1_role,
+    # 2nd -> speaker2_role (mirrors astro_flag_ge5.py / the backfill script).
     rows = conn.execute(
-        "SELECT flag_id, intent, status, parent_flag_id FROM audio_flags WHERE s_id = ?", (s_id,)
+        """
+        WITH ranked_labels AS (
+            SELECT s_id, speaker AS label,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY s_id
+                       ORDER BY CAST(
+                           CASE WHEN instr(speaker,'_') > 0
+                                THEN substr(speaker, instr(speaker,'_')+1)
+                                ELSE speaker END AS INTEGER), speaker
+                   ) AS rn
+            FROM (SELECT DISTINCT s_id, speaker FROM audio_segments
+                  WHERE s_id = ? AND speaker IS NOT NULL)
+        ),
+        seg_role AS (
+            SELECT seg.seg_id,
+                   CASE rl.rn WHEN 1 THEN ss.speaker1_role
+                              WHEN 2 THEN ss.speaker2_role
+                              ELSE NULL END AS role
+            FROM audio_segments seg
+            JOIN audio_sessions ss ON ss.s_id = seg.s_id
+            LEFT JOIN ranked_labels rl ON rl.s_id = seg.s_id AND rl.label = seg.speaker
+            WHERE seg.s_id = ?
+        )
+        SELECT af.flag_id, af.intent, af.status, af.parent_flag_id,
+               CASE WHEN sr.role = 'ASTROLOGER' THEN 1 ELSE 0 END AS is_astro
+        FROM audio_flags af
+        LEFT JOIN seg_role sr ON sr.seg_id = af.seg_id
+        WHERE af.s_id = ?
+        """,
+        (s_id, s_id, s_id),
     ).fetchall()
-    has_active_flags = any(
-        r["status"] != "DISMISSED"
+
+    active_flags = [
+        (r["intent"], bool(r["is_astro"]))
         for r in _active_audio_flag_rows(rows)
-    )
-    verdict    = "FLAGGED" if has_active_flags else "CLEAN"
-    confidence = get_db_confidence_for_verdict(verdict)
+        if r["status"] != "DISMISSED"
+    ]
+    severity, _rule = classify_severity(active_flags)
+    confidence = SEVERITY_CONFIDENCE.get(severity, 0.0)
     conn.execute(
         "UPDATE audio_sessions SET overall_verdict = ?, confidence_score = ? WHERE s_id = ?",
-        (verdict, confidence, s_id),
+        (severity, confidence, s_id),
     )
-    return verdict
+    return severity
 
 
 def get_audio_flag_summary(s_id: int) -> dict:
