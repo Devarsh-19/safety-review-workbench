@@ -190,6 +190,10 @@ def build_session_count_sql(flagged_only: bool = False) -> str:
 # so the two CSVs line up 1:1. The audio schema is mapped onto those column names:
 #   session_id  <- audio_sessions.s_id      turn_id     <- audio_segments.seg_id
 #   language    <- audio_sessions.lang      timestamp   <- audio_segments.ts_start
+#   speaker     <- the DB role (ASTROLOGER / USER): audio_segments.speaker holds a
+#     diarization label (SPEAKER_1/SPEAKER_2), so labels are ranked per session
+#     (1st -> speaker1_role, 2nd -> speaker2_role) exactly as store/audio_db.py
+#     does; falls back to the raw label when the session's roles are unassigned.
 #   astrotalk_flagged <- audio_sessions.astrotalk_verdict FLAGGED/CLEAN -> 1/0.
 #   message_text <- audio_flags.transcript for that segment. Audio segments carry
 #     NO transcript of their own (only speaker/tone/timing); the spoken text lives
@@ -244,6 +248,22 @@ def build_audio_export_sql(flagged_only: bool = False) -> str:
                group_concat(transcript, ' | ') AS texts
         FROM active
         GROUP BY s_id, seg_id
+    ),
+    -- Map each diarization label to a rank per session (SPEAKER_1 before
+    -- SPEAKER_2 by numeric part): 1st -> speaker1_role, 2nd -> speaker2_role,
+    -- mirroring store/audio_db.py so the exported speaker is the DB role
+    -- (ASTROLOGER / USER) rather than the raw diarization label.
+    ranked_labels AS (
+        SELECT s_id, label,
+               ROW_NUMBER() OVER (
+                   PARTITION BY s_id
+                   ORDER BY CAST(
+                       CASE WHEN instr(label, '_') > 0
+                            THEN substr(label, instr(label, '_') + 1)
+                            ELSE label END AS INTEGER), label
+               ) AS rn
+        FROM (SELECT DISTINCT s_id, speaker AS label FROM audio_segments
+              WHERE speaker IS NOT NULL)
     )
     SELECT s.s_id                                        AS session_id,
            CASE WHEN {astro} = 'FLAGGED' THEN 1
@@ -251,7 +271,11 @@ def build_audio_export_sql(flagged_only: bool = False) -> str:
                 ELSE NULL END                           AS astrotalk_flagged,
            s.lang                                       AS language,
            t.seg_id                                     AS turn_id,
-           t.speaker                                    AS speaker,
+           COALESCE(
+               CASE rl.rn WHEN 1 THEN s.speaker1_role
+                          WHEN 2 THEN s.speaker2_role
+                          ELSE NULL END,
+               t.speaker)                               AS speaker,
            t.ts_start                                   AS timestamp,
            CASE WHEN a.texts IS NOT NULL THEN a.texts
                 WHEN t.seg_id IS NOT NULL THEN '{_AUDIO_NO_TEXT}'
@@ -262,6 +286,7 @@ def build_audio_export_sql(flagged_only: bool = False) -> str:
     FROM audio_sessions s
     LEFT JOIN audio_segments t ON t.s_id = s.s_id
     LEFT JOIN agg a ON a.s_id = t.s_id AND a.seg_id = t.seg_id
+    LEFT JOIN ranked_labels rl ON rl.s_id = t.s_id AND rl.label = t.speaker
     {where}
     ORDER BY s.s_id, t.seg_id
 """
