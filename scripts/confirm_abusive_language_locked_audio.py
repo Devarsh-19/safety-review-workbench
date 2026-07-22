@@ -38,7 +38,7 @@ from store.audio_db import AUDIO_DB_PATH, get_audio_connection  # noqa: E402
 
 
 TARGET_INTENT = "ABUSIVE_LANGUAGE"
-REVIEWER_ID = "AUTO_CONFIRM_ABUSIVE"
+REVIEWER_ID = "AUTO_CONFIRM"
 NOTE = "Auto-confirm: abusive-language flag on a locked session"
 SAMPLE_LIMIT = 30
 
