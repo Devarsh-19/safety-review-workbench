@@ -14,12 +14,13 @@ Usage:
 
 from __future__ import annotations
 
-# Hardcoded model + key (no config module).
+import sys
+from pathlib import Path
+sys.path.append(str(Path(__file__).resolve().parent.parent))
+import config
+
 # WARNING: do not commit a real key — this file is tracked in git.
-# WARNING: MODEL_ID and GOOGLE_API_KEY are ALSO hardcoded in caching.py. The
-#          prompt cache is created in caching.py and used here — these MUST
-#          match in both files, or every cached call fails with a mismatch.
-MODEL_ID = "gemini-3-flash-preview"
+MODEL_ID = config.GEMINI_MODEL
 GOOGLE_API_KEY = "PASTE_YOUR_GOOGLE_API_KEY_HERE"
 MAX_OUTPUT_TOKENS = 16384
 

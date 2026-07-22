@@ -39,12 +39,16 @@ BASE_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = BASE_DIR.parent
 DEFAULT_INPUT_CSV = BASE_DIR / "sample_audio.csv"
 DEFAULT_AUDIO_DIR = BASE_DIR / "audio_files"
+import sys
+sys.path.append(str(PROJECT_ROOT))
+import config
+
 DEFAULT_OUTPUT_CSV = BASE_DIR / "data" / "gemini_audio_results.csv"
 DEFAULT_OUTPUT_JSONL = BASE_DIR / "data" / "gemini_audio_results.jsonl"
 DEFAULT_RAW_JSON_DIR = BASE_DIR / "data" / "raw_json"
 DEFAULT_JSON_DIR = BASE_DIR / "data"
 DEFAULT_PROCESSING_LOG = BASE_DIR / "data" / "processing_log.json"
-DEFAULT_MODEL_ID = "gemini-3-flash-preview"
+DEFAULT_MODEL_ID = config.GEMINI_MODEL
 LONG_PAUSE_THRESHOLD_SECONDS = 60.0
 SILENCE_NOISE_THRESHOLD = "-45dB"
 UPLOAD_PROCESSING_TIMEOUT_SECONDS = 600.0

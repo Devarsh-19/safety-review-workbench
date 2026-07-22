@@ -1,59 +1,54 @@
 # AstroTalk Content Safety Detection Workbench
 
-A content safety detection and review pipeline for the AstroTalk astrology platform. The system analyses consultant-user chat sessions to detect NSFW, harmful, or policy-violating content, aggregates risk signals across multiple LLM classifiers, and exposes a human-review interface for auditors.
+A content safety detection and review pipeline for the AstroTalk astrology platform. The system analyses consultant-user sessions (both text chat and audio calls) to detect NSFW, harmful, or policy-violating content, aggregates risk signals across multiple LLM classifiers, and exposes a human-review interface for auditors.
+
+---
+
+## Project Documentation
+
+For comprehensive guides, please refer to the markdown documentation:
+- [User Handbook](docs/USER_HANDBOOK.md) — complete guide on setting up, running, and using the workbench
+- [Technical Reference](docs/TECHNICAL_REFERENCE.md) — architecture, database schema, API documentation, and scripts overview
+- [Approach Notes](docs/APPROACH_NOTES.md) — methodology, intent taxonomy, and system assumptions
 
 ---
 
 ## Project Structure
 
 ```
-astrotalk-engine/
-├── engine/                   # Core detection logic
-│   ├── aggregator.py         # Merges signals from multiple classifiers
-│   ├── chunker.py            # Splits sessions into analysable chunks
-│   ├── classifier.py         # LLM-backed classification calls
-│   ├── consultant_analyser.py
-│   ├── data_loader.py
-│   ├── intent_library.py
-│   └── language_detector.py
+safety-review-workbench/
+├── engine/                   # Core detection logic & data structures
 ├── pipeline/                 # Batch orchestration
-├── store/                    # Persistence layer (SQLite / file store)
+├── store/                    # Persistence layer (SQLite databases for chat & audio)
 ├── review_interface/
 │   ├── api/                  # FastAPI backend for the review UI
-│   └── frontend/src/         # React / Next.js review dashboard
-├── export/                   # Report and export utilities
-├── validation/               # Ground-truth evaluation and metrics
-├── data/
-│   ├── raw/                  # (git-ignored) source data from AstroTalk
-│   ├── processed/            # (git-ignored) intermediate pipeline outputs
-│   ├── ground_truth/         # (git-ignored) labelled evaluation sets
-│   └── samples/              # (git-ignored) anonymised sample sessions
-├── reports/
-│   └── pilot_report.py
+│   └── frontend/src/         # React review dashboard
+├── export/                   # Export utilities
+├── scripts/                  # Operations, reporting, log generation, and database ingestion
+├── llm_call/                 # High-throughput async Gemini LLM runners
+├── docs/                     # Project documentation
 ├── main.py
 ├── config.py
-├── requirements.txt
-├── .env.example
-└── README.md
+└── requirements.txt
 ```
 
 ---
 
-## Setup
+## Quick Start
 
 ### 1. Clone and create a virtual environment
 
 ```bash
 git clone <repo-url>
-cd astrotalk-engine
+cd safety-review-workbench
 
-python -m venv venv
+python -m venv .venv
 
 # Windows
-venv\Scripts\activate
+.venv\Scripts\activate
 
 # macOS / Linux
-source venv/bin/activate
+source .venv/bin/activate
 ```
 
 ### 2. Install dependencies
@@ -67,28 +62,7 @@ pip install -r requirements.txt
 ```bash
 cp .env.example .env
 ```
-
-Open `.env` and fill in the required values:
-
-| Variable | Description |
-|---|---|
-| `ANTHROPIC_API_KEY` | API key for Claude (Anthropic) |
-| `GEMINI_API_KEY` | API key for Google Gemini |
-| `GROQ_API_KEY` | API key for Groq inference |
-| `DB_PATH` | Path to the SQLite database (e.g. `store/astrotalk.db`) |
-| `LOG_LEVEL` | Logging verbosity: `DEBUG`, `INFO`, `WARNING`, `ERROR` |
-
----
-
-## Running the Batch Pipeline
-
-The batch pipeline reads raw session data, runs the detection engine across all chunks, and writes results to the store.
-
-```bash
-python main.py
-```
-
-To target a specific input file or override config at runtime, pass arguments as defined in `config.py`.
+Ensure you set your `GOOGLE_API_KEY` for LLM inference (if applicable), and confirm the `DB_PATH`.
 
 ---
 
@@ -102,35 +76,39 @@ The review interface consists of a FastAPI backend and a frontend dashboard.
 cd review_interface/api
 uvicorn main:app --reload --port 8000
 ```
-
-The API will be available at `http://localhost:8000`. Interactive docs at `http://localhost:8000/docs`.
+Available at `http://localhost:8000`. Interactive docs at `http://localhost:8000/docs`.
 
 ### Frontend dashboard
 
+Open a separate terminal:
 ```bash
 cd review_interface/frontend
 npm install
 npm run dev
 ```
-
-The dashboard will be available at `http://localhost:3000`.
+Available at `http://localhost:3000`.
 
 ---
 
-## Running Validation
+## Generating Deliverables
 
-To evaluate classifier performance against the ground-truth labelled dataset:
+To generate the final detection logs required for formal handover:
 
+**Chat Logs:**
 ```bash
-python -m validation.evaluate
+python scripts/generate_detection_logs.py
 ```
 
-This produces precision, recall, and F1 scores per category and writes a summary to `reports/`.
+**Audio Logs:**
+```bash
+python scripts/generate_audio_detection_logs.py
+```
+Output files will be generated in the `exports/` directory.
 
 ---
 
 ## Notes
 
 - Raw data, processed outputs, and ground-truth files are **git-ignored** — never commit session data.
-- All LLM calls are routed through `engine/classifier.py`; swap models by changing `config.py`.
-- The aggregator in `engine/aggregator.py` combines multi-model signals into a single risk score.
+- The `llm_call/` module handles all heavy model interactions.
+- All human review workflow is managed natively within the Workbench application.

@@ -24,16 +24,25 @@ Output columns (one row per session):
     flag_categories       - active flag counts per category, e.g. {NSFW:3,CSAM:4}
     flag_sources          - distinct active flag sources (LLM/REGEX/MANUAL), ';'-joined
 
-Read-only — never modifies the database.
+Covers BOTH databases (one row per session in each):
+  chat  (store/astrotalk.db)     sessions / turns    / flags
+  audio (store/audio_review.db)  audio_sessions / audio_segments / audio_flags
+Use --db to run only one. reviewed_at is date-only and falls back to
+locked_at then submitted_at when the real reviewed_at is missing.
+
+Read-only — never modifies either database.
 
 Usage:
-  python scripts/export_all_ingested_sessions.py
-  python scripts/export_all_ingested_sessions.py --out C:/path/to/file.csv
+  python scripts/export_all_ingested_sessions.py                 # chat + audio
+  python scripts/export_all_ingested_sessions.py --db audio      # audio only
+  python scripts/export_all_ingested_sessions.py --out C:/path/to/chat.csv
+  python scripts/export_all_ingested_sessions.py --audio-out C:/path/to/audio.csv
 """
 
 import argparse
 import csv
 import os
+import re
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -42,24 +51,83 @@ from dotenv import load_dotenv
 load_dotenv()
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from store.db import get_connection  # noqa: E402
+from store.db import get_connection, DB_PATH  # noqa: E402
+from store.audio_db import get_audio_connection, AUDIO_DB_PATH  # noqa: E402
+from engine.language_detector import LANGUAGE_MAP  # noqa: E402
 
 CSV_COLUMNS = [
-    "session_id", "session_date", "session_type", "duration_minutes", "n_turns",
-    "review_status", "verdict", "reviewed_by",
+    "session_id", "session_date", "session_type", "language", "duration_minutes",
+    "n_turns",
+    "review_status", "verdict", "reviewed_by", "reviewed_at", "locked_by",
+    "session_note",
     "astrotalk_flagged",
-    "is_flagged", "n_active_flags", "flag_categories", "flag_sources",
+    "is_flagged", "n_active_flags", "user_flag_count", "astrologer_flag_count",
+    "flag_categories", "flag_sources",
 ]
 
 
-def _active_flag_summaries(conn) -> dict[str, dict]:
+_INGEST_CSV_DEFAULT = Path(__file__).resolve().parents[1] / "data" / "raw" / "Chat_data.csv"
+
+
+def _language(code) -> str:
+    """Human-readable language for a 1-24 code mapped via LANGUAGE_MAP
+    (English/Hindi/...); '' when there is no code. Used as a fallback after the
+    UI-facing language_detected column."""
+    try:
+        return LANGUAGE_MAP.get(int(code), "") if code not in (None, "") else ""
+    except (TypeError, ValueError):
+        return ""
+
+
+def _load_ingest_languages(csv_path) -> dict:
+    """session_id -> primary language CODE from the raw ingest CSV (the source of
+    truth for a session's language). The language column holds AstroTalk numeric
+    codes (e.g. '1' or a multilingual '1,2,5'); the primary (first) code is kept,
+    matching DataLoader._parse_language. Empty dict if the file is absent — the
+    export then falls back to the DB's own language_code."""
+    result: dict = {}
+    path = Path(csv_path) if csv_path else None
+    if not path or not path.exists():
+        return result
+    with path.open(encoding="utf-8", errors="replace", newline="") as fh:
+        reader = csv.DictReader(fh)
+        cols = reader.fieldnames or []
+        lang_col = next((c for c in ("language", "language_code", "language_detected") if c in cols), None)
+        if "session_id" not in cols or not lang_col:
+            return result
+        for row in reader:
+            sid = row.get("session_id")
+            if not sid or sid in result:
+                continue
+            val = (row.get(lang_col) or "").strip()
+            if val:
+                result[sid] = val.split(",")[0].strip()  # primary code
+    return result
+
+# Audio inventory — same shape mapped onto the audio schema. Audio has no
+# session_date/session_type; it carries lang + a real duration in seconds, and
+# its platform signal is astrotalk_verdict (CLEAN/FLAGGED) not astrotalk_flagged.
+AUDIO_CSV_COLUMNS = [
+    "s_id", "language", "session_type", "duration_minutes", "n_segments",
+    "review_status", "verdict", "reviewed_by", "reviewed_at", "locked_by",
+    "session_note",
+    "astrotalk_verdict",
+    "is_flagged", "n_active_flags", "user_flag_count", "astrologer_flag_count",
+    "flag_categories", "flag_sources",
+]
+
+
+def _active_flag_summaries(conn, speaker_by_turn: dict) -> dict[str, dict]:
     """Per-session summary of ACTIVE flags (amendment if present, else original).
 
-    Single pass over the whole flags table — no per-session queries.
+    Single pass over the whole flags table — no per-session queries. Each active
+    flag is also bucketed by the speaker of its turn (user vs astrologer) via
+    speaker_by_turn[(session_id, turn_id)]; flags with a NULL/unresolvable turn
+    fall into neither bucket, so user_n + astro_n <= n.
     """
     rows = conn.execute(
-        """SELECT flag_id, parent_flag_id, session_id, source, detection_layer,
-                  category_code
+        """SELECT flag_id, parent_flag_id, session_id, turn_id, source,
+                  detection_layer, category_code
            FROM flags"""
     ).fetchall()
 
@@ -73,14 +141,92 @@ def _active_flag_summaries(conn) -> dict[str, dict]:
         )
         if not is_active:
             continue
-        s = summaries.setdefault(r["session_id"], {"n": 0, "sources": set(), "categories": {}})
+        s = summaries.setdefault(
+            r["session_id"],
+            {"n": 0, "sources": set(), "categories": {}, "user_n": 0, "astro_n": 0},
+        )
         s["n"] += 1
         src = r["source"] or r["detection_layer"]
         if src:
             s["sources"].add(src)
         cat = r["category_code"] or "UNKNOWN"
         s["categories"][cat] = s["categories"].get(cat, 0) + 1
+        speaker = speaker_by_turn.get((r["session_id"], r["turn_id"]))
+        if speaker == "USER":
+            s["user_n"] += 1
+        elif speaker == "ASTROLOGER":
+            s["astro_n"] += 1
     return summaries
+
+
+def _active_audio_flag_summaries(conn, seg_speaker: dict, session_roles: dict) -> dict:
+    """Audio counterpart of _active_flag_summaries over audio_flags.
+
+    Active = amendment row, or original with no amendment; DISMISSED rows are
+    excluded (audio keeps them, unlike chat). category = intent, source = LLM/
+    MANUAL. Each active flag is bucketed by speaker role: its segment's raw
+    diarization label (seg_speaker[(s_id, seg_id)]) is mapped to USER/ASTROLOGER
+    via the session's speaker1_role/speaker2_role (session_roles[s_id][label]).
+    Flags on an unresolvable segment, or whose role is unassigned, fall into
+    neither bucket, so user_n + astro_n <= n.
+    """
+    rows = conn.execute(
+        """SELECT flag_id, parent_flag_id, s_id, seg_id, source, intent, status
+           FROM audio_flags"""
+    ).fetchall()
+
+    amended_parents = {r["parent_flag_id"] for r in rows if r["parent_flag_id"] is not None}
+
+    summaries: dict = {}
+    for r in rows:
+        is_active = (
+            r["parent_flag_id"] is not None
+            or r["flag_id"] not in amended_parents
+        )
+        if not is_active or (r["status"] or "") == "DISMISSED":
+            continue
+        s = summaries.setdefault(
+            r["s_id"],
+            {"n": 0, "sources": set(), "categories": {}, "user_n": 0, "astro_n": 0},
+        )
+        s["n"] += 1
+        if r["source"]:
+            s["sources"].add(r["source"])
+        cat = r["intent"] or "UNKNOWN"
+        s["categories"][cat] = s["categories"].get(cat, 0) + 1
+        label = seg_speaker.get((r["s_id"], r["seg_id"]))
+        role = session_roles.get(r["s_id"], {}).get(label)
+        if role == "USER":
+            s["user_n"] += 1
+        elif role == "ASTROLOGER":
+            s["astro_n"] += 1
+    return summaries
+
+
+def _speaker_num(label) -> int:
+    """Numeric part of a diarization label, matching the frontend's speakerNum
+    (SPEAKER_00 before SPEAKER_01). Labels with no digits sort last."""
+    m = re.search(r"\d+", str(label))
+    return int(m.group()) if m else 2**53
+
+
+def _role_by_label(labels, speaker1_role, speaker2_role) -> dict:
+    """Order distinct labels like the UI (numeric part, then string) and map the
+    first two to speaker1_role / speaker2_role. Extra speakers get no role.
+
+    This is why the export must NOT hardcode 'SPEAKER_1'/'SPEAKER_2': real
+    diarization emits 'SPEAKER_00'/'SPEAKER_01', so the role must be resolved by
+    label ORDER, not by a fixed label string."""
+    ordered = sorted(set(labels), key=lambda l: (_speaker_num(l), str(l)))
+    role_map = {}
+    for idx, label in enumerate(ordered):
+        if idx == 0:
+            role_map[label] = speaker1_role
+        elif idx == 1:
+            role_map[label] = speaker2_role
+        else:
+            role_map[label] = None
+    return role_map
 
 
 def _format_categories(categories: dict[str, int]) -> str:
@@ -90,8 +236,13 @@ def _format_categories(categories: dict[str, int]) -> str:
     return "{" + ",".join(f"{k}:{v}" for k, v in sorted(categories.items())) + "}"
 
 
-def export(out_path: Path) -> None:
+def export_chat(out_path: Path, ingest_csv=None) -> None:
     conn = get_connection()
+
+    print("  Loading ingest languages...")
+    ingest_lang = _load_ingest_languages(ingest_csv)
+    print(f"    {len(ingest_lang)} session language(s) from ingest CSV"
+          + (f": {ingest_csv}" if ingest_lang else " (none — using DB language_code only)"))
 
     print("  Loading turn counts...")
     n_turns_by_session = {
@@ -101,8 +252,14 @@ def export(out_path: Path) -> None:
         ).fetchall()
     }
 
+    print("  Loading turn speakers...")
+    speaker_by_turn = {
+        (r["session_id"], r["turn_id"]): r["speaker"]
+        for r in conn.execute("SELECT session_id, turn_id, speaker FROM turns").fetchall()
+    }
+
     print("  Loading active flags...")
-    flag_summary = _active_flag_summaries(conn)
+    flag_summary = _active_flag_summaries(conn, speaker_by_turn)
 
     print("  Exporting sessions...")
     n_sessions = 0
@@ -113,8 +270,11 @@ def export(out_path: Path) -> None:
         writer.writeheader()
 
         for s in conn.execute(
-            """SELECT session_id, session_date, session_type, duration_minutes,
+            """SELECT session_id, session_date, session_type,
+                      language_detected, language_code, duration_minutes,
                       review_status, overall_verdict, submitted_by, reviewer_id,
+                      DATE(COALESCE(reviewed_at, locked_at, submitted_at)) AS reviewed_at,
+                      locked_by, session_note,
                       astrotalk_flagged
                FROM sessions ORDER BY session_id"""
         ):
@@ -126,14 +286,109 @@ def export(out_path: Path) -> None:
                 "session_id":              s["session_id"],
                 "session_date":            s["session_date"],
                 "session_type":            s["session_type"],
+                "language":                (s["language_detected"]
+                                            or _language(ingest_lang.get(s["session_id"]) or s["language_code"])),
                 "duration_minutes":        s["duration_minutes"],
                 "n_turns":                 n_turns_by_session.get(s["session_id"], 0),
                 "review_status":           s["review_status"] or "",
                 "verdict":                 s["overall_verdict"] or "",
                 "reviewed_by":             s["submitted_by"] or s["reviewer_id"] or "",
+                "reviewed_at":             s["reviewed_at"] or "",
+                "locked_by":               s["locked_by"] or "",
+                "session_note":            s["session_note"] or "",
                 "astrotalk_flagged":       s["astrotalk_flagged"],
                 "is_flagged":              1 if fs else 0,
                 "n_active_flags":          fs["n"] if fs else 0,
+                "user_flag_count":         fs["user_n"] if fs else 0,
+                "astrologer_flag_count":   fs["astro_n"] if fs else 0,
+                "flag_categories":         _format_categories(fs["categories"]) if fs else "",
+                "flag_sources":            ";".join(sorted(fs["sources"])) if fs else "",
+            })
+
+    conn.close()
+    print(f"  Sessions exported  : {n_sessions}")
+    print(f"  Flagged (>=1 flag) : {n_flagged}")
+    print(f"  Clean (no flags)   : {n_sessions - n_flagged}")
+    print(f"  CSV written        : {out_path}")
+
+
+def export_audio(out_path: Path) -> None:
+    conn = get_audio_connection()
+
+    print("  Loading segment counts...")
+    n_segments_by_session = {
+        r["s_id"]: r["n"]
+        for r in conn.execute(
+            "SELECT s_id, COUNT(*) AS n FROM audio_segments GROUP BY s_id"
+        ).fetchall()
+    }
+
+    print("  Loading segment speakers...")
+    seg_speaker = {}
+    labels_by_sid: dict = {}
+    for r in conn.execute("SELECT s_id, seg_id, speaker FROM audio_segments").fetchall():
+        seg_speaker[(r["s_id"], r["seg_id"])] = r["speaker"]
+        if r["speaker"]:
+            labels_by_sid.setdefault(r["s_id"], []).append(r["speaker"])
+
+    print("  Loading speaker roles...")
+    # Map each session's raw diarization labels to the reviewer-assigned role by
+    # LABEL ORDER (first distinct label -> speaker1_role, second -> speaker2_role),
+    # matching the UI and violation_breakdown_audio. Hardcoding 'SPEAKER_1'/
+    # 'SPEAKER_2' silently zeroed the buckets on real 'SPEAKER_00'/'SPEAKER_01' data.
+    session_roles = {
+        r["s_id"]: _role_by_label(
+            labels_by_sid.get(r["s_id"], []), r["speaker1_role"], r["speaker2_role"]
+        )
+        for r in conn.execute(
+            "SELECT s_id, speaker1_role, speaker2_role FROM audio_sessions"
+        ).fetchall()
+    }
+
+    print("  Loading active flags...")
+    flag_summary = _active_audio_flag_summaries(conn, seg_speaker, session_roles)
+
+    print("  Exporting audio sessions...")
+    n_sessions = 0
+    n_flagged = 0
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with out_path.open("w", newline="", encoding="utf-8") as fh:
+        writer = csv.DictWriter(fh, fieldnames=AUDIO_CSV_COLUMNS)
+        writer.writeheader()
+
+        for s in conn.execute(
+            """SELECT s_id, lang, duration_seconds, review_status,
+                      CASE WHEN overall_verdict = 'SEVERE' THEN 'FLAGGED'
+                           ELSE overall_verdict END AS verdict,
+                      CASE WHEN astrotalk_verdict = 'SEVERE' THEN 'FLAGGED'
+                           ELSE astrotalk_verdict END AS astrotalk_verdict,
+                      submitted_by, reviewer_id,
+                      DATE(COALESCE(reviewed_at, locked_at, submitted_at)) AS reviewed_at,
+                      locked_by, session_note
+               FROM audio_sessions ORDER BY s_id"""
+        ):
+            n_sessions += 1
+            fs = flag_summary.get(s["s_id"])
+            if fs:
+                n_flagged += 1
+            dur = s["duration_seconds"]
+            writer.writerow({
+                "s_id":                    s["s_id"],
+                "language":                s["lang"] or "",
+                "session_type":            "voice",
+                "duration_minutes":        round(dur / 60, 2) if dur else "",
+                "n_segments":              n_segments_by_session.get(s["s_id"], 0),
+                "review_status":           s["review_status"] or "",
+                "verdict":                 s["verdict"] or "",
+                "reviewed_by":             s["submitted_by"] or s["reviewer_id"] or "",
+                "reviewed_at":             s["reviewed_at"] or "",
+                "locked_by":               s["locked_by"] or "",
+                "session_note":            s["session_note"] or "",
+                "astrotalk_verdict":       s["astrotalk_verdict"] or "",
+                "is_flagged":              1 if fs else 0,
+                "n_active_flags":          fs["n"] if fs else 0,
+                "user_flag_count":         fs["user_n"] if fs else 0,
+                "astrologer_flag_count":   fs["astro_n"] if fs else 0,
                 "flag_categories":         _format_categories(fs["categories"]) if fs else "",
                 "flag_sources":            ";".join(sorted(fs["sources"])) if fs else "",
             })
@@ -147,22 +402,36 @@ def export(out_path: Path) -> None:
 
 def main() -> None:
     p = argparse.ArgumentParser(
-        description="Export ALL ingested sessions (one row per session) with clean/flagged status"
+        description="Export ALL ingested sessions (one row per session) with clean/flagged "
+                    "status, for the chat and/or audio database."
     )
-    p.add_argument("--out", default=None, help="Output CSV path")
+    p.add_argument("--db", choices=("both", "chat", "audio"), default="both",
+                   help="Which database(s) to export (default: both).")
+    p.add_argument("--out", default=None, help="Chat output CSV path")
+    p.add_argument("--audio-out", default=None, help="Audio output CSV path")
+    p.add_argument("--ingest-csv", default=str(_INGEST_CSV_DEFAULT),
+                   help="Raw ingest CSV used as the per-session language reference "
+                        f"(chat; default: {_INGEST_CSV_DEFAULT}).")
     args = p.parse_args()
 
-    if args.out:
-        out_path = Path(args.out)
-    else:
-        stamp = datetime.now().strftime("%Y%m%d")
-        out_path = Path(__file__).resolve().parents[1] / "exports" / f"all_ingested_sessions_{stamp}.csv"
+    stamp = datetime.now().strftime("%Y%m%d")
+    exports_dir = Path(__file__).resolve().parents[1] / "exports"
 
-    print("=" * 60)
-    print("  Export ALL ingested sessions (clean vs flagged)")
-    print(f"  DB: {os.getenv('DB_PATH', 'store/results.db')}")
-    print("=" * 60)
-    export(out_path)
+    if args.db in ("both", "chat"):
+        out_path = Path(args.out) if args.out else exports_dir / f"all_ingested_sessions_{stamp}.csv"
+        print("=" * 60)
+        print("  Export ALL ingested CHAT sessions (clean vs flagged)")
+        print(f"  DB: {DB_PATH}")
+        print("=" * 60)
+        export_chat(out_path, ingest_csv=args.ingest_csv)
+
+    if args.db in ("both", "audio"):
+        out_path = Path(args.audio_out) if args.audio_out else exports_dir / f"all_ingested_audio_sessions_{stamp}.csv"
+        print("=" * 60)
+        print("  Export ALL ingested AUDIO sessions (clean vs flagged)")
+        print(f"  DB: {AUDIO_DB_PATH}")
+        print("=" * 60)
+        export_audio(out_path)
 
 
 if __name__ == "__main__":

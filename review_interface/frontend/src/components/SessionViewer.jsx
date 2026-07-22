@@ -594,12 +594,15 @@ export default function SessionViewer({ sessionId, sessionList, reviewerName, re
   const isSubmitted        = status === 'SUBMITTED_FOR_REVIEW';
   const isNeedsFinalReview = status === 'NEEDS_FINAL_REVIEW';
   const isReviewed         = status && status !== 'PENDING' && session.reviewer_id;
+  // Read-only confusion-matrix personas (TP/TN/FP/FN) are analysis views only —
+  // never allow them to mutate flags or run review actions.
+  const isClassificationView = ['TP', 'TN', 'FP', 'FN'].includes(reviewerName);
   // Flag editability by role:
   //  - L1 can edit/dismiss/confirm only while the session is still PENDING.
   //    Once they submit for L2 review, their flags freeze (read-only).
   //  - L2 (final reviewer) can edit/dismiss/confirm any session that is not
   //    yet LOCKED — including SUBMITTED_FOR_REVIEW / NEEDS_FINAL_REVIEW.
-  const flagsEditable = !isLocked && (
+  const flagsEditable = !isLocked && !isClassificationView && (
     reviewerRole === 'L2' ? true : status === 'PENDING'
   );
 
@@ -1056,8 +1059,10 @@ export default function SessionViewer({ sessionId, sessionList, reviewerName, re
               </div>
             )}
 
-            {/* Confirm-all / Dismiss-all: bulk-action every unconfirmed active flag */}
-            {!loading && unactionedFlagCount >= 2 && (
+            {/* Confirm-all / Dismiss-all: bulk-action every unconfirmed active flag.
+                Gated by flagsEditable (same as the per-flag buttons) so it never
+                renders on a LOCKED session or one that has frozen for this role. */}
+            {!loading && flagsEditable && unactionedFlagCount >= 2 && (
               <div style={{ marginBottom: 14, display: 'flex', gap: 8 }}>
                 <button
                   onClick={() => handleConfirmAll(unactionedFlagCount)}
@@ -1326,8 +1331,9 @@ export default function SessionViewer({ sessionId, sessionList, reviewerName, re
             )}
           </div>
 
-          {/* ── Decision panel — hidden when locked ──────────────────────── */}
-          {!isLocked && (
+          {/* ── Decision panel — hidden when locked or in a read-only
+                 classification (TP/TN/FP/FN) view ──────────────────────── */}
+          {!isLocked && !isClassificationView && (
           <div style={{ flexShrink: 0, borderTop: `2px solid ${C.border}`, background: C.bgSurface, padding: 20 }}>
 
             {/* ── L1: PENDING — submit form ────────────────────────────────── */}

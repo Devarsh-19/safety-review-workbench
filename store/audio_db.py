@@ -166,6 +166,8 @@ def fetch_audio_sessions_page(
     duration_max: float = None,
     flags_min: int = None,
     flags_max: int = None,
+    pauses_min: int = None,
+    pauses_max: int = None,
     roles: str = None,
     reviewer: str = None,
     verdict: str = None,
@@ -224,14 +226,14 @@ def fetch_audio_sessions_page(
         elif reviewer_role == "L2":
             where.append("s.review_status = 'SUBMITTED_FOR_REVIEW'")
 
-    # L1 reviewers (including "Multilingual", now a plain assignee) are scoped to
-    # the sessions assigned to them. Regional-language sessions are routed to
-    # "Multilingual" at assignment time, so no language-based filtering is needed.
-    # "Locked" and "Astrotalk Review" are read-only personas with their own
-    # visibility rules above — they are not assignees, so skip the assignee scope.
-    if reviewer_role == "L1" and reviewer_name and reviewer_name not in ("Locked", "Astrotalk Review"):
-        where.append("s.assigned_to = ?"); params.append(reviewer_name)
-    elif assigned_to:
+    # L1 reviewers see sessions of ALL languages: the dashboard is no longer
+    # scoped to the reviewer's own assignments. Regional-language sessions were
+    # previously routed to the "Multilingual" assignee and therefore hidden from
+    # everyone else's dashboard; dropping the per-reviewer assignee scope makes
+    # every language display for every L1 reviewer. Status-based visibility above
+    # still applies (L1 sees only reviewable sessions, not others' submitted/locked).
+    # The explicit "Assigned To" filter (L2 dropdown) is still honoured below.
+    if assigned_to:
         where.append("s.assigned_to LIKE ?"); params.append(f"%{assigned_to}%")
 
     if search:
@@ -241,7 +243,13 @@ def fetch_audio_sessions_page(
     elif has_video in ("0", "false", "no"):
         where.append("(s.has_video = 0 OR s.has_video IS NULL)")
     if lang:
-        where.append("s.lang LIKE ?"); params.append(f"%{lang}%")
+        lang_values = [v.strip() for v in lang.split(',') if v.strip()]
+        if lang_values:
+            like_clauses = []
+            for lv in lang_values:
+                like_clauses.append("s.lang LIKE ?")
+                params.append(f"%{lv}%")
+            where.append(f"({' OR '.join(like_clauses)})")
     if duration_min is not None:
         where.append("COALESCE(s.duration_seconds, sc.max_ts_end, 0) >= ?"); params.append(duration_min)
     if duration_max is not None:
@@ -250,6 +258,12 @@ def fetch_audio_sessions_page(
         where.append("COALESCE(fc.flag_count, 0) >= ?"); params.append(flags_min)
     if flags_max is not None:
         where.append("COALESCE(fc.flag_count, 0) <= ?"); params.append(flags_max)
+    if pauses_min is not None:
+        where.append("CASE WHEN s.pauses IS NOT NULL AND s.pauses != '' THEN COALESCE(json_array_length(s.pauses), 0) ELSE 0 END >= ?")
+        params.append(pauses_min)
+    if pauses_max is not None:
+        where.append("CASE WHEN s.pauses IS NOT NULL AND s.pauses != '' THEN COALESCE(json_array_length(s.pauses), 0) ELSE 0 END <= ?")
+        params.append(pauses_max)
     if roles == "assigned":
         where.append("s.speaker1_role IS NOT NULL AND s.speaker2_role IS NOT NULL")
     elif roles == "unassigned":
@@ -306,6 +320,7 @@ def fetch_audio_sessions_page(
         'duration': 'COALESCE(s.duration_seconds, sc.max_ts_end, 0)',
         'segments': 'segment_count',
         'flags': 'flag_count',
+        'pauses': 'pause_count',
         'verdict': AUDIO_OVERALL_VERDICT_SQL,
         'status': 's.review_status',
     }
@@ -324,7 +339,8 @@ def fetch_audio_sessions_page(
             f"""SELECT s.*,
                        COALESCE(fc.flag_count, 0)    AS flag_count,
                        COALESCE(sc.segment_count, 0) AS segment_count,
-                       COALESCE(s.duration_seconds, sc.max_ts_end, 0) AS duration_seconds
+                       COALESCE(s.duration_seconds, sc.max_ts_end, 0) AS duration_seconds,
+                       CASE WHEN s.pauses IS NOT NULL AND s.pauses != '' THEN COALESCE(json_array_length(s.pauses), 0) ELSE 0 END AS pause_count
                 {base}
                 {order_clause}
                 LIMIT ? OFFSET ?""",
@@ -362,26 +378,61 @@ def _active_audio_flag_rows(rows) -> list:
 
 
 def recompute_audio_session_verdict(s_id: int, conn) -> str:
-    """Recompute and persist overall_verdict + confidence_score from the
-    session's active flags.
-    Audio LLM session verdicts are binary: any active non-dismissed flag makes
-    the session FLAGGED; otherwise it is CLEAN."""
-    from engine.verdict_rules import get_db_confidence_for_verdict
+    """Recompute and persist the session's severity (stored in overall_verdict)
+    + confidence_score from its current active flags, using the Severity
+    Criteria (engine.severity_rules.classify_severity). Each flag's sender is
+    resolved seg_id -> ranked diarization label -> speaker1/2_role. Returns the
+    severity string (HIGH / MEDIUM / LOW / CLEAN)."""
+    from engine.severity_rules import classify_severity, SEVERITY_CONFIDENCE
 
+    # Each flag with its intent and whether the ASTROLOGER sent it. Labels are
+    # ranked by numeric part (SPEAKER_1 before SPEAKER_2); 1st -> speaker1_role,
+    # 2nd -> speaker2_role (mirrors astro_flag_ge5.py / the backfill script).
     rows = conn.execute(
-        "SELECT flag_id, intent, status, parent_flag_id FROM audio_flags WHERE s_id = ?", (s_id,)
+        """
+        WITH ranked_labels AS (
+            SELECT s_id, speaker AS label,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY s_id
+                       ORDER BY CAST(
+                           CASE WHEN instr(speaker,'_') > 0
+                                THEN substr(speaker, instr(speaker,'_')+1)
+                                ELSE speaker END AS INTEGER), speaker
+                   ) AS rn
+            FROM (SELECT DISTINCT s_id, speaker FROM audio_segments
+                  WHERE s_id = ? AND speaker IS NOT NULL)
+        ),
+        seg_role AS (
+            SELECT seg.seg_id,
+                   CASE rl.rn WHEN 1 THEN ss.speaker1_role
+                              WHEN 2 THEN ss.speaker2_role
+                              ELSE NULL END AS role
+            FROM audio_segments seg
+            JOIN audio_sessions ss ON ss.s_id = seg.s_id
+            LEFT JOIN ranked_labels rl ON rl.s_id = seg.s_id AND rl.label = seg.speaker
+            WHERE seg.s_id = ?
+        )
+        SELECT af.flag_id, af.intent, af.status, af.parent_flag_id,
+               CASE WHEN sr.role = 'ASTROLOGER' THEN 1 ELSE 0 END AS is_astro
+        FROM audio_flags af
+        LEFT JOIN seg_role sr ON sr.seg_id = af.seg_id
+        WHERE af.s_id = ?
+        """,
+        (s_id, s_id, s_id),
     ).fetchall()
-    has_active_flags = any(
-        r["status"] != "DISMISSED"
+
+    active_flags = [
+        (r["intent"], bool(r["is_astro"]))
         for r in _active_audio_flag_rows(rows)
-    )
-    verdict    = "FLAGGED" if has_active_flags else "CLEAN"
-    confidence = get_db_confidence_for_verdict(verdict)
+        if r["status"] != "DISMISSED"
+    ]
+    severity, _rule = classify_severity(active_flags)
+    confidence = SEVERITY_CONFIDENCE.get(severity, 0.0)
     conn.execute(
         "UPDATE audio_sessions SET overall_verdict = ?, confidence_score = ? WHERE s_id = ?",
-        (verdict, confidence, s_id),
+        (severity, confidence, s_id),
     )
-    return verdict
+    return severity
 
 
 def get_audio_flag_summary(s_id: int) -> dict:

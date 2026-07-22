@@ -133,6 +133,24 @@ _FLAGGED_BY_US_SQL = f"""(
               AND {_ACTIVE_FLAG})
 )"""
 
+# ---------------------------------------------------------------------------
+# Audio "flagged by us" for the confusion matrix. The audio taxonomy has no
+# category exclusion list; instead every flag is graded HIGH / MEDIUM / LOW,
+# so a session counts as flagged only when it carries at least one active
+# (non-dismissed, non-amended-parent) flag of HIGH or MEDIUM severity. This is
+# the audio analogue of chat's low-signal drop — LOW-only sessions are treated
+# as clean rather than trusting the blunt session-level overall_verdict.
+# ---------------------------------------------------------------------------
+_AUDIO_FLAGGED_BY_SEVERITY_SQL = """EXISTS (
+    SELECT 1 FROM audio_flags af
+    WHERE af.s_id = audio_sessions.s_id
+      AND UPPER(COALESCE(af.severity, '')) IN ('HIGH', 'MEDIUM')
+      AND (af.status IS NULL OR af.status != 'DISMISSED')
+      AND af.flag_id NOT IN (
+          SELECT parent_flag_id FROM audio_flags WHERE parent_flag_id IS NOT NULL
+      )
+)"""
+
 
 # ---------------------------------------------------------------------------
 # Lifespan — initialise DB (including session_note migration) on startup
@@ -877,6 +895,20 @@ def confirm_flag_endpoint(flag_id: int, body: LockRequest):
         raise HTTPException(status_code=500, detail=str(exc))
 
 
+def _reject_if_locked(conn, session_id: str) -> None:
+    """Guard bulk flag mutations: a LOCKED session is immutable. The frontend
+    already hides the Confirm-all / Dismiss-all buttons on locked sessions
+    (flagsEditable = !isLocked), but the API must enforce it too so the state
+    can't be reached directly."""
+    row = conn.execute(
+        "SELECT review_status FROM sessions WHERE session_id = ?", (session_id,)
+    ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"Session {session_id!r} not found")
+    if row["review_status"] == "LOCKED":
+        raise HTTPException(status_code=409, detail="Session is locked — flags are read-only")
+
+
 @app.post("/sessions/{session_id}/confirm-all-flags")
 def confirm_all_flags_endpoint(session_id: str, body: LockRequest):
     """
@@ -890,6 +922,7 @@ def confirm_all_flags_endpoint(session_id: str, body: LockRequest):
     conn = get_connection()
     try:
         with conn:
+            _reject_if_locked(conn, session_id)
             rows = conn.execute(
                 "SELECT flag_id, parent_flag_id, status FROM flags WHERE session_id = ?",
                 (session_id,),
@@ -944,6 +977,7 @@ def dismiss_all_flags_endpoint(session_id: str, body: LockRequest):
     conn = get_connection()
     try:
         with conn:
+            _reject_if_locked(conn, session_id)
             rows = conn.execute(
                 "SELECT flag_id, parent_flag_id, status FROM flags WHERE session_id = ?",
                 (session_id,),
@@ -1110,15 +1144,12 @@ def audio_stats(
     reviewer_name: Optional[str] = None,
     reviewer_role: Optional[str] = None,
 ):
-    # L1 (incl. "Multilingual", now a plain assignee): scope all counts to the
-    # sessions assigned to this reviewer (chat parity). "Astrotalk Review" is a
-    # read-only L1 client persona, not an assignee, so it is not scoped here.
-    if reviewer_role == "L1" and reviewer_name and reviewer_name != "Astrotalk Review":
-        scope  = " WHERE assigned_to = ?"
-        params = (reviewer_name,)
-    else:
-        scope  = ""
-        params = ()
+    # Stats are unscoped so the strip counts sessions of ALL languages, matching
+    # the queue: L1 dashboards no longer hide other-language sessions routed to
+    # the "Multilingual" assignee. (Previously L1 counts were scoped to
+    # assigned_to = reviewer_name.)
+    scope  = ""
+    params = ()
 
     try:
         with get_audio_connection() as conn:
@@ -1128,15 +1159,28 @@ def audio_stats(
                     SUM(CASE WHEN review_status = 'PENDING'              THEN 1 ELSE 0 END) AS total_pending,
                     SUM(CASE WHEN review_status = 'SUBMITTED_FOR_REVIEW' THEN 1 ELSE 0 END) AS count_submitted,
                     SUM(CASE WHEN review_status = 'LOCKED'               THEN 1 ELSE 0 END) AS count_locked,
-                    SUM(CASE WHEN review_status = 'LOCKED' AND overall_verdict = 'CLEAN'                THEN 1 ELSE 0 END) AS count_locked_clean,
-                    SUM(CASE WHEN review_status = 'LOCKED' AND overall_verdict IN ('FLAGGED', 'SEVERE') THEN 1 ELSE 0 END) AS count_locked_flagged,
+                    -- Ground-truth (GT) "flagged" is a FLAG-LEVEL signal — an active
+                    -- HIGH/MEDIUM flag (_AUDIO_FLAGGED_BY_SEVERITY_SQL) — which is the
+                    -- audio analogue of chat's flagged-by-us. overall_verdict stores
+                    -- the severity GRADE (HIGH/MEDIUM/LOW/CLEAN), so it never equals
+                    -- 'FLAGGED'/'SEVERE' and must NOT be used to decide GT here (doing
+                    -- so silently zeroed out every "flagged" count).
+                    SUM(CASE WHEN review_status = 'LOCKED' AND NOT ({_AUDIO_FLAGGED_BY_SEVERITY_SQL}) THEN 1 ELSE 0 END) AS count_locked_clean,
+                    SUM(CASE WHEN review_status = 'LOCKED' AND {_AUDIO_FLAGGED_BY_SEVERITY_SQL}       THEN 1 ELSE 0 END) AS count_locked_flagged,
                     0                                                    AS count_severe,
-                    SUM(CASE WHEN overall_verdict IN ('FLAGGED', 'SEVERE') THEN 1 ELSE 0 END) AS count_flagged,
-                    SUM(CASE WHEN overall_verdict = 'CLEAN'              THEN 1 ELSE 0 END) AS count_clean,
-                    SUM(CASE WHEN astrotalk_verdict IN ('FLAGGED', 'SEVERE') AND overall_verdict IN ('FLAGGED', 'SEVERE') THEN 1 ELSE 0 END) AS count_tp,
-                    SUM(CASE WHEN astrotalk_verdict IN ('FLAGGED', 'SEVERE') AND overall_verdict = 'CLEAN' THEN 1 ELSE 0 END) AS count_fp,
-                    SUM(CASE WHEN astrotalk_verdict = 'CLEAN' AND overall_verdict IN ('FLAGGED', 'SEVERE') THEN 1 ELSE 0 END) AS count_fn,
-                    SUM(CASE WHEN astrotalk_verdict = 'CLEAN' AND overall_verdict = 'CLEAN' THEN 1 ELSE 0 END) AS count_tn
+                    SUM(CASE WHEN {_AUDIO_FLAGGED_BY_SEVERITY_SQL} THEN 1 ELSE 0 END) AS count_flagged,
+                    SUM(CASE WHEN NOT ({_AUDIO_FLAGGED_BY_SEVERITY_SQL}) THEN 1 ELSE 0 END) AS count_clean,
+                    -- Confusion matrix (chat parity): rows = AstroTalk's own binary
+                    -- verdict, where NULL (never scored) counts as CLEAN just like
+                    -- chat's astrotalk_flagged; cols = GT flagged-by-severity above.
+                    SUM(CASE WHEN astrotalk_verdict IN ('FLAGGED', 'SEVERE')
+                              AND {_AUDIO_FLAGGED_BY_SEVERITY_SQL} THEN 1 ELSE 0 END) AS count_tp,
+                    SUM(CASE WHEN astrotalk_verdict IN ('FLAGGED', 'SEVERE')
+                              AND NOT ({_AUDIO_FLAGGED_BY_SEVERITY_SQL}) THEN 1 ELSE 0 END) AS count_fp,
+                    SUM(CASE WHEN (astrotalk_verdict IS NULL OR astrotalk_verdict NOT IN ('FLAGGED', 'SEVERE'))
+                              AND {_AUDIO_FLAGGED_BY_SEVERITY_SQL} THEN 1 ELSE 0 END) AS count_fn,
+                    SUM(CASE WHEN (astrotalk_verdict IS NULL OR astrotalk_verdict NOT IN ('FLAGGED', 'SEVERE'))
+                              AND NOT ({_AUDIO_FLAGGED_BY_SEVERITY_SQL}) THEN 1 ELSE 0 END) AS count_tn
                 FROM audio_sessions{scope}
             """, params).fetchone()
             result = {k: (row[k] or 0) for k in row.keys()}
@@ -1219,6 +1263,27 @@ def audio_violation_stats():
         return []
 
 
+@app.get("/audio/languages")
+def audio_languages():
+    """Return sorted list of distinct individual language values across all audio sessions.
+    The lang column may contain comma-separated values like 'HINDI, ENGLISH'
+    so we split and deduplicate."""
+    try:
+        with get_audio_connection() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT lang FROM audio_sessions WHERE lang IS NOT NULL AND lang != ''"
+            ).fetchall()
+        langs = set()
+        for r in rows:
+            for part in r["lang"].split(","):
+                part = part.strip()
+                if part:
+                    langs.add(part)
+        return sorted(langs)
+    except Exception:
+        return []
+
+
 @app.get("/audio/sessions")
 def audio_sessions(
     status: Optional[str] = None,
@@ -1232,6 +1297,8 @@ def audio_sessions(
     duration_max: Optional[float] = Query(default=None, ge=0),
     flags_min: Optional[int] = Query(default=None, ge=0),
     flags_max: Optional[int] = Query(default=None, ge=0),
+    pauses_min: Optional[int] = Query(default=None, ge=0),
+    pauses_max: Optional[int] = Query(default=None, ge=0),
     roles: Optional[str] = None,
     reviewer: Optional[str] = None,
     verdict: Optional[str] = None,
@@ -1249,6 +1316,7 @@ def audio_sessions(
         has_video=has_video, lang=lang,
         duration_min=duration_min, duration_max=duration_max,
         flags_min=flags_min, flags_max=flags_max,
+        pauses_min=pauses_min, pauses_max=pauses_max,
         roles=roles, reviewer=reviewer,
         verdict=verdict, astrotalk_verdict=astrotalk_verdict,
         flag_category=flag_category,

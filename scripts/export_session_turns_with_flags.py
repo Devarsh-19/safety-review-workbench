@@ -1,0 +1,507 @@
+"""
+export_session_turns_with_flags.py
+
+Flat CSV export of EVERY session with ALL its turns — one row per turn — with
+extra columns marking which turns carry an ACTIVE flag. Two databases:
+
+  chat  (store/astrotalk.db)     sessions / turns    / flags       -> 6 CSV parts
+  audio (store/audio_review.db)  audio_sessions / audio_segments / audio_flags
+                                                                   -> 1 CSV file
+
+By default a single run exports both: the chat DB split into --parts files (6 by
+default) at whole-session boundaries, and the audio DB as one file. Use --db to
+run only one of them.
+
+CSV only (utf-8-sig, opens cleanly in Excel).
+
+Strictly read-only: both DBs are opened with mode=ro, so SQLite rejects any
+write — this script cannot modify either database.
+
+"Active" flag = the same rule the app and the other scripts use:
+  - status is not DISMISSED, and
+  - the row is an amendment, or an original that has no amendment (an amended
+    original is superseded by its amendment row and does not count).
+A turn "has an active flag" when an active flag's turn_id points at it.
+
+Per-turn columns added after the turn's own fields:
+  - has_active_flag        1 / 0
+  - active_flag_count      number of active flags on that turn
+  - active_flag_categories comma-separated category_code list (active only)
+
+Turns with no flag get has_active_flag = 0, count 0, empty categories. Active
+flags whose turn_id does not resolve to a turn (NULL / stale) are not attached to
+any turn row; pass --report-unlinked to print how many there are.
+
+Performance: all flag aggregation is done in SQL (one query), and CSV output is
+streamed straight from the cursor with csv.writerows — no per-row Python work and
+nothing buffered in memory, so it stays fast on a large production DB.
+
+Output: CSV (utf-8-sig, opens cleanly in Excel). Defaults to
+exports/session_turns_with_flags.csv (chat) and
+exports/audio_session_segments_with_flags.csv (audio).
+
+Usage:
+  python scripts/export_session_turns_with_flags.py                       # chat 6 parts + audio 1 file
+  python scripts/export_session_turns_with_flags.py --flagged-only        # skip CLEAN sessions
+  python scripts/export_session_turns_with_flags.py --parts 6             # chat into 6 CSVs
+  python scripts/export_session_turns_with_flags.py --db chat             # only the chat DB
+  python scripts/export_session_turns_with_flags.py --db audio            # only the audio DB
+  python scripts/export_session_turns_with_flags.py --report-unlinked
+
+--parts N splits the CHAT CSV output into N files (name_part1of6.csv ...),
+dividing sessions evenly across the files at whole-session boundaries — every
+turn of a session always lands in the same file, so no session is split across
+two CSVs. The audio DB is always written as a single file.
+"""
+
+import argparse
+import csv
+import sqlite3
+import sys
+from pathlib import Path
+
+from dotenv import load_dotenv
+load_dotenv()
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from store.db import DB_PATH  # noqa: E402
+from store.audio_db import AUDIO_DB_PATH  # noqa: E402
+from engine.language_detector import LANGUAGE_MAP  # noqa: E402
+
+# Chat language shown to match the UI: language_detected first (the column the
+# review UI displays), falling back to the input language_code (1-24) mapped via
+# LANGUAGE_MAP (English/Hindi/...). Built as SQL so the per-turn cursor still
+# streams straight to CSV. Names contain no quotes.
+_LANG_CASE = "CASE CAST(s.language_code AS TEXT) " + "".join(
+    f"WHEN '{code}' THEN '{name}' " for code, name in LANGUAGE_MAP.items()
+) + "ELSE '' END"
+_LANG_EXPR = f"COALESCE(NULLIF(s.language_detected, ''), {_LANG_CASE})"
+
+
+def get_readonly_connection(db_path: str = DB_PATH) -> sqlite3.Connection:
+    """Open a DB strictly read-only (mode=ro): SQLite rejects any write, so this
+    export can never modify the database. A live app is undisturbed. Defaults to
+    the chat DB; pass AUDIO_DB_PATH for the audio DB.
+    No row_factory — plain tuples stream fastest into csv.writerows.
+
+    Tuned for a large (multi-GB) DB: memory-map the file so reads come from the
+    OS page cache instead of syscalls, and give SQLite a bigger page cache. Both
+    are session-local PRAGMAs — they change nothing on disk. Failures (e.g. mmap
+    unsupported) are non-fatal; the export just runs a little slower."""
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    for pragma in (
+        "PRAGMA mmap_size = 8000000000",  # up to ~8 GB memory-mapped reads
+        "PRAGMA cache_size = -262144",    # 256 MB page cache (negative = KiB)
+    ):
+        try:
+            conn.execute(pragma)
+        except sqlite3.Error:
+            pass
+    return conn
+
+
+HEADER = [
+    # session-level context (repeated on every turn of the session)
+    "session_id", "astrotalk_flagged", "language",
+    # turn-level
+    "turn_id", "speaker", "timestamp", "message_text",
+    # flag summary for THIS turn (active flags only)
+    "has_active_flag", "active_flag_count", "active_flag_categories",
+    # audio segment tone (audio export only; blank for chat, which has no tone)
+    "tone",
+]
+
+# A "flagged" session = overall_verdict is not CLEAN — the same definition the
+# violation-breakdown scripts use. (A CLEAN session has no active flags anyway,
+# so this only drops turns that would all be has_active_flag = 0.) NULL verdicts
+# are excluded by != 'CLEAN', which is intended: only genuinely-flagged sessions.
+_FLAGGED_WHERE = "WHERE s.overall_verdict != 'CLEAN'"
+
+
+def build_export_sql(flagged_only: bool = False) -> str:
+    """One query does everything: aggregate each turn's ACTIVE flags in SQL, then
+    LEFT JOIN onto every turn so turns with no flag still appear (has_active_flag
+    = 0). Columns come out in HEADER order, ready to stream. With flagged_only,
+    CLEAN sessions are dropped."""
+    where = _FLAGGED_WHERE if flagged_only else ""
+    return f"""
+    WITH active AS (
+        SELECT f.session_id, f.turn_id, f.category_code
+        FROM flags f
+        WHERE (f.status IS NULL OR f.status != 'DISMISSED')
+          AND f.turn_id IS NOT NULL
+          AND f.flag_id NOT IN (
+              SELECT parent_flag_id FROM flags WHERE parent_flag_id IS NOT NULL
+          )
+    ),
+    agg AS (
+        SELECT session_id, turn_id,
+               COUNT(*)                        AS cnt,
+               group_concat(category_code, ', ') AS cats
+        FROM active
+        GROUP BY session_id, turn_id
+    )
+    SELECT s.session_id, s.astrotalk_flagged, {_LANG_EXPR} AS language,
+           t.turn_id, t.speaker, t.timestamp, t.message_text,
+           CASE WHEN a.cnt IS NULL THEN 0 ELSE 1 END AS has_active_flag,
+           COALESCE(a.cnt, 0)                        AS active_flag_count,
+           COALESCE(a.cats, '')                      AS active_flag_categories,
+           ''                                        AS tone
+    FROM turns t
+    JOIN sessions s ON s.session_id = t.session_id
+    LEFT JOIN agg a ON a.session_id = t.session_id AND a.turn_id = t.turn_id
+    {where}
+    ORDER BY s.session_id, t.turn_id
+"""
+
+
+# Unfiltered base query (all sessions) — kept as a module constant so the JSON
+# export script can import it unchanged.
+EXPORT_SQL = build_export_sql()
+
+
+def build_export_count_sql(flagged_only: bool = False) -> str:
+    """Row count for the summary line. Unfiltered, a plain COUNT(*) over turns
+    walks the smallest index once. Flagged-only needs the sessions join to test
+    the verdict, but only over the (smaller) flagged subset."""
+    if not flagged_only:
+        # Equals the exported row count under referential integrity (every turn
+        # has a session, per the FK); orphan turns would be the only skew.
+        return "SELECT COUNT(*) FROM turns"
+    return f"""
+        SELECT COUNT(*)
+        FROM turns t
+        JOIN sessions s ON s.session_id = t.session_id
+        {_FLAGGED_WHERE}
+    """
+
+def build_session_count_sql(flagged_only: bool = False) -> str:
+    """Number of DISTINCT sessions in scope. Used to divide sessions evenly across
+    --parts files. Matches the export's session set (turns JOIN sessions)."""
+    if not flagged_only:
+        return "SELECT COUNT(DISTINCT session_id) FROM turns"
+    return f"""
+        SELECT COUNT(DISTINCT t.session_id)
+        FROM turns t
+        JOIN sessions s ON s.session_id = t.session_id
+        {_FLAGGED_WHERE}
+    """
+
+
+# --- Audio DB (store/audio_review.db) ---------------------------------------
+# The audio export uses the EXACT SAME columns/names as the chat export (HEADER),
+# so the two CSVs line up 1:1. The audio schema is mapped onto those column names:
+#   session_id  <- audio_sessions.s_id      turn_id     <- audio_segments.seg_id
+#   language    <- audio_sessions.lang      timestamp   <- "HH:MM:SS | HH:MM:SS"
+#     (start | end, formatted to match the review UI's formatTime). For a flagged
+#     segment this is the flag's own precise span (falling back to the segment
+#     span), matching what the UI shows; multiple flags on one segment are joined
+#     by ' ; '. Unflagged segments show the segment span; blank when no segment.
+#   speaker     <- the DB role (ASTROLOGER / USER): audio_segments.speaker holds a
+#     diarization label (SPEAKER_1/SPEAKER_2), so labels are ranked per session
+#     (1st -> speaker1_role, 2nd -> speaker2_role) exactly as store/audio_db.py
+#     does; falls back to the raw label when the session's roles are unassigned.
+#   astrotalk_flagged <- audio_sessions.astrotalk_verdict FLAGGED/CLEAN -> 1/0.
+#   message_text <- audio_flags.transcript for that segment. Audio segments carry
+#     NO transcript of their own (only speaker/tone/timing); the spoken text lives
+#     only on flags. A segment with no flag therefore has no transcript anywhere
+#     in the DB, so its message_text is the explicit _AUDIO_NO_TEXT marker below
+#     (not a blank cell, which reads as an export bug).
+#   active_flag_categories <- audio_flags.intent (audio's category analogue).
+#   tone        <- audio_segments.tone (the flagged segment's tone; blank in the
+#     chat export, whose turns carry no tone).
+
+# Shown for a real audio segment that has no flag transcript — the DB stores no
+# per-segment transcript, so there is genuinely no text to export for it. A
+# distinct marker (rather than "") makes clear the cell is empty by data, not bug.
+_AUDIO_NO_TEXT = "[no transcript]"
+
+def _hms_sql(col: str) -> str:
+    """SQL that renders a seconds column as HH:MM:SS, matching the review UI's
+    formatTime (AudioSessionViewer.jsx): round to whole seconds, then zero-pad
+    hours/minutes/seconds. NULL rounds to 0 -> '00:00:00'."""
+    sec = f"CAST(ROUND(COALESCE({col}, 0)) AS INTEGER)"
+    return f"printf('%02d:%02d:%02d', {sec} / 3600, ({sec} % 3600) / 60, {sec} % 60)"
+
+
+# Normalise the legacy SEVERE verdict to FLAGGED (store/audio_db.py parity).
+_AUDIO_VERDICT = "CASE WHEN {c} = 'SEVERE' THEN 'FLAGGED' ELSE {c} END"
+# A flagged audio session = overall_verdict is not CLEAN (SEVERE counts as
+# flagged; NULL verdicts are excluded, same intent as the chat export).
+_AUDIO_FLAGGED_WHERE = "WHERE s.overall_verdict != 'CLEAN'"
+
+
+def build_audio_export_sql(flagged_only: bool = False) -> str:
+    """Audio counterpart of build_export_sql, emitting the SAME columns as the
+    chat export (HEADER). Aggregate each segment's ACTIVE flags — count, intents
+    (as active_flag_categories) and their transcripts (as message_text) — then
+    LEFT JOIN onto every segment so unflagged segments still appear. Active-flag
+    rule matches store/audio_db.py: not DISMISSED and not an amended original (an
+    original superseded by an amendment row does not count).
+
+    Driven FROM audio_sessions with a LEFT JOIN to audio_segments, so a session
+    that has NO segments still emits exactly one row (blank segment fields,
+    has_active_flag = 0) instead of vanishing from the export.
+
+    message_text is the segment's active-flag transcript(s); audio_segments store
+    no text of their own, so a segment with no flag shows the _AUDIO_NO_TEXT marker
+    (blank only for the placeholder row of a session that has no segments)."""
+    where = _AUDIO_FLAGGED_WHERE if flagged_only else ""
+    astro = _AUDIO_VERDICT.format(c="s.astrotalk_verdict")
+    return f"""
+    WITH active AS (
+        -- Prefer the flag's own precise span (af.ts_start/ts_end); fall back to
+        -- the segment span when the flag has none — exactly what the review UI
+        -- shows (AudioSessionViewer.jsx: f.ts_start ?? seg?.ts_start).
+        SELECT af.s_id, af.seg_id, af.intent, af.transcript,
+               COALESCE(af.ts_start, seg.ts_start) AS ts_start,
+               COALESCE(af.ts_end, seg.ts_end)     AS ts_end
+        FROM audio_flags af
+        LEFT JOIN audio_segments seg
+               ON seg.s_id = af.s_id AND seg.seg_id = af.seg_id
+        WHERE (af.status IS NULL OR af.status != 'DISMISSED')
+          AND af.seg_id IS NOT NULL
+          AND af.flag_id NOT IN (
+              SELECT parent_flag_id FROM audio_flags WHERE parent_flag_id IS NOT NULL
+          )
+    ),
+    agg AS (
+        SELECT s_id, seg_id,
+               COUNT(*)                        AS cnt,
+               group_concat(intent, ', ')      AS cats,
+               group_concat(transcript, ' | ') AS texts,
+               group_concat({_hms_sql('ts_start')} || ' | ' || {_hms_sql('ts_end')},
+                            ' ; ')             AS spans
+        FROM active
+        GROUP BY s_id, seg_id
+    ),
+    -- Map each diarization label to a rank per session (SPEAKER_1 before
+    -- SPEAKER_2 by numeric part): 1st -> speaker1_role, 2nd -> speaker2_role,
+    -- mirroring store/audio_db.py so the exported speaker is the DB role
+    -- (ASTROLOGER / USER) rather than the raw diarization label.
+    ranked_labels AS (
+        SELECT s_id, label,
+               ROW_NUMBER() OVER (
+                   PARTITION BY s_id
+                   ORDER BY CAST(
+                       CASE WHEN instr(label, '_') > 0
+                            THEN substr(label, instr(label, '_') + 1)
+                            ELSE label END AS INTEGER), label
+               ) AS rn
+        FROM (SELECT DISTINCT s_id, speaker AS label FROM audio_segments
+              WHERE speaker IS NOT NULL)
+    )
+    SELECT s.s_id                                        AS session_id,
+           CASE WHEN {astro} = 'FLAGGED' THEN 1
+                WHEN {astro} = 'CLEAN'   THEN 0
+                ELSE NULL END                           AS astrotalk_flagged,
+           s.lang                                       AS language,
+           t.seg_id                                     AS turn_id,
+           COALESCE(
+               CASE rl.rn WHEN 1 THEN s.speaker1_role
+                          WHEN 2 THEN s.speaker2_role
+                          ELSE NULL END,
+               t.speaker)                               AS speaker,
+           CASE WHEN t.seg_id IS NULL THEN ''
+                WHEN a.spans IS NOT NULL THEN a.spans
+                ELSE {_hms_sql('t.ts_start')} || ' | ' || {_hms_sql('t.ts_end')}
+           END                                          AS timestamp,
+           CASE WHEN a.texts IS NOT NULL THEN a.texts
+                WHEN t.seg_id IS NOT NULL THEN '{_AUDIO_NO_TEXT}'
+                ELSE '' END                             AS message_text,
+           CASE WHEN a.cnt IS NULL THEN 0 ELSE 1 END    AS has_active_flag,
+           COALESCE(a.cnt, 0)                           AS active_flag_count,
+           COALESCE(a.cats, '')                         AS active_flag_categories,
+           COALESCE(t.tone, '')                         AS tone
+    FROM audio_sessions s
+    LEFT JOIN audio_segments t ON t.s_id = s.s_id
+    LEFT JOIN agg a ON a.s_id = t.s_id AND a.seg_id = t.seg_id
+    LEFT JOIN ranked_labels rl ON rl.s_id = t.s_id AND rl.label = t.speaker
+    {where}
+    ORDER BY s.s_id, t.seg_id
+"""
+
+
+def build_audio_count_sql(flagged_only: bool = False) -> str:
+    """Row count for the summary line. Matches the export: one row per segment,
+    plus one row for every session that has no segments at all."""
+    where = f" {_AUDIO_FLAGGED_WHERE}" if flagged_only else ""
+    seg_join = "JOIN audio_sessions s ON s.s_id = t.s_id" if flagged_only else ""
+    return f"""
+        SELECT (
+            SELECT COUNT(*) FROM audio_segments t {seg_join}{where}
+        ) + (
+            SELECT COUNT(*) FROM audio_sessions s
+            WHERE NOT EXISTS (SELECT 1 FROM audio_segments g WHERE g.s_id = s.s_id){
+                (" AND " + _AUDIO_FLAGGED_WHERE.replace("WHERE ", "")) if flagged_only else ""}
+        )
+    """
+
+
+COUNT_UNLINKED_SQL = """
+    SELECT COUNT(*)
+    FROM flags f
+    LEFT JOIN turns t
+      ON t.session_id = f.session_id AND t.turn_id = f.turn_id
+    WHERE (f.status IS NULL OR f.status != 'DISMISSED')
+      AND f.flag_id NOT IN (
+          SELECT parent_flag_id FROM flags WHERE parent_flag_id IS NOT NULL
+      )
+      AND t.turn_id IS NULL
+"""
+
+
+def _part_paths(out_path, parts):
+    """Per-part output paths, e.g. foo.csv -> foo_part1of6.csv ... foo_part6of6.csv."""
+    if parts <= 1:
+        return [out_path]
+    return [
+        out_path.with_name(f"{out_path.stem}_part{i + 1}of{parts}{out_path.suffix}")
+        for i in range(parts)
+    ]
+
+
+def write_csv(conn, out_path, export_sql, header, count_sql,
+              session_count_sql=None, parts=1):
+    """Stream an export cursor to CSV, splitting into `parts` files at whole-
+    session boundaries.
+
+    parts == 1: csv.writerows consumes the cursor at C speed — no per-row Python.
+    parts > 1 : the export is ORDER BY <session id>, so a session's rows are
+    contiguous; we bump a session counter on each id change and route by
+    (index * parts // total) — balanced, contiguous chunks with every row of a
+    session in one file. Needs session_count_sql to know the divisor.
+
+    Returns (total_rows, per_part_row_counts, paths).
+    """
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    cur = conn.execute(export_sql)
+
+    # utf-8-sig so Excel renders Hindi/other non-ASCII correctly.
+    # 1 MB buffer so a multi-million-row write isn't dominated by tiny syscalls.
+    if parts <= 1:
+        with open(out_path, "w", newline="", encoding="utf-8-sig", buffering=1 << 20) as fh:
+            writer = csv.writer(fh)
+            writer.writerow(header)
+            writer.writerows(cur)
+        total = conn.execute(count_sql).fetchone()[0]
+        return total, [total], [out_path]
+
+    total_sessions = conn.execute(session_count_sql).fetchone()[0]
+    paths = _part_paths(out_path, parts)
+    files, writers = [], []
+    for p in paths:
+        fh = open(p, "w", newline="", encoding="utf-8-sig", buffering=1 << 20)
+        w = csv.writer(fh)
+        w.writerow(header)
+        files.append(fh)
+        writers.append(w)
+
+    counts = [0] * parts
+    total_rows = 0
+    session_index = -1
+    _UNSET = object()
+    prev_sid = _UNSET
+    try:
+        for row in cur:
+            sid = row[0]
+            if sid != prev_sid:
+                session_index += 1
+                prev_sid = sid
+            part = (session_index * parts) // total_sessions if total_sessions else 0
+            if part >= parts:
+                part = parts - 1
+            writers[part].writerow(row)
+            counts[part] += 1
+            total_rows += 1
+    finally:
+        for fh in files:
+            fh.close()
+    return total_rows, counts, paths
+
+
+def _print_result(title, db_path, flagged_only, n, counts, paths, unit, unlinked=None):
+    print("=" * 64)
+    print(f"  {title}")
+    print(f"  DB    : {db_path}")
+    print(f"  Scope : {'flagged sessions only (verdict != CLEAN)' if flagged_only else 'all sessions'}")
+    if len(paths) == 1:
+        print(f"  Out   : {paths[0]}  ({n:,} {unit} rows)")
+    else:
+        print(f"  Out   : {len(paths)} parts, {n:,} {unit} rows total")
+        for p, c in zip(paths, counts):
+            print(f"          {p}  ({c:,} rows)")
+    if unlinked is not None:
+        print(f"  Active flags with no resolvable turn (not in export): {unlinked:,}")
+    print("=" * 64)
+
+
+def export_chat(out_path, flagged_only, parts, report_unlinked):
+    """Chat DB -> per-turn CSV, split into `parts` files at session boundaries."""
+    conn = get_readonly_connection(DB_PATH)
+    try:
+        unlinked = conn.execute(COUNT_UNLINKED_SQL).fetchone()[0] if report_unlinked else None
+        n, counts, paths = write_csv(
+            conn, out_path,
+            export_sql=build_export_sql(flagged_only),
+            header=HEADER,
+            count_sql=build_export_count_sql(flagged_only),
+            session_count_sql=build_session_count_sql(flagged_only),
+            parts=parts,
+        )
+    finally:
+        conn.close()
+    _print_result("Chat: session turns + active-flag markers", DB_PATH,
+                  flagged_only, n, counts, paths, "turn", unlinked)
+
+
+def export_audio(out_path, flagged_only):
+    """Audio DB -> per-segment CSV, always a single file. Same columns as chat."""
+    conn = get_readonly_connection(AUDIO_DB_PATH)
+    try:
+        n, counts, paths = write_csv(
+            conn, out_path,
+            export_sql=build_audio_export_sql(flagged_only),
+            header=HEADER,
+            count_sql=build_audio_count_sql(flagged_only),
+            parts=1,
+        )
+    finally:
+        conn.close()
+    _print_result("Audio: session segments + active-flag markers", AUDIO_DB_PATH,
+                  flagged_only, n, counts, paths, "segment")
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Export every session's turns/segments with a per-turn active-flag "
+                    "marker (CSV only). Chat DB is split into --parts files; audio DB "
+                    "is a single file."
+    )
+    parser.add_argument("--db", choices=("both", "chat", "audio"), default="both",
+                        help="Which database(s) to export (default: both).")
+    parser.add_argument("--out", default="exports/session_turns_with_flags.csv",
+                        help="Chat CSV path (default: exports/session_turns_with_flags.csv).")
+    parser.add_argument("--audio-out", default="exports/audio_session_segments_with_flags.csv",
+                        help="Audio CSV path (default: exports/audio_session_segments_with_flags.csv).")
+    parser.add_argument("--report-unlinked", action="store_true",
+                        help="Also print how many active chat flags have no resolvable turn.")
+    parser.add_argument("--flagged-only", action="store_true",
+                        help="Export only flagged sessions (overall_verdict != 'CLEAN'); "
+                             "skip CLEAN sessions entirely.")
+    parser.add_argument("--parts", type=int, default=6,
+                        help="Split the CHAT CSV into N files at whole-session boundaries "
+                             "(default: 6). The audio CSV is always a single file.")
+    args = parser.parse_args()
+
+    if args.parts < 1:
+        parser.error("--parts must be >= 1")
+
+    if args.db in ("both", "chat"):
+        export_chat(Path(args.out), args.flagged_only, args.parts, args.report_unlinked)
+    if args.db in ("both", "audio"):
+        export_audio(Path(args.audio_out), args.flagged_only)
+
+
+if __name__ == "__main__":
+    main()

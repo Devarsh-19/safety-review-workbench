@@ -85,47 +85,54 @@ def initialise_db() -> None:
 
 def recompute_session_verdict(session_id: str, conn) -> str:
     """
-    Recompute and persist overall_verdict for a session based on its current
-    active flags. Uses the amendment row if one exists for a flag, otherwise
-    uses the original row. Returns the new verdict string.
+    Recompute and persist the session's severity (stored in overall_verdict)
+    from its current active flags, using the Severity Criteria
+    (engine.severity_rules.classify_severity). Uses the amendment row if one
+    exists for a flag, otherwise the original row. Returns the severity string
+    (HIGH / MEDIUM / LOW / CLEAN).
     """
-    from engine.verdict_rules import get_db_verdict_for_flags, get_db_confidence_for_verdict
+    from engine.severity_rules import classify_severity, SEVERITY_CONFIDENCE
 
-    # Fetch all flags for this session — exclude amendment children from the
-    # base query; we'll pick them up via parent_flag_id logic below.
+    # Fetch all flags for this session with the flagged turn's speaker, so we
+    # know whether the ASTROLOGER authored each flag. Amendment children are
+    # resolved below via parent_flag_id.
     rows = conn.execute(
-        """SELECT flag_id, category_code, source, status, parent_flag_id
-           FROM flags WHERE session_id = ?""",
+        """SELECT f.flag_id, f.category_code, f.status, f.parent_flag_id,
+                  CASE WHEN t.speaker = 'ASTROLOGER' THEN 1 ELSE 0 END AS is_astro
+           FROM flags f
+           LEFT JOIN turns t
+                  ON t.session_id = f.session_id AND t.turn_id = f.turn_id
+           WHERE f.session_id = ?""",
         (session_id,),
     ).fetchall()
 
-    # Build active category list:
+    # Build the active (category, is_astrologer) list:
     # 1. Collect parent flags (no parent_flag_id)
-    # 2. If a parent has an amendment child, use the child's category_code
-    # 3. If a parent has no amendment, use the parent's own category_code
+    # 2. If a parent has an amendment child, use the child's row
+    # 3. If a parent has no amendment, use the parent's own row
     parent_ids_with_amendment = {
         r["parent_flag_id"] for r in rows if r["parent_flag_id"] is not None
     }
-    active_codes = []
+    active_flags: list[tuple[str, bool]] = []
     for r in rows:
         if (r["status"] or "") == "DISMISSED":
             continue
         if r["parent_flag_id"] is not None:
             # This is an amendment row — it is the active version; include it
-            active_codes.append(r["category_code"])
+            active_flags.append((r["category_code"], bool(r["is_astro"])))
         elif r["flag_id"] not in parent_ids_with_amendment:
             # Original row with no amendment — it is the active version
-            active_codes.append(r["category_code"])
+            active_flags.append((r["category_code"], bool(r["is_astro"])))
         # else: original row that has been amended — skip, amendment already included
 
-    verdict    = get_db_verdict_for_flags(active_codes)
-    confidence = get_db_confidence_for_verdict(verdict)
+    severity, _rule = classify_severity(active_flags)
+    confidence = SEVERITY_CONFIDENCE.get(severity, 0.0)
 
     conn.execute(
         "UPDATE sessions SET overall_verdict = ?, confidence_score = ? WHERE session_id = ?",
-        (verdict, confidence, session_id),
+        (severity, confidence, session_id),
     )
-    return verdict
+    return severity
 
 
 def fetch_sessions(
@@ -167,12 +174,21 @@ _SORT_COLUMNS = {
     "manual_flag_count": "manual_flag_count",
 }
 
-# Default language visibility (matches the previous client-side allowlist).
-_ALLOWED_LANGUAGES = ("english", "hindi", "hinglish")
-
 _SESSION_FROM = "FROM sessions s"
 
+# Read-only confusion-matrix login personas. AstroTalk (astrotalk_flagged) is the
+# PREDICTOR being evaluated; our workbench review (has_active_flag) is GROUND
+# TRUTH. Positive class = "flagged". See the branch in fetch_sessions_page.
+_CLASSIFICATION_PERSONAS = {"TP", "TN", "FP", "FN"}
+
 _VISIBLE_FLAG_SQL = "(f.status IS NULL OR f.status != 'DISMISSED')"
+# has_active_flag: session carries at least one active (non-dismissed) flag,
+# any source — matches the "Flags" count shown in the queue. Used as the
+# workbench-review ground-truth signal for the classification personas.
+_HAS_ACTIVE_FLAG_SQL = (
+    "EXISTS (SELECT 1 FROM flags f "
+    f"WHERE f.session_id = s.session_id AND {_VISIBLE_FLAG_SQL})"
+)
 _FLAG_COUNT_SQL = (
     "SELECT COUNT(*) FROM flags f "
     f"WHERE f.session_id = s.session_id AND {_VISIBLE_FLAG_SQL}"
@@ -220,9 +236,25 @@ def fetch_sessions_page(
     if status:
         where.append("s.review_status = ?"); params.append(status)
 
+    # Read-only confusion-matrix personas (TP/TN/FP/FN): show ONLY the sessions
+    # in that bucket, across all review statuses. AstroTalk is the PREDICTOR
+    # (astrotalk_flagged) evaluated against our workbench review as GROUND TRUTH
+    # (has_active_flag). Positive class = "flagged". Checked first so role-based
+    # status visibility below is skipped.
+    if reviewer_name in _CLASSIFICATION_PERSONAS:
+        gt_pos   = _HAS_ACTIVE_FLAG_SQL                          # ground truth: we flagged
+        gt_neg   = f"NOT {_HAS_ACTIVE_FLAG_SQL}"                 # ground truth: we did not
+        pred_pos = "s.astrotalk_flagged = 1"                    # AstroTalk flagged
+        pred_neg = "(s.astrotalk_flagged IS NULL OR s.astrotalk_flagged != 1)"
+        where.append({
+            "TP": f"{gt_pos} AND {pred_pos}",   # we flagged, AstroTalk flagged
+            "FN": f"{gt_pos} AND {pred_neg}",   # we flagged, AstroTalk missed
+            "FP": f"{gt_neg} AND {pred_pos}",   # we clean,   AstroTalk over-flagged
+            "TN": f"{gt_neg} AND {pred_neg}",   # we clean,   AstroTalk clean
+        }[reviewer_name])
     # Special "Locked" login: sees ONLY locked sessions, regardless of role
     # defaults or any explicit status filter.
-    if reviewer_name == "Locked":
+    elif reviewer_name == "Locked":
         where.append("s.review_status = 'LOCKED'")
     # Role-based default visibility — only when no explicit status filter is
     # set AND no flag-category filter is active (filtering by flag should show
@@ -235,7 +267,9 @@ def fetch_sessions_page(
             where.append("s.review_status NOT IN ('PENDING','LOCKED')")
 
     # L1 sees only sessions assigned to them; L2 may filter by a specific assignee.
-    if reviewer_role == "L1" and reviewer_name and reviewer_name != "Locked":
+    # Classification personas are not real assignees — never scope by them.
+    if (reviewer_role == "L1" and reviewer_name and reviewer_name != "Locked"
+            and reviewer_name not in _CLASSIFICATION_PERSONAS):
         where.append("s.assigned_to = ?"); params.append(reviewer_name)
     elif assigned_to:
         where.append("s.assigned_to = ?"); params.append(assigned_to)
@@ -245,12 +279,10 @@ def fetch_sessions_page(
 
     if language:
         where.append("LOWER(s.language_detected) LIKE ?"); params.append(f"%{language.lower()}%")
-    else:
-        # Default allowlist (unknown language is shown, not hidden).
-        where.append(
-            "(s.language_detected IS NULL OR LOWER(s.language_detected) IN (?,?,?))"
-        )
-        params.extend(_ALLOWED_LANGUAGES)
+    # No default language allowlist: sessions of ALL languages display. Previously
+    # only english/hindi/hinglish (plus unknown) were shown, so other-language
+    # sessions (e.g. marathi/tamil) were hidden from the dashboard unless the user
+    # explicitly typed that language into the filter.
 
     if session_type:
         where.append("s.session_type = ?"); params.append(session_type)

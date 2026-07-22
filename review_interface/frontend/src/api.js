@@ -171,6 +171,10 @@ export function getAudioViolationStats() {
   return request('/audio/stats/violations');
 }
 
+export function getAudioLanguages() {
+  return request('/audio/languages');
+}
+
 export function getAudioSessions(filters = {}) {
   const params = new URLSearchParams();
   const add = (k, v) => {
@@ -187,6 +191,8 @@ export function getAudioSessions(filters = {}) {
   add('duration_max', filters.duration_max);
   add('flags_min', filters.flags_min);
   add('flags_max', filters.flags_max);
+  add('pauses_min', filters.pauses_min);
+  add('pauses_max', filters.pauses_max);
   add('roles', filters.roles);
   add('reviewer', filters.reviewer);
   add('verdict', filters.verdict);

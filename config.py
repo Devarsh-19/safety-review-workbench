@@ -23,7 +23,7 @@ OUTPUTS_DIR        = BASE_DIR / "outputs"
 LLM_PROVIDER   = os.environ.get("LLM_PROVIDER", "claude")  # "claude" | "gemini" | "ollama"
 USE_CLAUDE_API = LLM_PROVIDER == "claude"    # backward-compat alias
 CLAUDE_MODEL   = "claude-sonnet-4-20250514"  # Claude model ID
-GEMINI_MODEL   = "gemini-2.5-flash"          # Gemini model ID
+GEMINI_MODEL   = "gemini-3-flash-preview"          # Gemini model ID
 # ANTHROPIC_API_KEY / GOOGLE_API_KEY must be set as environment variables
 
 # ---------------------------------------------------------------------------

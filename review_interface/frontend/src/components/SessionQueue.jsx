@@ -139,8 +139,8 @@ export default function SessionQueue({ reviewerName, reviewerRole, onSelectSessi
 
   // ── Dynamic column list — L2 gets an 'Assigned To' column after Session ID
   const COLS = reviewerRole === 'L2'
-    ? ['Session ID', 'Assigned To', 'Verdict', 'AstroTalk', 'Flags', 'LLM Flags', 'Manual Flags', 'Language', 'Type', 'Duration', 'Turns', 'Status', 'Reviewer', 'Action']
-    : ['Session ID', 'Verdict', 'AstroTalk', 'Flags', 'LLM Flags', 'Manual Flags', 'Language', 'Type', 'Duration', 'Turns', 'Status', 'Reviewer', 'Action'];
+    ? ['Session ID', 'Assigned To', 'Severity', 'AstroTalk', 'Flags', 'LLM Flags', 'Manual Flags', 'Language', 'Type', 'Duration', 'Turns', 'Status', 'Reviewer', 'Action']
+    : ['Session ID', 'Severity', 'AstroTalk', 'Flags', 'LLM Flags', 'Manual Flags', 'Language', 'Type', 'Duration', 'Turns', 'Status', 'Reviewer', 'Action'];
 
   // ── Data fetching ──────────────────────────────────────────────────────
 
@@ -417,11 +417,11 @@ export default function SessionQueue({ reviewerName, reviewerRole, onSelectSessi
           </span>
 
           <select style={selectSt} value={verdictFilter} onChange={(e) => setVerdictFilter(e.target.value)}>
-            <option value="">All Verdicts</option>
-            <option value="SEVERE">SEVERE</option>
-            <option value="FLAGGED">FLAGGED</option>
+            <option value="">All Severities</option>
+            <option value="HIGH">HIGH</option>
+            <option value="MEDIUM">MEDIUM</option>
+            <option value="LOW">LOW</option>
             <option value="CLEAN">CLEAN</option>
-            <option value="UNPROCESSED">UNPROCESSED</option>
           </select>
 
           <select style={selectSt} value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
@@ -702,7 +702,7 @@ export default function SessionQueue({ reviewerName, reviewerRole, onSelectSessi
                       style={filterInputSt('id')} />
                   </th>
                   {reviewerRole === 'L2' && <th style={{ padding: '4px 8px' }} />/* Assigned To */}
-                  <th style={{ padding: '4px 8px' }} />{/* Verdict */}
+                  <th style={{ padding: '4px 8px' }} />{/* Severity */}
                   <th style={{ padding: '4px 8px', fontWeight: 'normal' }}>{/* AstroTalk */}
                     <select value={colFilterAstro} onChange={(e) => setColFilterAstro(e.target.value)}
                       style={filterInputSt('astro')}>
@@ -809,8 +809,8 @@ export default function SessionQueue({ reviewerName, reviewerRole, onSelectSessi
                           <span style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
                             <span style={{
                               width: 6, height: 6, borderRadius: '50%', flexShrink: 0,
-                              background: s.overall_verdict === 'SEVERE' ? C.severeText
-                                : s.overall_verdict === 'FLAGGED' ? C.flaggedText : C.cleanText,
+                              background: s.overall_verdict === 'HIGH' ? C.severeText
+                                : s.overall_verdict === 'MEDIUM' ? C.flaggedText : C.cleanText,
                             }} />
                             <span style={{ fontFamily: MONO, fontSize: 12 }}>{s.flag_count}</span>
                           </span>
@@ -823,8 +823,8 @@ export default function SessionQueue({ reviewerName, reviewerRole, onSelectSessi
                           <span style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
                             <span style={{
                               width: 6, height: 6, borderRadius: '50%', flexShrink: 0,
-                              background: s.overall_verdict === 'SEVERE' ? C.severeText
-                                : s.overall_verdict === 'FLAGGED' ? C.flaggedText : C.cleanText,
+                              background: s.overall_verdict === 'HIGH' ? C.severeText
+                                : s.overall_verdict === 'MEDIUM' ? C.flaggedText : C.cleanText,
                             }} />
                             <span style={{ fontFamily: MONO, fontSize: 12 }}>{s.llm_flag_count}</span>
                           </span>
