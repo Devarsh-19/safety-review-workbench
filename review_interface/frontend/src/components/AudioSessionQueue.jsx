@@ -549,14 +549,15 @@ export default function AudioSessionQueue({ reviewerName, reviewerRole, onSelect
   const countFp = stats?.count_fp ?? 0;
   const countFn = stats?.count_fn ?? 0;
   const countTn = stats?.count_tn ?? 0;
-  const totalReviewedEval = countTp + countFp + countFn + countTn;
-  // "at_flag = True" population = sessions AstroTalk flagged = TP + FP.
-  // True Positive % is therefore precision: TP / (TP + FP).
+  // Percentages are column-wise within the confusion matrix so each pair sums to 100%.
+  // "AstroTalk Flagged" column = TP + FP: TP% = precision, FP% = false discovery rate.
   const totalAtFlag = countTp + countFp;
+  // "AstroTalk Clean" column = FN + TN: TN% = negative predictive value, FN% = false omission rate.
+  const totalAtClean = countFn + countTn;
   const pctTp = totalAtFlag ? ((countTp / totalAtFlag) * 100).toFixed(2) : '0.00';
-  const pctFp = totalReviewedEval ? ((countFp / totalReviewedEval) * 100).toFixed(2) : '0.00';
-  const pctFn = totalReviewedEval ? ((countFn / totalReviewedEval) * 100).toFixed(2) : '0.00';
-  const pctTn = totalReviewedEval ? ((countTn / totalReviewedEval) * 100).toFixed(2) : '0.00';
+  const pctFp = totalAtFlag ? ((countFp / totalAtFlag) * 100).toFixed(2) : '0.00';
+  const pctFn = totalAtClean ? ((countFn / totalAtClean) * 100).toFixed(2) : '0.00';
+  const pctTn = totalAtClean ? ((countTn / totalAtClean) * 100).toFixed(2) : '0.00';
 
   const classReportCells = [
     { label: 'True Positive', sub: 'GT Flagged - AstroTalk Flagged', val: countTp, pct: pctTp, color: C.flaggedText },
