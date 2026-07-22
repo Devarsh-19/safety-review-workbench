@@ -189,8 +189,9 @@ def build_session_count_sql(flagged_only: bool = False) -> str:
 # The audio export uses the EXACT SAME columns/names as the chat export (HEADER),
 # so the two CSVs line up 1:1. The audio schema is mapped onto those column names:
 #   session_id  <- audio_sessions.s_id      turn_id     <- audio_segments.seg_id
-#   language    <- audio_sessions.lang      timestamp   <- "ts_start | ts_end"
-#     (audio_segments span, both in seconds; blank for a session with no segments)
+#   language    <- audio_sessions.lang      timestamp   <- "HH:MM:SS | HH:MM:SS"
+#     (audio_segments ts_start | ts_end, formatted to match the review UI's
+#     formatTime; blank for a session with no segments)
 #   speaker     <- the DB role (ASTROLOGER / USER): audio_segments.speaker holds a
 #     diarization label (SPEAKER_1/SPEAKER_2), so labels are ranked per session
 #     (1st -> speaker1_role, 2nd -> speaker2_role) exactly as store/audio_db.py
@@ -207,6 +208,14 @@ def build_session_count_sql(flagged_only: bool = False) -> str:
 # per-segment transcript, so there is genuinely no text to export for it. A
 # distinct marker (rather than "") makes clear the cell is empty by data, not bug.
 _AUDIO_NO_TEXT = "[no transcript]"
+
+def _hms_sql(col: str) -> str:
+    """SQL that renders a seconds column as HH:MM:SS, matching the review UI's
+    formatTime (AudioSessionViewer.jsx): round to whole seconds, then zero-pad
+    hours/minutes/seconds. NULL rounds to 0 -> '00:00:00'."""
+    sec = f"CAST(ROUND(COALESCE({col}, 0)) AS INTEGER)"
+    return f"printf('%02d:%02d:%02d', {sec} / 3600, ({sec} % 3600) / 60, {sec} % 60)"
+
 
 # Normalise the legacy SEVERE verdict to FLAGGED (store/audio_db.py parity).
 _AUDIO_VERDICT = "CASE WHEN {c} = 'SEVERE' THEN 'FLAGGED' ELSE {c} END"
@@ -278,8 +287,7 @@ def build_audio_export_sql(flagged_only: bool = False) -> str:
                           ELSE NULL END,
                t.speaker)                               AS speaker,
            CASE WHEN t.seg_id IS NULL THEN ''
-                ELSE COALESCE(CAST(t.ts_start AS TEXT), '') || ' | '
-                     || COALESCE(CAST(t.ts_end AS TEXT), '')
+                ELSE {_hms_sql('t.ts_start')} || ' | ' || {_hms_sql('t.ts_end')}
            END                                          AS timestamp,
            CASE WHEN a.texts IS NOT NULL THEN a.texts
                 WHEN t.seg_id IS NOT NULL THEN '{_AUDIO_NO_TEXT}'
